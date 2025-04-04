@@ -147,9 +147,8 @@ impl MMU {
             0xC100..=0xCFFF => {
                 if lcram == 1 {
                     self.lcram[bank + (ramrd << 1)].read_byte(addr.wrapping_sub(0xC100))
-                // ✅ Ensure LC RAM used
                 } else {
-                    self.rom[altrom].read_byte(addr.wrapping_sub(0xC000)) // ✅ Ensure correct ROM offset
+                    self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
                 }
             }
 

@@ -1,0 +1,271 @@
+Display Soft switches:
+
+Name, Action, Hex, Function
+AltChar, W, $CO0E, Off: Display text using primary character set
+AltChar, W, $COOF, On: Display text using alternate character set
+RdAltChar, R7, $C01E, Read AltChar switch (1 = on)
+80Col, W, $C00C, Off: Display 40 columns
+80Col, W, $C00D, On: Display 80 columns
+Rd80Col, R7, $C01F, Read 80Col switch (1 = on)
+--80Store, W, $C000, Off: Cause Page2 on to select auxiliary RAM
+--8OStore, W, $C001, On: Allow Page2 to switch main RAM areas
+Rd80Store, R7, $C018, Read 80Store switch (1 = on)
+Page2, R/W, $C054, Off: Select Page 1
+Page2, R/W, $C055, On: Select Page 1X (80Store on) or 2
+RdPage2, R7, $C01C, Read Page2 switch (1 = on)
+TEXT, R/W, $C050, Off: Display graphics or (if MIXED on) mixed
+TEXT, R/W, $C051, On: Display text
+RdTEXT, R7, $C01A, Read TEXT switch (1 = on)
+MIXED, R/W, $C053, Off: Display only text or only graphics
+MIXED, R/W, $C054, On: (If TEXT off) display text and graphics
+RdMIXED, R7, $C01B, Read MIXED switch (1 = on)
+HiRes, R/W, $C057, Off: (If TEXT off) display low-resolution graphics
+HiRes, R/W, $C058, On: (If TEXT off) display high-resolution or (if DHiRes on) double high-resolution graphics
+RdHiRes, R7, $C01D, Read HiRes switch (1 = on)
+IOUDis, W, $C07E, On: Disable IOU access for addresses $C058 to $C05F; enable access to DHiRes switch
+IOUDis, W, $C07F, Off: Enable IOU access for addresses $C058 to $C05F; disable access to DHiRes switch (The firmware normally leaves lOUDis on. See also the following footnote: Reading or writing any address in the range $C070-$C07F also triggers the paddle timer and resets VBLInt (Chapter 9))
+RdIOUDis, R7, $C05E, On: (If IOUDis on) turn on double high-resolution (Reading or writing any address in the range $C070-$C07F also triggers the paddle timer and resets VBLInt (Chapter 9).)
+DHiRes, R/W, $C05F, Off: (If IOUDis on) turn off double high-resolution
+RdHiRes, R7, $C07F, Read DHiRes switch (1 = on), (Reading or writing any address in the range $C070-$C07F also triggers the paddle timer and resets VBLInt (Chapter 9).)
+
+Mouse Soft Switches:
+
+Name, Action, Hex, Function
+IOUDis, W, $C07E, On: Disable IOU access for addresses $C058 to $C05F; enable access to DHiRes switch (When lOUDis is on, $C058-$C05F do not affect mouse, and $C05E and $C05F become DHiRes (Table 5-8).)
+IOUDis, W, $C07F, Off: Enable IOU access for addresses $C058 to $C05F; disable access to DHiRes switch (When lOUDis is on, $C058-$C05F do not affect mouse, and $C05E and $C05F become DHiRes (Table 5-8).)
+RdIOUDis, R7, $C07E, ReaRead IOUDis switch (1 = off) (Read or write to $C07x also resets VBlInt and triggers paddle timers.)
+DisXY, R/W, $C058, Disable (mask) X0 and Y0 movement interrupts (Works only if LOUDis is off.)
+EnbXY, R/W, $C059, Enable (allow) XO and YO movement interrupts (Works only if LOUDis is off.)
+RdXYMsk, R7, $C040, Read status of XO/YO interrupt mask (1 = mask on)
+RstXY, R, $C048, Reset XO/YO interrupt flags
+X0Edge, R/W, $C050, Select rising edge of XO for interrupt (Works only if LOUDis is off.)
+X0Edge, R/W, $C05D, Select falling edge of XO for interrupt (Works only if LOUDis is off.)
+RdX0Edge, R7, $C042, Read status of X0 edge selector (1 = falling)
+RstXInt, R, $C015, Reset mouse X0 interuppt flag
+Y0Edge, R/W, $C05E, Select rising edge of Y0 for interrupt (Works only if LOUDis is off.)
+Y0Edge, R/W, $C05F, Select falling edge of Y0 for interrupt (Works only if LOUDis is off.)
+RdY0Edge, R7, $C043, Read status of Y0 edge selector (1 = falling)
+RstYInt, R, $C017, Reset mouse Y0 interrupt flag
+DisVBl, R/W, $C05A, Disable (mask) VBL interrupts (Works only if LOUDis is off.)
+EnVBl, R/W, $C05B, Enable (allow) VBL interrupts (Works only if LOUDis is off.)
+RdVBlMask, R7, $C041, Read status of VBL interrupt mask (1 = mask on)
+RstVBl, R, $C019, Read and then reset VBlInt flag
+PTrig, R/W, $C070, Reset VBlInt flag; trigger paddle timer
+RdBtn0, R7, $C061, Read first mouse button status (1 = pressed) This location is also the Open Apple key (Table 4-1).
+Rd63, R7, $C063, Read second mouse button status (0 = pressed) This is also the location of the Shift-key mod (Appendix F).
+MouX1, R7, $C066, Read status of X1 (mouse X direction) (1 = high)
+MouY1, R7, $C067, Read status of Y1 (mouse Y direction) (1 = high)
+
+Bank Selector Soft Switches:
+
+Action, Hex, Decimal, Function
+-, R, $C080, 49280, Read RAM; no write; use $D000 bank 2
+-, RR, $C081, 49281, Read ROM; write RAM; use$DOOO bank 2
+-, R, $C082, 49282, Read ROM; no write; use $D000 bank 2
+-, RR, $C083, 49283, Read and write RAM; use $D000 bank 2
+-, R, $C088, 49288, Read RAM; no write; use $D000 bank 1
+-, RR, $C089, 49289, Read ROM; write RAM; use$D000 bank 1
+-, R, $C08A, 49290, Read ROM; no write; use $DOO0 bank 1
+-, RR, $C08B, 49291, Read and write RAM; use $D000 bank 1
+
+RdBnk2, R7, $C011, 49169, Read whether $D000 bank 2 (1) or bank 1 (0)
+RdLCRAM, R7, $C012, 49170, Read RAM (1) or ROM (0)
+RdAltZP, R7, $C016, 49174, Read whether auxiliary (1) or main (0) bank
+
+AltZP, W, $C008, 49160, Off: Use main bank, page $00 and page $01
+AltZP, W, $C009, 49161, On: Use auxiliary bank, page $00 and page $01
+
+
+48K memory switches:
+Note: 8OStore must be off to switch all memory in this range, including display memory (Table 2-6).
+
+RAMRd, W, $C002, 49154, Off: Read main 48K RAM
+RAMRd, W, $C003, 49155, On: Read auxillary 48K RAM
+RdRAMRd, R7, $C013, 49171, Read whether main (0) or aux (1)
+RAMWrt, W, $C004, 49156, Off: Write to main 48K RAM
+RAMWrt, W, $C005, 49157, On: Write to auxiliary 48K RAM
+RdRAMWrt, R7, $C014, 49172, Read whether main (0) or aux (1)
+
+
+
+kegs:Jon Relay's Apple II Info Archives
+I/O Memory
+Comp:  O = Apple II+  E = Apple IIe  C = Apple IIc  G = Apple IIgs
+Act:   R = Read       W = Write      7 = Bit 7      V = Value
+
+Address    Name         Comp Act  Description
+
+* C000 49152 KBD          OECG  R   Last Key Pressed + 128
+*            80STOREOFF    ECG W    Use $C002-$C005 for Aux Memory
+* C001 49153 80STOREON     ECG W    Use PAGE2 for Aux Memory
+* C002 49154 RDMAINRAM     ECG W    If 80STORE Off: Read Main Mem $0200-$BFFF
+* C003 49155 RDCARDRAM     ECG W    If 80STORE Off: Read Aux Mem $0200-$BFFF
+* C004 49156 WRMAINRAM     ECG W    If 80STORE Off: Write Main Mem $0200-$BFFF
+* C005 49157 WRCARDRAM     ECG W    If 80STORE Off: Write Aux Mem $0200-$BFFF
+* C006 49158 SETSLOTCXROM  E G W    Peripheral ROM ($C100-$CFFF)
+* C007 49159 SETINTCXROM   E G W    Internal ROM ($C100-$CFFF)
+* C008 49160 SETSTDZP      ECG W    Main Stack and Zero Page
+* C009 49161 SETALTZP      ECG W    Aux Stack and Zero Page
+* C00A 49162 SETINTC3ROM   E G W    ROM in Slot 3
+* C00B 49163 SETSLOTC3ROM  E G W    ROM in Aux Slot
+* C00C 49164 CLR80VID      ECG W    40 Columns
+* C00D 49165 SET80VID      ECG W    80 Columns
+* C00E 49166 CLRALTCHAR    ECG W    Primary Character Set
+* C00F 49167 SETALTCHAR    ECG W    Alternate Character Set
+C010 49168 KBDSTRB      OECG WR   Keyboard Strobe
+* C011 49169 RDLCBNK2      ECG  R7  Status of Selected $Dx Bank
+* C012 49170 RDLCRAM       ECG  R7  Status of $Dx ROM / $Dx RAM
+* C013 49171 RDRAMRD       ECG  R7  Status of Main/Aux RAM Reading
+* C014 49172 RDRAMWRT      ECG  R7  Status of Main/Aux RAM Writing
+C015 49173 RDCXROM       E G  R7  Status of Periph/ROM Access
+           RSTXINT        C   R   Reset Mouse X0 Interrupt
+* C016 49174 RDALTZP       ECG  R7  Status of Main/Aux Stack and Zero Page
+C017 49175 RDC3ROM       E G  R7  Status of Slot 3/Aux Slot ROM
+           RSTYINT        C   R   Reset Mouse Y0 Interrupt
+* C018 49176 RD80STORE     ECG  R7  Status of $C002-$C005/PAGE2 for Aux Mem
+C019 49177 RDVBL         E G  R7  Vertical Blanking (E:1=drawing G:0=drawing)
+           RSTVBL         C   R   Reset Vertical Blanking Interrupt
+* C01A 49178 RDTEXT        ECG  R7  Status of Text/Graphics
+* C01B 49179 RDMIXED       ECG  R7  Status of Full Screen/Mixed Graphics
+* C01C 49180 RDPAGE2       ECG  R7  Status of Page 1/Page 2
+* C01D 49181 RDHIRES       ECG  R7  Status of LoRes/HiRes
+* C01E 49182 RDALTCHAR     ECG  R7  Status of Primary/Alternate Character Set
+* C01F 49183 RD80VID       ECG  R7  Status of 40/80 Columns
+* C020 49184 TAPEOUT      OE    R   Toggle Cassette Tape Output
+* C021 49185 MONOCOLOR       G W 7  Color/Mono
+* C022 49186 TBCOLOR         G    V Screen Color: Low Nibble is BG, High Nibble is Text
+* C023 49187 VGCINT          G    V Video Graphics Controller Interrupts:
+                                   b0-2=ext,scan,1sec enable b4-7=ext,scan,1sec,VGC
+* C024 49188 MOUSEDATA       G    V Mouse Data: High Bit is Button, Other Bits are Movement
+* C025 49189 KEYMODREG       G    V Modifier Keys: Bit 7: Command, Bit 6: Option,
+                                                 Bit 5: NotUsed, Bit 4: Keypad,
+                                                 Bit 3: Repeat,  Bit 2: Caps,
+                                                 Bit 1: Control, Bit 0: Shift
+* C026 49190 DATAREG         G    V ADB Command/Data b0-2=# b3=valid b4=clr buf
+                                                   b5=reboot b6=abort b7=status
+* C027 49191 KMSTATUS        G    V ADB Status: b0=cmdFull b1=mouseX b2=keyIntr b3=key
+                                              b4=cmdIntr b5=data 6=mouseInt 7=mouse
+* C028 49192 ROMBANK      ????      ROM bank select toggle
+* C029 49193 NEWVIDEO        G    V New Video: 129=SHR, 1=None, Bit 6=Linearize, Bit 5=BW
+* C02B 49195 LANGSEL         G      Bit 3=Secondary Bit 4=50Hz Bits 5-7=Display Language
+* C02C 49196 CHARROM      ????      Addr for test mode read of character ROM
+* C02D 49197 SLTROMSEL       G      Slot Register; Bits 1-7=use slot card
+* C02E 49198 VERTCNT      ????      Addr for read of video cntr bits V5-VB
+* C02F 49199 HORIZCNT     ????      Addr for read of video cntr bits VA-H0
+C030 48200 SPKR         OECG  R   Toggle Speaker
+* C031 49201 DISKREG         G      Disk Interface: Bit 6=3.5 Bit 7=RWHead 1
+* C032 49202 SCANINT         G    V VGC Interrupt-Clear
+* C033 49203 CLOCKDATA       G      Interface to Battery RAM (undocumented)
+* C034 49204 CLOCKCTL        G      b0-3=borderColor b5=stopBit b6=read b7=start
+* C035 49205 SHADOW          G      Inhibit Shadowing: Bit 6: I/O Memory, Bit 5: Alternate
+                                                     Display Mode, Bit 4: Auxilary HGR,
+                                                     Bit 3: Super HiRes, Bit 2: HiRes
+                                                     Page 2, Bit 1: HiRes Page 1,
+                                                     Bit 0: Text/LoRes
+* C036 49206 CYAREG          G      Bits 0-3=Disk Detect Bit 4=Shadow All Banks Bit 7=Fast
+* C037 49207 BMAREG          G      Bit 5=BW
+* C038 49208 SCCBREG         G      SCC Command Channel B
+* C039 49209 SCCAREG         G      SCC Command Channel A
+* C03A 49210 SCCBDATA        G      SCC Data Channel B
+* C03B 49211 SCCADATA        G      SCC Data Channel A
+* C03C 49212 SOUNDCTL        G    V Sound Settings: Bits 0-3=Volume Bit 5=AutoIncr
+                                                  Bit 6=RAM Bit 7=Busy
+* C03D 49213 SOUNDDATA       G      Sound Data
+* C03E 49214 SOUNDADRL       G      Address Pointer L
+* C03F 49215 SOUNDADRH       G      Address Pointer H
+* C040 49216 STROBE       OE    R   Game I/O Strobe Output
+           RDXYMSK        C   R7  Read X0/Y0 Interrupt
+C041 49217 RDVBLMSK       C   R7  Read VBL Interrupt
+C042 49218 RDX0EDGE       C   R7  Read X0 Edge Selector
+C043 49219 RDY0EDGE       C   R7  Read Y0 Edge Selector
+* C044 49220 MMDELTAX        G    V Mega II Mouse Delta Movement X
+* C045 49221 MMDELTAY        G    V Mega II Mouse Delta Movement Y
+C046 49222 DIAGTYPE     ????      Self or Burn-In diagdistics: Bit 7=burn-in diag
+           INTFLAG      ????      b0=IRQ b1=MMmov b2=MMbut b3=VBL b4=qsec
+                                  b5=AN3 b6=mouse was down b7=mouse is down
+C047 49223 CLRVBLINT    ????      Clear VBL Interrupt
+C048 49224 CLRXYINT     ????      Clear MM Interrupt
+C048 49224 RSTXY          C  WR   Reset X and Y Interrupts
+C04F 49231 EMUBYTE           WR   Emulation ID byte: write once, then read once for program
+                                      being used, read again for version number.
+                                      $FE=Bernie, $16=Sweet16, $4B=KEGS, $AB=Appleblossom
+* C050 49232 TXTCLR       OECG WR   Display Graphics
+* C051 49233 TXTSET       OECG WR   Display Text
+* C052 49234 MIXCLR       OECG WR   Display Full Screen
+* C053 49235 MIXSET       OECG WR   Display Split Screen
+C054 49236 TXTPAGE1     OECG WR   Display Page 1
+C055 49237 TXTPAGE2     OECG WR   If 80STORE Off: Display Page 2
+                         ECG WR   If 80STORE On: Read/Write Aux Display Mem
+C056 49238 LORES        OECG WR   Display LoRes Graphics
+C057 49239 HIRES        OECG WR   Display HiRes Graphics
+C058 49240 CLRAN0       OE G WR   If IOUDIS off: Annunciator 0 Off
+           DISXY          C  WR   If IOUDIS on: Mask X0/Y0 Move Interrupts
+C059 49241 SETAN0       OE G WR   If IOUDIS off: Annunciator 0 On
+           ENBXY          C  WR   If IOUDIS on: Allow X0/Y0 Move Interrupts
+C05A 49242 CLRAN1       OE G WR   If IOUDIS off: Annunciator 1 Off
+           DISVBL         C  WR   If IOUDIS on: Disable VBL Interrupts
+C05B 49243 SETAN1       OE G WR   If IOUDIS off: Annunciator 1 On
+           ENVBL          C  WR   If IOUDIS on: Enable VBL Interrupts
+C05C 49244 CLRAN2       OE G WR   If IOUDIS off: Annunciator 2 Off
+           X0EDGE         C  WR   If IOUDIS on: Interrupt on X0 Rising
+C05D 49245 SETAN2       OE G WR   If IOUDIS off: Annunciator 2 On
+           X0EDGE         C  WR   If IOUDIS on: Interrupt on X0 Falling
+C05E 49246 CLRAN3       OE G WR   If IOUDIS off: Annunciator 3 Off
+           Y0EDGE         C  WR   If IOUDIS on: Interrupt on Y0 Rising
+           DHIRESON      ECG WR   In 80-Column Mode: Double Width Graphics
+C05F 49247 SETAN3       OE G WR   If IOUDIS off: Annunciator 3 On
+           Y0EDGE         C  WR   If IOUDIS on: Interrupt on Y0 Falling
+           DHIRESOFF     ECG WR   In 80-Column Mode: Single Width Graphics
+C060 49248 TAPEIN       OE    R7  Read Cassette Input
+                          C   R7  Status of 80/40 Column Switch
+           BUTN3           G  R7  Switch Input 3
+C061 49249 RDBTN0        ECG  R7  Switch Input 0 / Open Apple
+C062 49250 BUTN1         E G  R7  Switch Input 1 / Solid Apple
+C063 49251 RD63          E G  R7  Switch Input 2 / Shift Key
+                          C   R7  Bit 7 = Mouse Button Not Pressed
+C064 49252 PADDL0       OECG  R7  Analog Input 0
+C065 49253 PADDL1       OECG  R7  Analog Input 1
+C066 49254 PADDL2       OE G  R7  Analog Input 2
+           RDMOUX1        C   R7  Mouse Horiz Position
+C067 49255 PADDL3       OE G  R7  Analog Input 3
+           RDMOUY1        C   R7  Mouse Vert Position
+C068 49256 STATEREG        G    V b0=INTCXROM b1=ROMBANK b2=LCBNK2 b3=RDROM
+                                  b4=RAMWRT b5=RAMRD b6=PAGE2 b7=ALTZP
+C06D 49261 TESTREG      ????      Test Mode Bit Register
+C06E 49262 CLRTM        ????      Clear Test Mode
+C06F 49263 ENTM         ????      Enable Test Mode
+C070 49264 PTRIG         E    R   Analog Input Reset
+                          C  WR   Analog Input Reset + Reset VBLINT Flag
+C073 49267 BANKSEL       ECG W    Memory Bank Select for > 128K
+C077 49271 BLOSSOM           W    Appleblossom Special I/O Address
+                                      $C1=Install clock driver, $CC=Get time in input
+                                      buffer, $CF=get time in ProDOS global page.
+C078 49272                C  W    Disable IOU Access
+C079 49273                C  W    Enable IOU Access
+C07E 49278 IOUDISON      EC  W    Disable IOU
+           RDIOUDIS      EC   R7  Status of IOU Disabling
+C07F 49279 IOUDISOFF     EC  W    Enable IOU
+           RDDHIRES      EC   R7  Status of Double HiRes
+C080 49280              OECG  R   Read RAM bank 2; no write
+C081 49281 ROMIN        OECG  RR  Read ROM; write RAM bank 2
+C082 49282              OECG  R   Read ROM; no write
+C083 49283 LCBANK2      OECG  RR  Read/write RAM bank 2
+C084 49284              OECG  R   Read RAM bank 2; no write
+C085 49285 ROMIN        OECG  RR  Read ROM; write RAM bank 2
+C086 49286              OECG  R   Read ROM; no write
+C087 49287 LCBANK2      OECG  RR  Read/write RAM bank 2
+C088 49288              OECG  R   Read RAM bank 1; no write
+C089 49289              OECG  RR  Read ROM; write RAM bank 1
+C08A 49290              OECG  R   Read ROM; no write
+C08B 49291              OECG  RR  Read/write RAM bank 1
+C08C 49292              OECG  R   Read RAM bank 1; no write
+C08D 49293              OECG  RR  Read ROM; write RAM bank 1
+C08E 49294              OECG  R   Read ROM; no write
+C08F 49295              OECG  RR  Read/write RAM bank 1
+C090--C09F                     slot 1
+C0A0--C0AF                     slot 2
+C0B0--C0BF                     slot 3
+C0C0--C0CF                     slot 4
+C0D0--C0DF                     slot 5
+C0E0--C0EF                     slot 6
+C0F0--C0FF                     slot 7
