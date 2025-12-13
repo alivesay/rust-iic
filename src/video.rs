@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use crate::{iou::IOU, mmu::MMU, util::apple_iic_font_index};
 
-const CHAR_ROM: &[u8; 4096] = include_bytes!("../video.bin");
+const CHAR_ROM: &[u8; 1024] = include_bytes!("../font.bin");
 
 pub const TEXT_MODE_BASE_ADDRESSES: [u16; 24] = [
     0x0400, 0x0480, 0x0500, 0x0580, 0x0600, 0x0680, 0x0700, 0x0780, 0x0428, 0x04A8, 0x0528, 0x05A8,
@@ -24,6 +24,7 @@ impl VideoModeMask {
 
 pub struct VideoMode;
 #[rustfmt::skip]
+#[allow(dead_code)]
 impl VideoMode {
     pub const TEXT: u8       = VideoModeMask::TEXT;
     pub const LORES: u8      = VideoModeMask::LORES;
@@ -50,6 +51,8 @@ pub struct Video {
     height: usize,
     //  video_mode: Cell<u8>,
     extra: Cell<u8>,
+    frame_count: usize,
+    pub monochrome: bool,
 }
 
 impl Video {
@@ -62,9 +65,16 @@ impl Video {
             height,
             //  video_mode: Cell::new(VideoMode::TEXT),
             extra: Cell::new(0),
+            frame_count: 0,
+            monochrome: false,
         }
     }
 
+    pub fn set_monochrome(&mut self, enabled: bool) {
+        self.monochrome = enabled;
+    }
+
+    #[allow(dead_code)]
     fn get_display_address(&self, video_mode: u8, is_80store: bool, addr: u16) -> u16 {
         let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
         let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
@@ -100,62 +110,50 @@ impl Video {
     }
 
     pub fn update(&mut self, iou: &IOU, mmu: &MMU) -> bool {
+        self.frame_count = self.frame_count.wrapping_add(1);
+        
+        // clear
+        self.framebuffer.fill(0);
+
         let video_mode = iou.video_mode.get();
-        let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
+        
+        if self.extra.get() != video_mode {
+             self.extra.set(video_mode);
+        }
+
+        let _is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
         let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
         let is_dhires = check_bits_u8!(video_mode, VideoModeMask::DHIRES);
         let lo_res_mode = check_bits_u8!(video_mode, VideoModeMask::LORES);
         let is_hires = check_bits_u8!(video_mode, VideoModeMask::HIRES);
         let mixed_mode = check_bits_u8!(video_mode, VideoModeMask::MIXED);
         let text_mode = check_bits_u8!(video_mode, VideoModeMask::TEXT);
-        let is_80store: bool = iou.is_80store.get();
+        let _is_80store: bool = iou.is_80store.get();
 
-        let new_width = if text_mode {
-            if is_80col {
-                560
-            } else {
-                280
-            }
-        } else if lo_res_mode {
-            280
-        } else if is_hires {
-            if mixed_mode {
-                560
-            } else {
-                560
-            }
-        } else if mixed_mode {
-            280
-        } else {
-            560
-        };
-
-        let new_height = if text_mode {
-            192
-        } else if lo_res_mode {
-            48
-        } else if is_hires {
-            if mixed_mode {
-                384
-            } else {
-                192
-            }
-        } else if mixed_mode {
-            192
-        } else {
-            192
-        };
+        let new_width = 560;
+        let new_height = 384;
 
         if new_width != self.width || new_height != self.height {
-            println!(
-                "Resizing framebuffer from {}x{} to {}x{}",
-                self.width, self.height, new_width, new_height
-            );
             self.resize_framebuffer(new_width, new_height);
         }
 
         if text_mode {
-            //self.dump_text_vram(iou, mmu);
+            self.render_text_mode(iou, mmu);
+        } else if is_hires {
+            if is_dhires && is_80col {
+                self.render_double_hires_mode(iou, mmu);
+            } else {
+                self.render_hires_mode(iou, mmu);
+            }
+            if mixed_mode {
+                self.render_text_mode_overlay(iou, mmu);
+            }
+        } else if lo_res_mode {
+            self.render_lores_mode(iou, mmu);
+            if mixed_mode {
+                self.render_text_mode_overlay(iou, mmu);
+            }
+        } else {
             self.render_text_mode(iou, mmu);
         }
 
@@ -168,177 +166,189 @@ impl Video {
         self.framebuffer = vec![0; new_width * new_height * 4];
     }
 
-    fn read_text_memory(&self, iou: &IOU, mmu: &MMU, addr: u16) -> u8 {
-        let video_mode = iou.video_mode.get();
-        let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
-        let is_80store = iou.is_80store.get();
 
-        let real_addr = if is_page2 {
-            if !is_80store {
-                addr.wrapping_add(0x800)
-            } else {
-                addr.wrapping_add(0x400)
-            }
-        } else {
-            addr.wrapping_add(0x400)
-        };
-
-        mmu.read_aux_byte(real_addr)
-    }
-
-    fn read_aux_text_memory(&self, iou: &IOU, mmu: &MMU, addr: u16) -> u8 {
-        let video_mode = iou.video_mode.get();
-        let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
-        let is_80store = iou.is_80store.get();
-
-        let real_addr = if is_page2 {
-            if !is_80store {
-                addr.wrapping_add(0x800)
-            } else {
-                addr.wrapping_add(0x400)
-            }
-        } else {
-            addr.wrapping_add(0x400)
-        };
-
-        mmu.read_aux_byte(real_addr)
-    }
 
     fn read_hires_memory(&self, iou: &IOU, mmu: &MMU, addr: u16) -> u8 {
         let video_mode = iou.video_mode.get();
         let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
         let is_80store = iou.is_80store.get();
 
-        let real_addr = if is_page2 {
-            if !is_80store {
-                addr.wrapping_add(0x4000)
-            } else {
-                addr.wrapping_add(0x2000)
-            }
+        if is_80store {
+             let real_addr = addr.wrapping_add(0x2000);
+             if is_page2 {
+                 mmu.read_aux_byte(real_addr)
+             } else {
+                 mmu.read_main_byte(real_addr)
+             }
         } else {
-            addr.wrapping_add(0x2000)
-        };
-
-        mmu.read_byte(iou, real_addr)
+             if is_page2 {
+                 mmu.read_main_byte(addr.wrapping_add(0x4000))
+             } else {
+                 mmu.read_main_byte(addr.wrapping_add(0x2000))
+             }
+        }
+    }
+   
+    pub fn render_text_mode(&mut self, iou: &IOU, mmu: &MMU) {
+        self.render_text_rows(iou, mmu, 0..24);
     }
 
-    fn read_aux_hires_memory(&self, iou: &IOU, mmu: &MMU, addr: u16) -> u8 {
+    #[allow(dead_code)]
+    pub fn render_text_mode_overlay(&mut self, iou: &IOU, mmu: &MMU) {
+        self.render_text_rows(iou, mmu, 20..24);
+    }
+
+    fn render_text_rows(&mut self, iou: &IOU, mmu: &MMU, rows: std::ops::Range<u16>) {
         let video_mode = iou.video_mode.get();
+        let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
+        let is_altchar = check_bits_u8!(video_mode, VideoModeMask::ALTCHAR);
         let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
         let is_80store = iou.is_80store.get();
 
-        let real_addr = if is_page2 {
-            if !is_80store {
-                addr.wrapping_add(0x4000)
-            } else {
-                addr.wrapping_add(0x2000)
-            }
-        } else {
-            addr.wrapping_add(0x2000)
-        };
+        // In 80-column mode, we draw single-width characters (7 pixels).
+        // In 40-column mode, we draw double-width characters (14 pixels).
+        let double_width = !is_80col;
 
-        mmu.read_aux_byte(real_addr)
-    }
-
-    fn read_text_memory_mock(&self, addr: u16) -> u8 {
-        let base_char = (addr & 0xFF) as u8;
-        let inverse = if (addr & 0x100) != 0 { 0x80 } else { 0x00 };
-
-        base_char | inverse
-    }
-
-    fn get_font_offset(&self, char_code: u8) -> usize {
-        match char_code {
-            0x00..=0x1F => ((char_code + 0x40) as usize) * 8, // Symbols (inverse)
-            0x20..=0x3F => ((char_code - 0x20) as usize + 2) * 8, // Normal Symbols
-            0x40..=0x5F => ((char_code - 0x40) as usize + 0) * 8, // Uppercase Letters
-            0x60..=0x7F => ((char_code - 0x60) as usize + 6) * 8, // Lowercase
-            0x80..=0x9F => ((char_code - 0x80) as usize + 8) * 8, // Inverse Uppercase
-            0xA0..=0xBF => ((char_code - 0xA0) as usize + 10) * 8, // Inverse Symbols
-            0xC0..=0xDF => ((char_code - 0xC0) as usize + 12) * 8, // Flash Uppercase
-            0xE0..=0xFF => ((char_code - 0xE0) as usize + 14) * 8, // Flash Lowercase
-            _ => 0,
-        }
-    }
-
-    pub fn dump_text_vram(&self, iou: &IOU, mmu: &MMU) {
-        // println!("--- Apple IIc Text VRAM Hex Dump ---");
-        // for (row, &base_addr) in TEXT_MODE_BASE_ADDRESSES.iter().enumerate() {
-        //     print!("{:02}: ", row);
-        //     for col in 0..40 {
-        //         let addr = base_addr + col;
-        //         let vram_byte = mmu.read_byte(iou, addr);
-        //         print!("{:02X} ", vram_byte);
-        //     }
-        //     println!();
-        // }
-        // println!("-----------------------------------");
-    }
-
-    pub fn render_text_mode(&mut self, iou: &IOU, mmu: &MMU) {
-        let video_mode = iou.video_mode.get();
-        let is_altchar = check_bits_u8!(video_mode, VideoModeMask::ALTCHAR);
-
-        for row in 0..24_u16 {
+        for row in rows {
             let row_base = TEXT_MODE_BASE_ADDRESSES[row as usize];
 
-            for col in 0..40_u16 {
-                let addr = row_base + col;
-                let mut vram_code = mmu.read_byte(iou, addr);
+            if is_80col {
+                for col_pair in 0..40_u16 {
+                    let addr = row_base + col_pair;
+                    
+                    // Even column (0, 2, 4...) -> AUX Memory
+                    let char_even = mmu.read_aux_byte(addr);
+                    self.draw_char(row, col_pair * 2, char_even, is_altchar, double_width);
 
-                // 0x00 as 0xA0 (blank space)
-                if vram_code == 0x00 {
-                    vram_code = 0xA0;
+                    // Odd column (1, 3, 5...) -> MAIN Memory
+                    let char_odd = mmu.read_main_byte(addr);
+                    self.draw_char(row, col_pair * 2 + 1, char_odd, is_altchar, double_width);
                 }
+            } else {
+                for col in 0..40_u16 {
+                    // Handle Page 2 offset if 80STORE is OFF
+                    let (effective_addr, use_aux) = if !is_80store && is_page2 {
+                        (row_base + 0x0400 + col, false)
+                    } else if is_80store && is_page2 {
+                        (row_base + col, true)
+                    } else {
+                        (row_base + col, false)
+                    };
 
-                let font_offset = apple_iic_font_index(vram_code, is_altchar);
-
-                for char_row in 0..8_u16 {
-                    let font_byte = CHAR_ROM[font_offset + char_row as usize].reverse_bits();
-                    let y = row * 8 + char_row;
-                    let x = col * 7;
-
-                    let mut rgba_row = [0u8; 7 * 4];
-
-                    for bit in 0..7 {
-                        let pixel_on = (font_byte >> (6 - bit)) & 1 != 0;
-                        let color = if pixel_on { 255 } else { 0 };
-
-                        let base_index = bit * 4;
-                        rgba_row[base_index] = color; // R
-                        rgba_row[base_index + 1] = color; // G
-                        rgba_row[base_index + 2] = color; // B
-                        rgba_row[base_index + 3] = 255; // A
-                    }
-
-                    let start_index = (y as usize * self.width + x as usize) * 4;
-                    let end_index = start_index + 7 * 4;
-
-                    if end_index <= self.framebuffer.len() {
-                        self.framebuffer[start_index..end_index].copy_from_slice(&rgba_row);
-                    }
+                    let vram_code = if use_aux {
+                        mmu.read_aux_byte(effective_addr)
+                    } else {
+                        mmu.read_main_byte(effective_addr)
+                    };
+                    self.draw_char(row, col, vram_code, is_altchar, double_width);
                 }
             }
         }
     }
 
-    pub fn read_aux_byte_mock(&self, addr: u16) -> u8 {
-        match addr & 0x3FF {
-            0x000..=0x07F => 0b00001111, // Cyan/Magenta alternating
-            0x080..=0x0FF => 0b11110000, // Yellow/Green alternating
-            0x100..=0x17F => 0b10101010, // Striped
-            0x180..=0x1FF => 0b01010101, // Striped inverse
-            _ => 0b11001100,             // Checkerboard pattern
+    fn draw_char(&mut self, row: u16, col: u16, char_code: u8, is_altchar: bool, double_width: bool) {
+        let mut vram_code = char_code;
+        // 0x00 as 0xA0 (blank space)
+        if vram_code == 0x00 {
+            vram_code = 0xA0;
+        }
+
+        let (font_offset, mut invert) = apple_iic_font_index(vram_code, is_altchar);
+
+        // Handle Hardware Flashing
+        // Flashing characters are mapped to Inverse by apple_iic_font_index.
+        // We toggle the 'invert' flag based on frame count to simulate flashing.
+        // Flashing range in VRAM: 0x40-0x7F (when not in AltChar/MouseText mode)
+        if !is_altchar && (vram_code >= 0x40 && vram_code <= 0x7F) {
+            // Flash rate: approx 2Hz. 60fps / 32 = ~1.8Hz
+            let flash_on = (self.frame_count / 16) % 2 == 0;
+            if !flash_on {
+                invert = false; // Render as Normal
+            }
+        }
+
+        let char_width = if double_width { 14 } else { 7 };
+
+        for char_row in 0..8_u16 {
+            let mut font_byte = CHAR_ROM[font_offset + char_row as usize];
+            
+            if invert {
+                font_byte = !font_byte;
+            }
+
+            // Scale Y by 2 because we are now using 384 height for everything
+            let y = (row * 8 + char_row) * 2;
+            let x = col * char_width; 
+
+            let mut rgba_row = [0u8; 14 * 4]; // Max width 14
+
+            for bit in 0..7 {
+                let pixel_on = (font_byte >> bit) & 1 != 0;
+                let (r, g, b) = if pixel_on {
+                    if self.monochrome {
+                        (0, 255, 0)
+                    } else {
+                        (255, 255, 255)
+                    }
+                } else {
+                    (0, 0, 0)
+                };
+                // if !pixel_on { continue; }
+                // let color = 255;
+
+                if double_width {
+                    // Draw 2 pixels for each font bit
+                    let base_index = bit * 8; // bit * 2 pixels * 4 bytes
+                    
+                    // Pixel 1
+                    rgba_row[base_index] = r;
+                    rgba_row[base_index + 1] = g;
+                    rgba_row[base_index + 2] = b;
+                    rgba_row[base_index + 3] = 255;
+
+                    // Pixel 2
+                    rgba_row[base_index + 4] = r;
+                    rgba_row[base_index + 5] = g;
+                    rgba_row[base_index + 6] = b;
+                    rgba_row[base_index + 7] = 255;
+                } else {
+                    // Draw 1 pixel for each font bit
+                    let base_index = bit * 4; // bit * 1 pixel * 4 bytes
+                    
+                    rgba_row[base_index] = r;
+                    rgba_row[base_index + 1] = g;
+                    rgba_row[base_index + 2] = b;
+                    rgba_row[base_index + 3] = 255;
+                }
+            }
+
+            // Draw 2 rows for each font row (vertical scaling is always 2x)
+            for dy in 0..2 {
+                let start_index = ((y as usize + dy) * self.width + x as usize) * 4;
+                let end_index = start_index + (char_width as usize) * 4;
+
+                if end_index <= self.framebuffer.len() {
+                    self.framebuffer[start_index..end_index].copy_from_slice(&rgba_row[0..(char_width as usize * 4)]);
+                }
+            }
         }
     }
 
     fn render_lores_mode(&mut self, iou: &IOU, mmu: &MMU) {
         let video_mode = iou.video_mode.get();
         let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
+        let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
+        let is_dhires = check_bits_u8!(video_mode, VideoModeMask::DHIRES);
+        let is_double_lores = is_80col && is_dhires;
+        let is_80store = iou.is_80store.get();
+        let mixed_mode = check_bits_u8!(video_mode, VideoModeMask::MIXED);
 
-        let base_vram: u16 = if is_page2 { 0x0800 } else { 0x0400 };
+        let base_vram: u16 = if !is_80store && is_page2 { 0x0800 } else { 0x0400 };
 
-        for row in 0..48_u16 {
+        // if Mixed Mode is ON, only draw the top 20 blocks (40 half-rows)
+        let max_row = if mixed_mode { 40 } else { 48 };
+
+        for row in 0..max_row {
             let base_address = base_vram
                 + match row / 2 {
                     0 => 0x000,
@@ -368,27 +378,73 @@ impl Video {
                     _ => unreachable!(),
                 };
 
-            for col in 0..40_u16 {
-                let addr = base_address + col;
-                let color_byte = self.read_aux_byte_mock(addr);
+            if is_double_lores {
+                for col in 0..80_u16 {
+                    let mem_addr = base_address + (col / 2);
+                    let is_aux = (col % 2) == 0;
 
-                let color_code = if row % 2 == 0 {
-                    color_byte & 0x0F // Lower nibble
-                } else {
-                    (color_byte >> 4) & 0x0F // Upper nibble
-                };
+                    let color_byte = if is_aux {
+                        mmu.read_aux_byte(mem_addr)
+                    } else {
+                        mmu.read_main_byte(mem_addr)
+                    };
 
-                let color = self.lores_color_lookup(color_code);
+                    let nibble = if row % 2 == 0 {
+                        color_byte & 0x0F
+                    } else {
+                        (color_byte >> 4) & 0x0F
+                    };
 
-                let x = col * 14;
-                let y = row * 4;
+                    let color_code = if is_aux {
+                        (nibble << 1 | nibble >> 3) & 0x0F
+                    } else {
+                        nibble
+                    };
 
-                for dy in 0..4 {
-                    let y_idx = (y as usize + dy as usize) * self.width;
-                    for dx in 0..7 {
-                        let index = (y_idx + (x as usize + dx as usize)) * 4;
-                        if index + 4 <= self.framebuffer.len() {
-                            self.framebuffer[index..index + 4].copy_from_slice(&color);
+                    let color = self.lores_color_lookup(color_code);
+
+                    let x = col * 7;
+                    let y = row * 8;
+                    
+                    for dy in 0..8 {
+                        let y_idx = (y as usize + dy as usize) * self.width;
+                        for dx in 0..7 {
+                            let index = (y_idx + (x as usize + dx as usize)) * 4;
+                            if index + 4 <= self.framebuffer.len() {
+                                self.framebuffer[index..index + 4].copy_from_slice(&color);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for col in 0..40_u16 {
+                    let addr = base_address + col;
+                    
+                    let use_aux = is_80store && is_page2;
+                    let color_byte = if use_aux {
+                        mmu.read_aux_byte(addr)
+                    } else {
+                        mmu.read_main_byte(addr)
+                    };
+
+                    let color_code = if row % 2 == 0 {
+                        color_byte & 0x0F
+                    } else {
+                        (color_byte >> 4) & 0x0F
+                    };
+
+                    let color = self.lores_color_lookup(color_code);
+
+                    let x = col * 14;
+                    let y = row * 8;
+                    
+                    for dy in 0..8 {
+                        let y_idx = (y as usize + dy as usize) * self.width;
+                        for dx in 0..14 {
+                            let index = (y_idx + (x as usize + dx as usize)) * 4;
+                            if index + 4 <= self.framebuffer.len() {
+                                self.framebuffer[index..index + 4].copy_from_slice(&color);
+                            }
                         }
                     }
                 }
@@ -396,99 +452,187 @@ impl Video {
         }
     }
 
+    #[allow(dead_code)]
     fn render_mixed_mode(&mut self, iou: &IOU, mmu: &MMU) {
         self.render_hires_mode(iou, mmu);
         self.render_text_mode(iou, mmu);
     }
 
+    #[allow(dead_code)]
     fn render_hires_mode(&mut self, iou: &IOU, mmu: &MMU) {
-        let base_vram: u16 = 0x2000;
+        let base_vram: u16 = 0x0000;
 
         for group in 0..24_u16 {
             for row in 0..8_u16 {
+                // Apple II Hi-Res Interleaving:
+                // Row Offset = (row * 1024) + (group % 8) * 128 + (group / 8) * 40
                 let row_base = base_vram
                     .wrapping_add(row.wrapping_mul(1024))
-                    .wrapping_add(group.wrapping_mul(40));
+                    .wrapping_add((group % 8).wrapping_mul(128))
+                    .wrapping_add((group / 8).wrapping_mul(40));
 
                 for col in 0..40_u16 {
                     let addr = row_base.wrapping_add(col);
                     let byte = self.read_hires_memory(iou, mmu, addr);
+                    let palette_flag = (byte & 0x80) != 0;
 
-                    let mut left_pixel = false;
-                    let mut right_pixel = false;
+                    // read adjacent bytes for artifacting
+                    let prev_byte = if col > 0 {
+                        self.read_hires_memory(iou, mmu, addr - 1)
+                    } else {
+                        0
+                    };
+                    
+                    let next_byte = if col < 39 {
+                        self.read_hires_memory(iou, mmu, addr + 1)
+                    } else {
+                        0
+                    };
 
                     for bit in 0..7_u16 {
-                        let pixel_on = (byte >> (6 - bit)) & 1 != 0;
+                        let pixel_on = (byte >> bit) & 1 != 0;
+                        let x_logical = (col as usize) * 7 + (bit as usize);
+                        let mut x = x_logical * 2; // scale horizontally to 560 width
+                        
+                        // shift by half-pixel (1 unit in 560 mode) if palette bit is set
+                        if palette_flag {
+                            x += 1;
+                        }
 
-                        let color = if pixel_on {
-                            if left_pixel {
-                                [255, 255, 255, 255] // White (Artifact)
-                            } else {
-                                [255, 0, 0, 255] // Red (Artifact)
-                            }
+                        let y = ((group as usize) * 8 + (row as usize)) * 2; // double height
+
+                        // check neighbors for artifacting (White = adjacent pixels on)
+                        let prev_on = if bit > 0 {
+                            (byte >> (bit - 1)) & 1 != 0
                         } else {
-                            if right_pixel {
-                                [0, 255, 255, 255] // Cyan (Artifact)
-                            } else {
-                                [0, 0, 0, 255] // Black
-                            }
+                            (prev_byte >> 6) & 1 != 0
+                        };
+                        
+                        let next_on = if bit < 6 {
+                            (byte >> (bit + 1)) & 1 != 0
+                        } else {
+                            (next_byte >> 0) & 1 != 0
                         };
 
-                        left_pixel = pixel_on;
-                        right_pixel = !pixel_on;
+                        // Apple II Hi-Res Color Logic
+                        if pixel_on {
+                            if self.monochrome {
+                                let color = [0, 255, 0, 255];
+                                // draw 2x2 block (since we don't do artifacting width adjustments)
+                                let width = 2;
+                                for dy in 0..2 {
+                                    for dx in 0..width {
+                                        if x + dx < self.width {
+                                            let index = ((y + dy) * self.width + (x + dx)) * 4;
+                                            if (index as usize) + 4 <= self.framebuffer.len() {
+                                                self.framebuffer[(index as usize)..(index as usize + 4)]
+                                                    .copy_from_slice(&color);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                let is_white = prev_on || next_on;
+                                let color = if is_white {
+                                    [255, 255, 255, 255] // White
+                                } else {
+                                    if palette_flag {
+                                        // High Palette (Bit 7 = 1)
+                                        if x_logical % 2 == 0 { [0, 0, 255, 255] }       // Blue (Even)
+                                        else { [255, 165, 0, 255] }              // Orange (Odd)
+                                    } else {
+                                        // Low Palette (Bit 7 = 0)
+                                        if x_logical % 2 == 0 { [160, 32, 240, 255] }    // Violet (Even)
+                                        else { [0, 255, 0, 255] }                // Green (Odd)
+                                    }
+                                };
 
-                        let y = (group as usize).wrapping_mul(8) + (row as usize);
-                        let x = (col as usize).wrapping_mul(7) + (bit as usize);
-                        let index = (y * self.width + x) * 4;
+                                // draw 2x2 block for White, 4x2 block for Colors
+                                let width = if is_white { 2 } else { 4 };
 
-                        if (index as usize) + 4 <= self.framebuffer.len() {
-                            self.framebuffer[(index as usize)..(index as usize + 4)]
-                                .copy_from_slice(&color);
+                                for dy in 0..2 {
+                                    for dx in 0..width {
+                                        if x + dx < self.width {
+                                            let index = ((y + dy) * self.width + (x + dx)) * 4;
+                                            if (index as usize) + 4 <= self.framebuffer.len() {
+                                                self.framebuffer[(index as usize)..(index as usize + 4)]
+                                                    .copy_from_slice(&color);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
+                        // if pixel is OFF, do nothing
                     }
                 }
             }
         }
     }
 
+    #[allow(dead_code)]
     fn render_double_hires_mode(&mut self, iou: &IOU, mmu: &MMU) {
         let base_vram: u16 = 0x2000;
-        let video_mode = iou.video_mode.get();
-        let is_80store = iou.is_80store.get();
+        let _video_mode = iou.video_mode.get();
+        // let is_80store = iou.is_80store.get();
 
         for group in 0..24_u16 {
             for row in 0..8_u16 {
-                let row_base = self.get_display_address(
-                    video_mode,
-                    is_80store,
-                    base_vram
+                // Apple II Hi-Res Interleaving:
+                // Row Offset = (row * 1024) + (group % 8) * 128 + (group / 8) * 40
+                let row_base = base_vram
                         .wrapping_add(row.wrapping_mul(1024))
-                        .wrapping_add(group.wrapping_mul(40)),
-                );
+                        .wrapping_add((group % 8).wrapping_mul(128))
+                        .wrapping_add((group / 8).wrapping_mul(40));
 
                 for col in 0..40_u16 {
                     let addr = row_base.wrapping_add(col);
-                    let main_byte = self.read_hires_memory(iou, mmu, addr);
-                    let aux_byte = self.read_aux_hires_memory(iou, mmu, addr);
+                    
+                    // double Hi-Res always uses Main and Aux memory at $2000-$3FFF
+                    let main_byte = mmu.read_main_byte(addr);
+                    let aux_byte = mmu.read_aux_byte(addr);
 
+                    // Double Hi-Res: 14 pixels per column (7 Aux + 7 Main)
+                    // Aux bits 0-6 map to x offsets 0-6
+                    // Main bits 0-6 map to x offsets 7-13
+                    
+                    let y = (group.wrapping_mul(8).wrapping_add(row)) * 2; // double height
+
+                    // Draw Aux pixels (First 7)
                     for bit in 0..7_u16 {
-                        let even_pixel = (main_byte >> (6 - bit)) & 1 != 0;
-                        let odd_pixel = (aux_byte >> (6 - bit)) & 1 != 0;
-
-                        let color = match (even_pixel, odd_pixel) {
-                            (true, true) => [255, 255, 255, 255], // White
-                            (true, false) => [255, 0, 255, 255],  // Magenta
-                            (false, true) => [0, 255, 255, 255],  // Cyan
-                            (false, false) => [0, 0, 0, 255],     // Black
+                        let pixel_on = (aux_byte >> bit) & 1 != 0;
+                        let color = if pixel_on {
+                            if self.monochrome { [0, 255, 0, 255] } else { [255, 255, 255, 255] }
+                        } else {
+                            [0, 0, 0, 255]
                         };
+                        
+                        let x = (col as usize) * 14 + (bit as usize);
+                        
+                        for dy in 0..2 {
+                            let index = ((y as usize + dy) * self.width + x) * 4;
+                            if index + 4 <= self.framebuffer.len() {
+                                self.framebuffer[index..index + 4].copy_from_slice(&color);
+                            }
+                        }
+                    }
 
-                        let x = col.wrapping_mul(7).wrapping_add(bit);
-                        let y = group.wrapping_mul(8).wrapping_add(row);
-                        let index = ((y * (self.width as u16)) + x) * 4;
-
-                        if (index as usize) + 4 <= self.framebuffer.len() {
-                            self.framebuffer[(index as usize)..(index as usize + 4)]
-                                .copy_from_slice(&color);
+                    // draw main pixels (Next 7)
+                    for bit in 0..7_u16 {
+                        let pixel_on = (main_byte >> bit) & 1 != 0;
+                        let color = if pixel_on {
+                            if self.monochrome { [0, 255, 0, 255] } else { [255, 255, 255, 255] }
+                        } else {
+                            [0, 0, 0, 255]
+                        };
+                        
+                        let x = (col as usize) * 14 + 7 + (bit as usize);
+                        
+                        for dy in 0..2 {
+                            let index = ((y as usize + dy) * self.width + x) * 4;
+                            if index + 4 <= self.framebuffer.len() {
+                                self.framebuffer[index..index + 4].copy_from_slice(&color);
+                            }
                         }
                     }
                 }
@@ -505,13 +649,31 @@ impl Video {
     }
 
     fn lores_color_lookup(&self, color: u8) -> [u8; 4] {
-        match color & 0x0F {
+        let rgba = match color & 0x0F {
             0x0 => [0, 0, 0, 255],
             0x1 => [227, 30, 96, 255],
             0x2 => [96, 78, 189, 255],
             0x3 => [255, 68, 253, 255],
-            0x4 => [0, 129, 64, 255],
-            _ => [255, 255, 255, 255],
+            0x4 => [0, 163, 96, 255],
+            0x5 => [156, 156, 156, 255],
+            0x6 => [20, 207, 253, 255],
+            0x7 => [208, 195, 255, 255],
+            0x8 => [96, 114, 3, 255],
+            0x9 => [255, 106, 60, 255],
+            0xA => [156, 156, 156, 255],
+            0xB => [255, 160, 208, 255],
+            0xC => [20, 245, 60, 255],
+            0xD => [208, 221, 141, 255],
+            0xE => [114, 255, 208, 255],
+            0xF => [255, 255, 255, 255],
+            _ => [0, 0, 0, 255],
+        };
+
+        if self.monochrome {
+            let y = (0.299 * rgba[0] as f32 + 0.587 * rgba[1] as f32 + 0.114 * rgba[2] as f32) as u8;
+            [0, y, 0, 255]
+        } else {
+            rgba
         }
     }
 }

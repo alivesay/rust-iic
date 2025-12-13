@@ -75,7 +75,6 @@ RdAltZP, R7, $C016, 49174, Read whether auxiliary (1) or main (0) bank
 AltZP, W, $C008, 49160, Off: Use main bank, page $00 and page $01
 AltZP, W, $C009, 49161, On: Use auxiliary bank, page $00 and page $01
 
-
 48K memory switches:
 Note: 8OStore must be off to switch all memory in this range, including display memory (Table 2-6).
 
@@ -85,8 +84,6 @@ RdRAMRd, R7, $C013, 49171, Read whether main (0) or aux (1)
 RAMWrt, W, $C004, 49156, Off: Write to main 48K RAM
 RAMWrt, W, $C005, 49157, On: Write to auxiliary 48K RAM
 RdRAMWrt, R7, $C014, 49172, Read whether main (0) or aux (1)
-
-
 
 kegs:Jon Relay's Apple II Info Archives
 I/O Memory

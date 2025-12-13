@@ -47,6 +47,7 @@ impl ROM {
         Ok(Self { data })
     }
 
+    #[allow(dead_code)]
     pub fn load_from_intel(filename: &str, system_type: SystemType) -> io::Result<Self> {
         let file = File::open(filename)?;
         let reader = BufReader::new(file);

@@ -24,13 +24,13 @@ impl InterruptController {
     // }
 
     pub fn request_nmi(&mut self) {
-        println!("NMI Requested");
+        // println!("NMI Requested");
         self.nmi = true;
         self.waiting = false;
     }
 
     pub fn request_irq(&mut self) {
-        println!("IRQ Requested");
+        // println!("IRQ Requested");
         self.irq = true;
         self.waiting = false;
     }
@@ -86,10 +86,10 @@ impl InterruptController {
             return None;
         };
 
-        println!(
-            "Handling {:?} Interrupt: Jumping to {:#06X}",
-            interrupt_type, resolved_vector
-        );
+        // println!(
+        //     "Handling {:?} Interrupt: Jumping to {:#06X}",
+        //     interrupt_type, resolved_vector
+        // );
 
         Some((interrupt_type, resolved_vector))
     }

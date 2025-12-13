@@ -102,6 +102,10 @@ impl MMU {
         // self.rom[1].dump_range(0x0000..=0x00FF);
     }
 
+    pub fn read_main_byte(&self, addr: u16) -> u8 {
+        self.ram[0].read_byte(addr)
+    }
+
     pub fn read_aux_byte(&self, addr: u16) -> u8 {
         self.ram[1].read_byte(addr)
     }
@@ -145,17 +149,17 @@ impl MMU {
 
             // **Language Card (LC) RAM / ROM ($C100 - $CFFF)**
             0xC100..=0xCFFF => {
-                if lcram == 1 {
-                    self.lcram[bank + (ramrd << 1)].read_byte(addr.wrapping_sub(0xC100))
-                } else {
-                    self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
-                }
+                // if lcram == 1 {
+                //     self.lcram[bank + (ramrd << 1)].read_byte(addr.wrapping_sub(0xC100))
+                // } else {
+                self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
+                // }
             }
 
             // **Language Card RAM ($D000 - $DFFF)**
             0xD000..=0xDFFF => {
                 if lcram == 1 {
-                    self.lcram[bank + (ramrd << 1)].read_byte(addr.wrapping_sub(0xD000))
+                    self.lcram[bank + (altzp << 1)].read_byte(addr.wrapping_sub(0xD000)) // TODO: should be altzp or ramrd?
                 } else {
                     self.rom[altrom].read_byte(addr - 0xC000)
                 }
@@ -218,19 +222,23 @@ impl MMU {
             // }
 
             // **Language Card (LC) RAM / ROM ($C100 - $CFFF)**
-            0xC100..=0xCFFF => maybe_write_byte!(
-                write,
-                self.lcram,
-                bank + (ramwrt << 1),
-                addr - 0xC100,
-                value
-            ),
+            //     0xC100..=0xCFFF => maybe_write_byte!(
+            //     write,
+            //     self.lcram,
+            //     bank + (ramwrt << 1),
+            //     addr - 0xC100,
+            //     value
+            // ),
+            0xC100..=0xCFFF => {
+                // TODO: Read-Only ROM space?
+                0x00
+            },
 
             // **Language Card RAM ($D000 - $DFFF)**
             0xD000..=0xDFFF => maybe_write_byte!(
                 write,
                 self.lcram,
-                bank + (ramwrt << 1),
+                bank + (altzp << 1), // TODO: altzp or ramwrt?
                 addr - 0xD000,
                 value
             ),

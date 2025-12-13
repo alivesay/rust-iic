@@ -353,12 +353,12 @@ pub struct Disassembler;
 
 impl Disassembler {
     pub fn disassemble(bus: &Bus, addr: u16) -> String {
-        let opcode = bus.read_byte(addr);
+        let opcode = bus.peek_byte(addr);
         let (mnemonic, mode) = Disassembler::lookup_opcode(opcode);
         let operand_bytes = mode.operand_bytes();
 
-        let operand1 = bus.read_byte(addr.wrapping_add(1));
-        let operand2 = bus.read_byte(addr.wrapping_add(2));
+        let operand1 = bus.peek_byte(addr.wrapping_add(1));
+        let operand2 = bus.peek_byte(addr.wrapping_add(2));
 
         let formatted_operand = match operand_bytes {
             0 => String::new(),

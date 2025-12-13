@@ -56,6 +56,7 @@ pub fn mem_state_to_string(mem_state: u8) -> String {
 }
 
 #[inline]
+#[allow(dead_code)]
 pub fn ior(val: u8) -> u8 {
     if val != 0 {
         0x80
@@ -64,6 +65,7 @@ pub fn ior(val: u8) -> u8 {
     }
 }
 
+#[allow(dead_code)]
 pub fn ascii_to_apple_iic(ch: u8, is_altchar: bool) -> u8 {
     match ch {
         b'A'..=b'O' => (ch - b'A') + 0xC1, // 'A' (0x41) → 0xC1, 'B' (0x42) → 0xC2
@@ -84,30 +86,61 @@ pub fn ascii_to_apple_iic(ch: u8, is_altchar: bool) -> u8 {
     }
 }
 
-pub fn apple_iic_font_index(vram_code: u8, is_altchar: bool) -> usize {
-    let char_code = (vram_code & 0x7F) as usize;
+pub fn apple_iic_font_index(vram_code: u8, is_altchar: bool) -> (usize, bool) {
+    // Returns (clean_font_index, invert_flag)
+    // Clean Font Layout (0-127):
+    // 0x00-0x1F: MouseText
+    // 0x20-0x3F: Symbols/Numbers
+    // 0x40-0x5F: Uppercase
+    // 0x60-0x7F: Lowercase
 
-    if is_altchar && (0x40..=0x5F).contains(&char_code) {
-        return ((char_code - 0x40) + 64 * 4) * 8;
-    }
+    let (index, invert) = match vram_code {
+        // 0x00-0x1F: Inverse Uppercase (@, A, B...)
+        // Map to Clean Uppercase (0x40-0x5F)
+        0x00..=0x1F => (vram_code + 0x40, true),
 
-    let base_index = match char_code {
-        0x00..=0x1F => char_code + 0x40, // Inverse Symbols
-        0x20..=0x3F => char_code,        // Normal Symbols & Numbers
-        0x40..=0x5F => char_code - 0x40, // Corrected Normal Uppercase
-        0x60..=0x7F => char_code,        // Flashing Text
-        _ => char_code,                  // Other Characters
+        // 0x20-0x3F: Inverse Symbols/Numbers
+        // Map to Clean Symbols (0x20-0x3F)
+        0x20..=0x3F => (vram_code, true),
+
+        // 0x40-0x5F: Flashing Uppercase OR MouseText
+        0x40..=0x5F => {
+            if is_altchar {
+                // MouseText (0x40-0x5F -> Clean 0x00-0x1F)
+                (vram_code - 0x40, false)
+            } else {
+                // Flashing Uppercase (Treat as Inverse for now)
+                (vram_code, true)
+            }
+        }
+
+        // 0x60-0x7F: Flashing Symbols OR Inverse Lowercase
+        0x60..=0x7F => {
+            if is_altchar {
+                // Inverse Lowercase (0x60-0x7F -> Clean 0x60-0x7F)
+                (vram_code, true)
+            } else {
+                // Flashing Symbols (Treat as Inverse)
+                (vram_code - 0x40, true)
+            }
+        }
+
+        // 0x80-0x9F: Normal Uppercase (Control?) -> Map to Uppercase
+        // Usually 0x80 is '@' (ASCII 0x40)
+        0x80..=0x9F => (vram_code - 0x40, false),
+
+        // 0xA0-0xBF: Normal Symbols/Numbers
+        // 0xA0 is Space (ASCII 0x20)
+        0xA0..=0xBF => (vram_code - 0x80, false),
+
+        // 0xC0-0xDF: Normal Uppercase
+        // 0xC1 is 'A' (ASCII 0x41)
+        0xC0..=0xDF => (vram_code - 0x80, false),
+
+        // 0xE0-0xFF: Normal Lowercase
+        // 0xE1 is 'a' (ASCII 0x61)
+        0xE0..=0xFF => (vram_code - 0x80, false),
     };
 
-    let row_offset = match vram_code {
-        0x40..=0x5F => 0,  // Normal Text
-        0x60..=0x7F => 12, // Flashing Text
-        0x80..=0x9F => 0,  // Normal Text
-        0xA0..=0xBF => 0,  // Normal Text
-        0xC0..=0xDF => 0,  // Normal Text
-        0xE0..=0xFF => 12, // Flashing Text
-        _ => 0,
-    };
-
-    ((base_index + 64 * row_offset) * 8).min(4096 - 8)
+    (index as usize * 8, invert)
 }
