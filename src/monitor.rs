@@ -35,38 +35,40 @@ impl<'a> Monitor<'a> {
                 continue;
             }
 
-            self.execute_command(input);
+            if !self.execute_command(input) {
+                break;
+            }
         }
     }
 
-    fn execute_command(&mut self, input: &str) {
+    fn execute_command(&mut self, input: &str) -> bool {
         let args: Vec<&str> = input.split_whitespace().collect();
 
         if args.is_empty() {
-            return;
+            return true;
         }
 
         match args[0] {
-            "help" => self.show_help(),
-            "reset" => self.cpu.reset(),
-            "step" | "s" => self.step(),
-            "continue" | "c" => self.resume(),
-            "break" if args.len() == 2 => self.set_breakpoint(args[1]),
-            "delete" if args.len() == 2 => self.remove_breakpoint(args[1]),
-            "registers" | "r" => self.show_registers(),
-            "flags" => self.show_flags(),
-            "halt" => self.halt_cpu(),
-            "load" if args.len() == 2 => self.load_rom(args[1], None),
-            "load" if args.len() == 3 => self.load_rom(args[1], Some(args[2])),
-            "mem" if args.len() == 2 => self.view_memory(args[1], None),
-            "mem" if args.len() == 3 => self.view_memory(args[1], Some(args[2])),
-            "page" if args.len() == 2 => self.view_memory_page(args[1]),
-            "write" if args.len() == 3 => self.write_memory(args[1], args[2]),
+            "help" => { self.show_help(); true },
+            "reset" => { self.cpu.reset(); true },
+            "step" | "s" => { self.step(); true },
+            "continue" | "c" => { self.resume(); false },
+            "break" if args.len() == 2 => { self.set_breakpoint(args[1]); true },
+            "delete" if args.len() == 2 => { self.remove_breakpoint(args[1]); true },
+            "registers" | "r" => { self.show_registers(); true },
+            "flags" => { self.show_flags(); true },
+            "halt" => { self.halt_cpu(); true },
+            "load" if args.len() == 2 => { self.load_rom(args[1], None); true },
+            "load" if args.len() == 3 => { self.load_rom(args[1], Some(args[2])); true },
+            "mem" if args.len() == 2 => { self.view_memory(args[1], None); true },
+            "mem" if args.len() == 3 => { self.view_memory(args[1], Some(args[2])); true },
+            "page" if args.len() == 2 => { self.view_memory_page(args[1]); true },
+            "write" if args.len() == 3 => { self.write_memory(args[1], args[2]); true },
             "exit" | "quit" => {
                 println!("Exiting monitor. CPU remains halted.");
                 std::process::exit(0);
             }
-            _ => println!("Unknown command. Type 'help' for available commands."),
+            _ => { println!("Unknown command. Type 'help' for available commands."); true },
         }
     }
 
@@ -139,6 +141,7 @@ impl<'a> Monitor<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn run(&mut self) {
         while !self.cpu.bus.interrupts.halted {
             if self.breakpoints.contains(&self.cpu.pc) {
@@ -160,7 +163,7 @@ impl<'a> Monitor<'a> {
         println!("Resuming execution...");
         self.cpu.bus.interrupts.leave_halt();
         self.cpu.bus.interrupts.leave_wait();
-        self.run();
+        // self.run();
     }
 
     fn halt_cpu(&mut self) {
@@ -214,7 +217,7 @@ impl<'a> Monitor<'a> {
             }
 
             for addr in start_addr..=end_addr {
-                let value = self.cpu.bus.read_byte(addr);
+                let value = self.cpu.bus.peek_byte(addr);
                 println!("${:04X}: {:02X}", addr, value);
             }
         }
@@ -227,7 +230,7 @@ impl<'a> Monitor<'a> {
                 let offset = i * 16;
                 print!("${:04X}: ", page_start + offset);
                 for j in 0..16 {
-                    let value = self.cpu.bus.read_byte(page_start + offset + j);
+                    let value = self.cpu.bus.peek_byte(page_start + offset + j);
                     print!("{:02X} ", value);
                 }
                 println!();

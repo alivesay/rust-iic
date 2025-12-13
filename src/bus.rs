@@ -5,7 +5,7 @@ use crate::memory::Memory;
 use crate::mmu::MMU;
 use crate::rom::ROM;
 use crate::util::mem_state_to_string;
-use crate::video::Video;
+use crate::video::{Video, VideoModeMask};
 
 const MEMORY_SIZE: usize = 64 * 1024;
 const RAM_BANK_SIZE: usize = 48 * 1024;
@@ -31,10 +31,12 @@ pub struct Bus {
 
     //#[cfg(feature = "klauss-interrupt-test")]
     pub i_port: u8, // Klauss IRQ/NMI Feedback Register
+
+    pub debug: bool,
 }
 
 impl Bus {
-    pub fn new(system_type: SystemType, _cpu_type: CpuType) -> Self {
+    pub fn new(system_type: SystemType, _cpu_type: CpuType, self_test: bool) -> Self {
         let memory_size = match system_type {
             SystemType::Generic => MEMORY_SIZE,
             SystemType::AppleIIc => RAM_BANK_SIZE * 2,
@@ -42,7 +44,7 @@ impl Bus {
 
         Self {
             system_type,
-            iou: IOU::new(),
+            iou: IOU::new(self_test),
             mmu: MMU::new(),
             interrupts: InterruptController::default(),
 
@@ -61,6 +63,7 @@ impl Bus {
 
             // #[cfg(feature = "klauss-interrupt-test")]
             i_port: 0,
+            debug: false,
         }
     }
 
@@ -84,14 +87,38 @@ impl Bus {
         }
     }
 
-    pub fn read_byte(&self, addr: u16) -> u8 {
+    pub fn peek_byte(&self, addr: u16) -> u8 {
+        if self.system_type == SystemType::AppleIIc {
+            if addr >= 0xC000 && addr <= 0xC0FF {
+                // TODO: For now, return 0 for soft switches to avoid side effects
+                0x00
+            } else {
+                self.mmu.read_byte(&self.iou, addr)
+            }
+        } else {
+            self.bus_ram.read_byte(addr)
+        }
+    }
+
+    pub fn update_interrupts(&mut self) {
+        if self.system_type == SystemType::AppleIIc {
+            self.interrupts.irq = self.iou.check_interrupts();
+            if self.interrupts.irq {
+                self.interrupts.waiting = false;
+            }
+        }
+    }
+
+    pub fn read_byte(&mut self, addr: u16) -> u8 {
         if self.system_type == SystemType::AppleIIc {
             if addr >= 0xC000 && addr <= 0xC0FF {
                 let result = self.handle_iic_read(addr);
-                // println!("SoftSwitch Read: {:#06X} = {:#04X}", addr, result);
+                if self.debug {
+                    println!("SoftSwitch Read: {:#06X} = {:#04X}", addr, result);
+                }
                 result
             } else {
-                self.handle_iic_read(addr)
+                self.mmu.read_byte(&self.iou, addr)
             }
         } else {
             // #[cfg(feature = "klauss-interrupt-test")]
@@ -106,7 +133,7 @@ impl Bus {
         }
     }
 
-    pub fn read_word(&self, addr: u16) -> u16 {
+    pub fn read_word(&mut self, addr: u16) -> u16 {
         let lo = self.read_byte(addr) as u16;
         let hi = self.read_byte(addr.wrapping_add(1)) as u16;
         (hi << 8) | lo
@@ -116,10 +143,23 @@ impl Bus {
         if self.system_type == SystemType::AppleIIc {
             if addr >= 0xC000 && addr <= 0xC0FF {
                 let result = self.handle_iic_write(addr, value);
-                println!("SoftSwitch Write: {:#06X} = {:#04X}", addr, value);
+                if self.debug {
+                    println!("SoftSwitch Write: {:#06X} = {:#04X}", addr, value);
+                }
                 result
             } else {
-                self.handle_iic_write(addr, value)
+                let video_mode = self.iou.video_mode.get();
+                let is_page2 = (video_mode & crate::video::VideoModeMask::PAGE2) != 0;
+                let is_80col = (video_mode & crate::video::VideoModeMask::COL80) != 0;
+                let is_80store = self.iou.is_80store.get() || is_80col;
+
+                self.mmu.write_byte(
+                    addr,
+                    value,
+                    self.iou.mem_state.get(),
+                    is_80store,
+                    is_page2,
+                )
             }
         } else {
             match addr {
@@ -165,7 +205,7 @@ impl Bus {
     //     &self.mmu.active_ram()
     // }
 
-    pub fn handle_iic_read(&self, addr: u16) -> u8 {
+    pub fn handle_iic_read(&mut self, addr: u16) -> u8 {
         match addr {
             0xC000..=0xC0FF => self.iou.ss_read(addr),
             _ => self.mmu.read_byte(&self.iou, addr),
@@ -174,14 +214,30 @@ impl Bus {
 
     pub fn handle_iic_write(&mut self, addr: u16, value: u8) -> u8 {
         match addr {
-            0xC000..=0xC0FF => self.iou.ss_write(addr),
-            _ => self.mmu.write_byte(
-                addr,
-                value,
-                self.iou.mem_state.get(),
-                self.iou.is_80store.get(),
-                false,
-            ),
+            0xC000..=0xC0FF => self.iou.ss_write(addr, value),
+            _ => {
+                let video_mode = self.iou.video_mode.get();
+                let is_page2 = (video_mode & VideoModeMask::PAGE2) != 0;
+                let is_80col = (video_mode & VideoModeMask::COL80) != 0;
+                // force 80STORE if 80COL is active
+                let is_80store = self.iou.is_80store.get() || is_80col;
+
+                self.mmu.write_byte(
+                    addr,
+                    value,
+                    self.iou.mem_state.get(),
+                    is_80store,
+                    is_page2,
+                )
+            }
+        }
+    }
+
+    pub fn tick(&mut self, cycles: u64) {
+        self.iou.cycles += cycles;
+        self.iou.iwm.tick(cycles);
+        if self.iou.check_interrupts() {
+            self.interrupts.request_irq();
         }
     }
 }

@@ -4,10 +4,10 @@ use crate::interrupts::InterruptType;
 use crate::rom::ROM;
 use bitflags::bitflags;
 use core::fmt;
-use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemType {
+    #[allow(dead_code)]
     Generic,
     AppleIIc,
 }
@@ -65,6 +65,27 @@ fn format_flags(flags: u8) -> String {
         .collect()
 }
 
+
+const CYCLE_TABLE: [u64; 256] = [
+    7, 6, 2, 2, 2, 3, 5, 2, 3, 2, 2, 2, 2, 4, 6, 2,
+    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
+    6, 6, 2, 2, 3, 3, 5, 2, 4, 2, 2, 2, 4, 4, 6, 2,
+    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
+    6, 6, 2, 2, 2, 3, 5, 2, 3, 2, 2, 2, 3, 4, 6, 2,
+    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
+    6, 6, 2, 2, 2, 3, 5, 2, 4, 2, 2, 2, 5, 4, 6, 2,
+    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
+    2, 6, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2, 4, 4, 4, 2,
+    2, 6, 2, 2, 4, 4, 4, 2, 2, 5, 2, 2, 2, 5, 2, 2,
+    2, 6, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2, 4, 4, 4, 2,
+    2, 5, 2, 2, 4, 4, 4, 2, 2, 4, 2, 2, 4, 4, 4, 2,
+    2, 6, 2, 2, 3, 3, 5, 2, 2, 2, 2, 2, 4, 4, 6, 2,
+    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
+    2, 6, 2, 2, 3, 3, 5, 2, 2, 2, 2, 2, 4, 4, 6, 2,
+    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
+];
+
+
 pub struct CPU {
     pub system_type: SystemType,
     pub cpu_type: CpuType,
@@ -73,32 +94,34 @@ pub struct CPU {
     pub regs: Registers,
     pub pc: u16,
     pub p: Flags,
+    pub cycles: u64,
 
     symbol_table: SymbolTable,
 
     // target_hz: u32,
-    last_frame_time: Instant,
 
     pub entry_point_override: Option<u16>,
+    pub debug: bool,
 }
 
 impl CPU {
-    pub fn new(system_type: SystemType, cpu_type: CpuType, _target_hz: u32) -> Self {
+    pub fn new(system_type: SystemType, cpu_type: CpuType, _target_hz: u32, self_test: bool) -> Self {
         Self {
             system_type,
             cpu_type,
-            bus: Bus::new(system_type, cpu_type),
+            bus: Bus::new(system_type, cpu_type, self_test),
             pc: 0,
+            cycles: 0,
             // target_hz,
             p: Flags::from_bits_truncate(0b00110110),
             regs: Registers::default(),
             entry_point_override: None,
-            last_frame_time: Instant::now(),
             symbol_table: SymbolTable::new(),
+            debug: false,
         }
     }
 
-    pub fn resolve_entry_point(&self) -> u16 {
+    pub fn resolve_entry_point(&mut self) -> u16 {
         if let Some(entry) = self.entry_point_override {
             println!("Using manually set entry point: {:#06X}", entry);
             return entry;
@@ -136,10 +159,10 @@ impl CPU {
         self.bus.interrupts.clear_all();
 
         if self.system_type == SystemType::AppleIIc {
-            self.pc = 0xFF59; // OLDRST
-                              // self.pc = 0xFF65; // MON
-                              // self.pc = 0xFF69; // MONZ
-                              // self.pc = self.bus.read_word(0xFFFC);
+            // self.pc = 0xFF59; // OLDRST
+            //                   // self.pc = 0xFF65; // MON
+            //                   // self.pc = 0xFF69; // MONZ
+            self.pc = self.bus.read_word(0xFFFC);
             println!("Apple IIc Cold Boot: Entry point set to {:#06X}", self.pc);
         } else {
             self.pc = self.resolve_entry_point();
@@ -207,13 +230,23 @@ impl CPU {
                                               //self.bus.handle_iic_write(0xC052, 0); // MIXED OFF
                                               //self.bus.handle_iic_write(0xC057, 0); // PAGE1 OFF
 
-        self.bus.handle_iic_write(0xC028, 0); // ROM Bank 0
+        // self.bus.handle_iic_write(0xC028, 0); // ROM Bank 0 (Removed? C028 is a toggle, and we start at Bank 0...)
         self.bus.handle_iic_write(0xC008, 0); // Ensure ZP/Main Stack is active
 
         println!("Apple IIc Soft Switches Initialized");
     }
 
     fn handle_interrupt(&mut self) -> bool {
+        // Optimization: if any interrupt is pending before reading vectors
+        if !self.bus.interrupts.nmi && !self.bus.interrupts.reset && !self.bus.interrupts.brk && !self.bus.interrupts.irq {
+            return false;
+        }
+
+        // Optimization: if only IRQ is pending and it is masked, return immediately
+        if self.bus.interrupts.irq && !self.bus.interrupts.nmi && !self.bus.interrupts.reset && !self.bus.interrupts.brk && self.p.contains(Flags::IRQ_DISABLE) {
+            return false;
+        }
+
         let nmi_vector = self.bus.read_word(0xFFFA);
         let reset_vector = self.bus.read_word(0xFFFC);
         let irq_vector = self.bus.read_word(0xFFFE);
@@ -336,72 +369,78 @@ impl CPU {
         self.p.set(Flags::OVERFLOW, (value & 0x40) != 0);
     }
 
-    pub fn tick(&mut self) {
-        self.step();
-        // if self.bus.vbl_interrupt.get() & 0x80 != 0 {
-        //     println!("VBL Interrupt Detected");
-        // }
-
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_frame_time);
-
-        if elapsed >= Duration::from_millis(16) {
-            self.bus.video_update();
-            self.last_frame_time = now;
-        }
-
-        // self.bus.vbl_interrupt.set(0x00);
+    pub fn tick(&mut self) -> u64 {
+        self.bus.update_interrupts();
+        let cycles = self.step();
+        self.cycles += cycles;
+        cycles
     }
 
-    pub fn step(&mut self) {
+    pub fn video_update(&mut self) {
+        self.bus.video_update();
+    }
+
+    pub fn step(&mut self) -> u64 {
         if self.handle_interrupt() {
-            return;
+            self.bus.tick(7);
+            return 7;
         }
 
         if self.bus.interrupts.halted {
             println!("CPU Halted! Exiting...");
-            return;
+            return 0;
         }
 
         if self.bus.interrupts.waiting {
             if self.bus.interrupts.irq || self.bus.interrupts.nmi {
-                println!(
-                    "IRQ/NMI TRIGGERED: IRQ={} NMI={} I={} PC={:#06X}",
-                    self.bus.interrupts.irq,
-                    self.bus.interrupts.nmi,
-                    self.p.contains(Flags::IRQ_DISABLE),
-                    self.pc
-                );
+                // println!(
+                //     "IRQ/NMI TRIGGERED: IRQ={} NMI={} I={} PC={:#06X}",
+                //     self.bus.interrupts.irq,
+                //     self.bus.interrupts.nmi,
+                //     self.p.contains(Flags::IRQ_DISABLE),
+                //     self.pc
+                // );
 
                 self.bus.interrupts.leave_wait();
             } else {
-                return;
+                self.bus.tick(1);
+                return 1;
             }
         }
 
         let pc = self.pc;
 
-        let instruction = Disassembler::disassemble(&self.bus, pc);
+        let instruction = if self.debug {
+            Disassembler::disassemble(&self.bus, pc)
+        } else {
+            String::new()
+        };
 
         let opcode = self.fetch_byte();
 
         self.decode_execute(opcode);
 
-        println!(
-            "{} A:{:02X} X:{:02X} Y:{:02X} P:{}[{:02X}] SP:{:02X}[{:02X}] {} {}{}",
-            instruction,
-            self.regs.a,
-            self.regs.x,
-            self.regs.y,
-            format_flags(self.p.bits()),
-            self.p.bits(),
-            self.regs.sp,
-            self.bus
-                .read_byte(0x0100 | ((self.regs.sp.wrapping_add(1)) as u16)),
-            self.bus.mmu_mem_state_to_string(),
-            self.bus.interrupts.status_string(),
-            self.symbol_table.append_symbol(instruction.clone()),
-        );
+        let cycles = CYCLE_TABLE[opcode as usize];
+        self.bus.tick(cycles);
+
+        if self.debug {
+            println!(
+                "{} A:{:02X} X:{:02X} Y:{:02X} P:{}[{:02X}] SP:{:02X}[{:02X}] {} {}{}",
+                instruction,
+                self.regs.a,
+                self.regs.x,
+                self.regs.y,
+                format_flags(self.p.bits()),
+                self.p.bits(),
+                self.regs.sp,
+                self.bus
+                    .read_byte(0x0100 | ((self.regs.sp.wrapping_add(1)) as u16)),
+                self.bus.mmu_mem_state_to_string(),
+                self.bus.interrupts.status_string(),
+                self.symbol_table.append_symbol(instruction.clone()),
+            );
+        }
+        cycles
     }
 
     fn update_zero_and_negative_flags(&mut self, value: u8) {
