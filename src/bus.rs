@@ -150,8 +150,8 @@ impl Bus {
             } else {
                 let video_mode = self.iou.video_mode.get();
                 let is_page2 = (video_mode & crate::video::VideoModeMask::PAGE2) != 0;
-                let is_80col = (video_mode & crate::video::VideoModeMask::COL80) != 0;
-                let is_80store = self.iou.is_80store.get() || is_80col;
+                let is_hires = (video_mode & crate::video::VideoModeMask::HIRES) != 0;
+                let is_80store = self.iou.is_80store.get();
 
                 self.mmu.write_byte(
                     addr,
@@ -159,6 +159,7 @@ impl Bus {
                     self.iou.mem_state.get(),
                     is_80store,
                     is_page2,
+                    is_hires,
                 )
             }
         } else {
@@ -218,9 +219,8 @@ impl Bus {
             _ => {
                 let video_mode = self.iou.video_mode.get();
                 let is_page2 = (video_mode & VideoModeMask::PAGE2) != 0;
-                let is_80col = (video_mode & VideoModeMask::COL80) != 0;
-                // force 80STORE if 80COL is active
-                let is_80store = self.iou.is_80store.get() || is_80col;
+                let is_hires = (video_mode & VideoModeMask::HIRES) != 0;
+                let is_80store = self.iou.is_80store.get();
 
                 self.mmu.write_byte(
                     addr,
@@ -228,6 +228,7 @@ impl Bus {
                     self.iou.mem_state.get(),
                     is_80store,
                     is_page2,
+                    is_hires,
                 )
             }
         }

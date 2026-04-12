@@ -49,24 +49,36 @@ pub struct Video {
     framebuffer: Vec<u8>, // RGBA
     width: usize,
     height: usize,
+    // Active area dimensions (without border)
+    active_width: usize,
+    active_height: usize,
     //  video_mode: Cell<u8>,
     extra: Cell<u8>,
     frame_count: usize,
     pub monochrome: bool,
+    pub scanline_intensity: f32, // 0.0 = full black gap, 1.0 = no scanlines
+    pub border_size: usize,     // Black border in pixels around active area
 }
 
 impl Video {
     pub fn new() -> Self {
-        let width = 560;
-        let height = 192;
+        let border = 16;
+        let active_width = 560;
+        let active_height = 192;
+        let width = active_width + border * 2;
+        let height = active_height + border * 2;
         Self {
             framebuffer: vec![0; width * height * 4],
             width,
             height,
+            active_width,
+            active_height,
             //  video_mode: Cell::new(VideoMode::TEXT),
             extra: Cell::new(0),
             frame_count: 0,
             monochrome: false,
+            scanline_intensity: 0.5,
+            border_size: border,
         }
     }
 
@@ -130,10 +142,14 @@ impl Video {
         let text_mode = check_bits_u8!(video_mode, VideoModeMask::TEXT);
         let _is_80store: bool = iou.is_80store.get();
 
-        let new_width = 560;
-        let new_height = 384;
+        let new_active_width = 560;
+        let new_active_height = 384;
+        let new_width = new_active_width + self.border_size * 2;
+        let new_height = new_active_height + self.border_size * 2;
 
         if new_width != self.width || new_height != self.height {
+            self.active_width = new_active_width;
+            self.active_height = new_active_height;
             self.resize_framebuffer(new_width, new_height);
         }
 
@@ -157,6 +173,11 @@ impl Video {
             self.render_text_mode(iou, mmu);
         }
 
+        // Apply scanline effect: dim every odd row (the 2nd row of each doubled pair)
+        if self.scanline_intensity < 1.0 {
+            self.apply_scanlines();
+        }
+
         true
     }
 
@@ -164,6 +185,29 @@ impl Video {
         self.width = new_width;
         self.height = new_height;
         self.framebuffer = vec![0; new_width * new_height * 4];
+    }
+
+    /// Convert active-area (x, y) to framebuffer byte index, accounting for border
+    #[inline(always)]
+    fn fb_index(&self, x: usize, y: usize) -> usize {
+        ((y + self.border_size) * self.width + (x + self.border_size)) * 4
+    }
+
+    fn apply_scanlines(&mut self) {
+        let intensity = self.scanline_intensity.clamp(0.0, 1.0);
+        // Dim every odd row (row 1, 3, 5, ...) within the active area
+        for y in (1..self.active_height).step_by(2) {
+            let abs_y = y + self.border_size;
+            let row_start = (abs_y * self.width + self.border_size) * 4;
+            let row_end = row_start + self.active_width * 4;
+            if row_end <= self.framebuffer.len() {
+                for i in (row_start..row_end).step_by(4) {
+                    self.framebuffer[i]     = (self.framebuffer[i]     as f32 * intensity) as u8;
+                    self.framebuffer[i + 1] = (self.framebuffer[i + 1] as f32 * intensity) as u8;
+                    self.framebuffer[i + 2] = (self.framebuffer[i + 2] as f32 * intensity) as u8;
+                }
+            }
+        }
     }
 
 
@@ -324,7 +368,7 @@ impl Video {
 
             // Draw 2 rows for each font row (vertical scaling is always 2x)
             for dy in 0..2 {
-                let start_index = ((y as usize + dy) * self.width + x as usize) * 4;
+                let start_index = self.fb_index(x as usize, y as usize + dy);
                 let end_index = start_index + (char_width as usize) * 4;
 
                 if end_index <= self.framebuffer.len() {
@@ -407,9 +451,8 @@ impl Video {
                     let y = row * 8;
                     
                     for dy in 0..8 {
-                        let y_idx = (y as usize + dy as usize) * self.width;
                         for dx in 0..7 {
-                            let index = (y_idx + (x as usize + dx as usize)) * 4;
+                            let index = self.fb_index(x as usize + dx as usize, y as usize + dy as usize);
                             if index + 4 <= self.framebuffer.len() {
                                 self.framebuffer[index..index + 4].copy_from_slice(&color);
                             }
@@ -439,9 +482,8 @@ impl Video {
                     let y = row * 8;
                     
                     for dy in 0..8 {
-                        let y_idx = (y as usize + dy as usize) * self.width;
                         for dx in 0..14 {
-                            let index = (y_idx + (x as usize + dx as usize)) * 4;
+                            let index = self.fb_index(x as usize + dx as usize, y as usize + dy as usize);
                             if index + 4 <= self.framebuffer.len() {
                                 self.framebuffer[index..index + 4].copy_from_slice(&color);
                             }
@@ -522,10 +564,10 @@ impl Video {
                                 let width = 2;
                                 for dy in 0..2 {
                                     for dx in 0..width {
-                                        if x + dx < self.width {
-                                            let index = ((y + dy) * self.width + (x + dx)) * 4;
-                                            if (index as usize) + 4 <= self.framebuffer.len() {
-                                                self.framebuffer[(index as usize)..(index as usize + 4)]
+                                        if x + dx < self.active_width {
+                                            let index = self.fb_index(x + dx, y + dy);
+                                            if index + 4 <= self.framebuffer.len() {
+                                                self.framebuffer[index..index + 4]
                                                     .copy_from_slice(&color);
                                             }
                                         }
@@ -552,10 +594,10 @@ impl Video {
 
                                 for dy in 0..2 {
                                     for dx in 0..width {
-                                        if x + dx < self.width {
-                                            let index = ((y + dy) * self.width + (x + dx)) * 4;
-                                            if (index as usize) + 4 <= self.framebuffer.len() {
-                                                self.framebuffer[(index as usize)..(index as usize + 4)]
+                                        if x + dx < self.active_width {
+                                            let index = self.fb_index(x + dx, y + dy);
+                                            if index + 4 <= self.framebuffer.len() {
+                                                self.framebuffer[index..index + 4]
                                                     .copy_from_slice(&color);
                                             }
                                         }
@@ -610,7 +652,7 @@ impl Video {
                         let x = (col as usize) * 14 + (bit as usize);
                         
                         for dy in 0..2 {
-                            let index = ((y as usize + dy) * self.width + x) * 4;
+                            let index = self.fb_index(x, y as usize + dy);
                             if index + 4 <= self.framebuffer.len() {
                                 self.framebuffer[index..index + 4].copy_from_slice(&color);
                             }
@@ -629,7 +671,7 @@ impl Video {
                         let x = (col as usize) * 14 + 7 + (bit as usize);
                         
                         for dy in 0..2 {
-                            let index = ((y as usize + dy) * self.width + x) * 4;
+                            let index = self.fb_index(x, y as usize + dy);
                             if index + 4 <= self.framebuffer.len() {
                                 self.framebuffer[index..index + 4].copy_from_slice(&color);
                             }
