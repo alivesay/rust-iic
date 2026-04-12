@@ -14,7 +14,9 @@ const MOUSE_PENDING_CAP: i16 = 32;
 const MOUSE_SENSITIVITY: f32 = 1.0;
 
 pub struct Mouse {
+    #[allow(dead_code)]
     pub x: Cell<u16>,
+    #[allow(dead_code)]
     pub y: Cell<u16>,
     pub button0: Cell<bool>,
     pub button1: Cell<bool>,
@@ -71,6 +73,28 @@ impl Mouse {
         }
     }
 
+    /// Reset all mouse state to power-on defaults.
+    pub fn reset(&self) {
+        self.x.set(0);
+        self.y.set(0);
+        self.button0.set(false);
+        self.button1.set(false);
+        self.x_dir.set(false);
+        self.y_dir.set(false);
+        self.accum_x.set(0.0);
+        self.accum_y.set(0.0);
+        self.pending_x.set(0);
+        self.pending_y.set(0);
+        self.edge_timer.set(MOUSE_EDGE_INTERVAL);
+        self.xy_mask.set(true);
+        self.vbl_mask.set(true);
+        self.x0_edge.set(false);
+        self.y0_edge.set(false);
+        self.x_int.set(false);
+        self.y_int.set(false);
+        self.vbl_int.set(false);
+    }
+
     /// Accumulate relative mouse movement from host.
     /// dx/dy are raw host pixel deltas (positive = right/down).
     /// Y is inverted here because Apple IIc Y increases upward
@@ -110,6 +134,15 @@ impl Mouse {
             return;
         }
         self.edge_timer.set(MOUSE_EDGE_INTERVAL);
+
+        // Only consume pending edges when mouse interrupts are enabled.
+        // Before the game initializes the mouse firmware (which unmasks
+        // interrupts), we must not set x_int/y_int — otherwise $C015/$C017
+        // return 0x80 from stray host cursor movement, which breaks software
+        // like Infocom interpreters that read $C017 as RDC3ROM.
+        if self.xy_mask.get() {
+            return;
+        }
 
         // Consume one pending X edge if previous was acknowledged
         let px = self.pending_x.get();

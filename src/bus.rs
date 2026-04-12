@@ -71,6 +71,10 @@ impl Bus {
         //self.mmu.init_mem_state();
     }
 
+    pub fn clear_ram(&mut self) {
+        self.mmu.clear_ram();
+    }
+
     pub fn mmu_mem_state_to_string(&self) -> String {
         mem_state_to_string(self.iou.mem_state.get())
     }

@@ -48,6 +48,7 @@ pub struct IOU {
   pub speaker: Speaker,
   pub cycles: u64,
   pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
+  pub col80_switch: bool, // Physical 80/40 column slide switch (true = 80 col)
   pub debug: bool,
   pub self_test: bool,
 }
@@ -70,9 +71,30 @@ impl IOU {
           speaker: Speaker::new(),
           cycles: 0,
           scan_cycle: 0,
+          col80_switch: true, // Default: 80-column switch ON (typical IIc position)
           debug: false,
           self_test,
       }
+    }
+
+    /// Reset IOU state as if the hardware reset line was asserted.
+    /// On a real Apple IIc, the IOU chip clears all soft switches on reset.
+    pub fn reset(&mut self) {
+        self.mem_state.set(MemStateMask::INIT);
+        self.last_read_addr.set(0x0000);
+        self.is_80store.set(false);
+        self.ioudis.set(true);
+        self.video_mode.set(VideoMode::TEXT);
+        self.last_key.set(0);
+        self.key_ready.set(false);
+
+        // Full mouse reset — stale pending movement or interrupt state from
+        // previous session would cause $C017 (RSTYINT) to return 0x80,
+        // which breaks Infocom interpreter 80-column detection (reads $C017
+        // expecting RDC3ROM). Also prevents spurious IRQs during boot.
+        self.mouse.reset();
+
+        self.iwm.reset();
     }
 
     #[rustfmt::skip]
@@ -229,7 +251,7 @@ impl IOU {
             // IOUDis OFF: Mouse Y0 edge falling
             self.mouse.y0_edge.set(true); 0x00
           },
-            0xC060 => (check_bits_cell!(self.video_mode, VideoModeMask::COL80) as u8) << 7, //   C   R7  Status of 80/40 Column Switch
+            0xC060 => (self.col80_switch as u8) << 7, //   C   R7  Physical 80/40 Column Switch (1=80col, 0=40col)
             0xC061 => {
                 // simulate holding the button for the first 2 seconds (2M cycles) if self_test is enabled
                 let pressed = self.mouse.button0.get() || (self.self_test && self.cycles < 2_000_000);

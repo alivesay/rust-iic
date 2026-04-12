@@ -4,6 +4,13 @@ use crate::{iou::IOU, mmu::MMU, util::apple_iic_font_index};
 
 const CHAR_ROM: &[u8; 1024] = include_bytes!("../font.bin");
 
+/// Drive status info passed from the IWM to the video renderer
+pub struct DriveStatusInfo {
+    pub has_disk: bool,
+    pub is_active: bool,
+    pub is_write_protected: bool,
+}
+
 pub const TEXT_MODE_BASE_ADDRESSES: [u16; 24] = [
     0x0400, 0x0480, 0x0500, 0x0580, 0x0600, 0x0680, 0x0700, 0x0780, 0x0428, 0x04A8, 0x0528, 0x05A8,
     0x0628, 0x06A8, 0x0728, 0x07A8, 0x0450, 0x04D0, 0x0550, 0x05D0, 0x0650, 0x06D0, 0x0750, 0x07D0,
@@ -613,7 +620,7 @@ impl Video {
     }
 
     #[allow(dead_code)]
-    fn render_double_hires_mode(&mut self, iou: &IOU, mmu: &MMU) {
+    fn render_double_hires_mode(&mut self, _iou: &IOU, mmu: &MMU) {
         let base_vram: u16 = 0x2000;
 
         for group in 0..24_u16 {
@@ -694,6 +701,8 @@ impl Video {
             }
         }
     }
+
+
 
     pub fn get_dimensions(&self) -> (u32, u32) {
         (self.width as u32, self.height as u32)

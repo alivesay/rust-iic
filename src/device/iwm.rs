@@ -85,8 +85,6 @@ pub struct Iwm {
 
     drives: [DriveState; 2],
 
-    diag_count: u8,
-
     // Metrics
     pub bytes_read_counter: u64,
     pub revolutions_counter: u64,
@@ -112,8 +110,6 @@ impl Iwm {
 
             drives: [DriveState::new(), DriveState::new()],
 
-            diag_count: 0,
-
             bytes_read_counter: 0,
             revolutions_counter: 0,
             current_track_revolutions: 0,
@@ -121,16 +117,31 @@ impl Iwm {
         }
     }
 
+    /// Reset IWM chip state as if the hardware reset line was asserted.
+    /// Disk contents and head positions are preserved (like a real power cycle).
+    pub fn reset(&mut self) {
+        self.motor_on = false;
+        self.q6 = false;
+        self.q7 = false;
+        self.phases = 0;
+        self.mode = 0;
+        self.drive_select = false;
+        self.motor_off_pending = false;
+        self.motor_off_timer = 0;
+        self.cycles_since_last_read = 0;
+        for drive in &mut self.drives {
+            drive.was_writing = false;
+            drive.write_shift = 0;
+            drive.write_bits_left = 0;
+            drive.data_ready = false;
+            drive.consumed_epoch = 0;
+        }
+    }
+
     /// Index of the currently selected drive (0 or 1).
-    /// Falls back to Drive 1 if Drive 2 is selected but has no disk
-    /// (single-drive mode — the real IIc internal drive responds to both).
     #[inline]
     fn di(&self) -> usize {
-        if self.drive_select && self.drives[1].has_disk() {
-            1
-        } else {
-            0
-        }
+        self.drive_select as usize
     }
 
     pub fn get_and_reset_metrics(&mut self) -> (u64, bool, u8, u64, u64) {
@@ -142,6 +153,35 @@ impl Iwm {
         self.data_overrun_counter = 0;
         let d = self.di();
         (bytes, self.motor_on, self.drives[d].head_pos / 2, revs, overruns)
+    }
+
+    /// Drive UI status for rendering the status bar.
+    /// Returns (has_disk, is_active, is_write_protected) for the given drive (0 or 1).
+    pub fn drive_status(&self, drive: usize) -> (bool, bool, bool) {
+        let has_disk = self.drives[drive].has_disk();
+        let is_active = self.motor_on && self.di() == drive;
+        let wp = self.drives[drive].write_protect;
+        (has_disk, is_active, wp)
+    }
+
+    /// Toggle write protect for the given drive.
+    pub fn toggle_write_protect(&mut self, drive: usize) {
+        self.drives[drive].write_protect = !self.drives[drive].write_protect;
+    }
+
+    /// Eject the disk from the given drive.
+    #[allow(dead_code)]
+    pub fn eject_disk(&mut self, drive: usize) {
+        if self.drives[drive].dirty {
+            self.flush_track(drive);
+            self.save_disk(drive);
+        }
+        self.drives[drive].disk = None;
+        self.drives[drive].disk_path = None;
+        self.drives[drive].track_data.clear();
+        self.drives[drive].loaded_track = None;
+        self.drives[drive].nibbles_valid = false;
+        self.drives[drive].dirty = false;
     }
 
 
@@ -563,7 +603,9 @@ impl Iwm {
     pub fn read_data(&mut self) -> u8 {
         let d = self.di();
         if !self.drives[d].has_disk() {
-            return 0;
+            // No disk: return random noise so RWTS can fail gracefully
+            // (bit 7 set occasionally lets the read loop exit and report I/O error)
+            return fastrand::u8(..);
         }
 
         if self.motor_on {
