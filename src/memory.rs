@@ -16,6 +16,10 @@ impl Memory {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.data.fill(0x00);
+    }
+
     pub fn read_byte(&self, addr: u16) -> u8 {
         let byte = self.data.get(addr as usize).copied().unwrap_or(0x00);
         // #[cfg(feature = "debug-mode")]

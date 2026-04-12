@@ -188,20 +188,45 @@ impl CPU {
     pub fn reset(&mut self) {
         println!("CPU RESET: Performing warm reset...");
 
-        // self.symbol_table.load_symbols();
+        // 65C02: set I, clear D, load PC from reset vector. Registers/SP/RAM preserved.
+        self.p.insert(Flags::IRQ_DISABLE);
+        self.p.remove(Flags::DECIMAL);
         self.bus.interrupts.clear_all();
 
-        self.pc = self.resolve_entry_point();
+        // Reset IOU (soft switches) — on real hardware the reset line resets the IOU chip
+        self.bus.iou.reset();
 
-        self.initialize_registers();
-        self.initialize_flags();
-
-        if self.system_type == SystemType::AppleIIc {
-            self.initialize_soft_switches();
-        }
+        self.pc = self.bus.read_word(0xFFFC);
 
         println!(
             "Reset Complete: PC={:#06X}, SP={:#04X}, P={:08b}",
+            self.pc,
+            self.regs.sp,
+            self.p.bits()
+        );
+    }
+
+    pub fn power_cycle(&mut self) {
+        println!("CPU POWER CYCLE: Full cold reboot...");
+
+        // Clear all RAM (simulates power loss)
+        self.bus.clear_ram();
+
+        // Full re-init: registers, flags, soft switches
+        self.initialize_registers();
+        self.initialize_flags();
+        self.bus.interrupts.clear_all();
+        self.bus.iou.reset();
+
+        // Reset cycle counters (fresh power-on state)
+        self.cycles = 0;
+        self.bus.iou.cycles = 0;
+        self.bus.iou.scan_cycle = 0;
+
+        self.pc = self.bus.read_word(0xFFFC);
+
+        println!(
+            "Power Cycle Complete: PC={:#06X}, SP={:#04X}, P={:08b}",
             self.pc,
             self.regs.sp,
             self.p.bits()

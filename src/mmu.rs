@@ -91,6 +91,15 @@ impl MMU {
     //         self.mem_state.set(MemStateMask::INIT);
     // }
 
+    pub fn clear_ram(&mut self) {
+        for bank in &mut self.ram {
+            bank.clear();
+        }
+        for bank in &mut self.lcram {
+            bank.clear();
+        }
+    }
+
     pub fn load_rom(&mut self, rom: ROM) {
         // v3 iic rom boundary $3fff
         self.rom[0].load_bytes(0, &rom.data[0..ROM_SIZE]);
