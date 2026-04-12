@@ -3,7 +3,7 @@ use std::time::Instant;
 use a2kit::img::{DiskImage, Track};
 
 pub struct Iwm {
-    motor_on: bool,
+    pub motor_on: bool,
     q6: bool,
     q7: bool,
     disk: Option<Box<dyn DiskImage>>,
@@ -27,6 +27,15 @@ pub struct Iwm {
     pub mode: u8,
     pub drive_select: bool, // false = Drive 1, true = Drive 2
     cycles_since_save_check: u64,
+    
+    // Pre-decoded latch state at each bit position for O(1) reads
+    nibble_latch: Vec<u8>,
+    nibble_epoch: Vec<u16>,  // Monotonic byte counter at each bit position
+    next_epoch_bit: Vec<u32>, // Bit position where the NEXT byte completes
+    nibbles_valid: bool,
+    consumed_epoch: u16,     // Epoch of the last byte the CPU consumed
+    data_ready: bool,        // True when a new byte is available for the CPU
+    pub fast_disk: bool,     // Skip BPL wait by fast-forwarding to next byte
     
     // Metrics
     pub bytes_read_counter: u64,
@@ -59,6 +68,14 @@ impl Iwm {
             mode: 0,
             drive_select: false,
             cycles_since_save_check: 0,
+            
+            nibble_latch: Vec::new(),
+            nibble_epoch: Vec::new(),
+            next_epoch_bit: Vec::new(),
+            nibbles_valid: false,
+            consumed_epoch: 0,
+            data_ready: false,
+            fast_disk: true,
             
             bytes_read_counter: 0,
             revolutions_counter: 0,
@@ -173,6 +190,7 @@ impl Iwm {
                              self.bit_index = 0;
                              self.loaded_track = Some(track_num);
                              self.dirty = false;
+                             self.nibbles_valid = false;
                              if self.debug {
                                  println!("IWM: Loaded track {} (len {})", track_num, self.track_data.len());
                              }
@@ -219,63 +237,119 @@ impl Iwm {
         self.dirty = false;
     }
 
+    /// Pre-decode the bitstream into lookup tables for O(1) reads.
+    /// 
+    /// Builds three tables:
+    /// - nibble_latch[i]: the last complete byte (bit 7 set) at or before position i
+    /// - nibble_epoch[i]: monotonic counter that increments each time a byte completes
+    /// - next_epoch_bit[i]: bit position where the NEXT byte after position i completes
+    ///
+    /// The epoch table enables the IWM handshake: the CPU only sees a new byte
+    /// (bit 7 set) when the epoch at the current position exceeds the last consumed
+    /// epoch. The next_epoch_bit table enables fast-disk mode by allowing O(1) skip
+    /// to the next complete byte.
+    fn ensure_nibbles(&mut self) {
+        if self.nibbles_valid { return; }
+        
+        let total_bits = self.track_data.len() * 8;
+        if total_bits == 0 {
+            self.nibble_latch.clear();
+            self.nibble_epoch.clear();
+            self.next_epoch_bit.clear();
+            self.nibbles_valid = true;
+            return;
+        }
+        
+        self.nibble_latch.resize(total_bits, 0);
+        self.nibble_epoch.resize(total_bits, 0);
+        self.next_epoch_bit.resize(total_bits, 0);
+        let mut shift_reg: u8 = 0;
+        let mut latch: u8 = 0;
+        let mut epoch: u16 = 0;
+        
+        // Run 2 revolutions: first establishes steady-state, second records values
+        for rev in 0..2u8 {
+            if rev == 1 { epoch = 0; }
+            for i in 0..total_bits {
+                let bit = (self.track_data[i >> 3] >> (7 - (i & 7))) & 1;
+                
+                shift_reg = (shift_reg << 1) | bit;
+                if shift_reg & 0x80 != 0 {
+                    latch = shift_reg;
+                    shift_reg = 0;
+                    if rev == 1 {
+                        epoch = epoch.wrapping_add(1);
+                    }
+                }
+                
+                if rev == 1 {
+                    self.nibble_latch[i] = latch;
+                    self.nibble_epoch[i] = epoch;
+                }
+            }
+        }
+        
+        // Build next_epoch_bit by scanning backwards
+        // For each position, store where the next byte boundary is
+        // Find the first boundary in the track for wrap-around
+        let wrap_boundary = {
+            let mut b = 0u32;
+            for i in 0..total_bits {
+                if i > 0 && self.nibble_epoch[i] != self.nibble_epoch[i - 1] {
+                    b = i as u32;
+                    break;
+                }
+            }
+            b
+        };
+        let mut next_boundary = wrap_boundary;
+        for i in (0..total_bits).rev() {
+            self.next_epoch_bit[i] = next_boundary;
+            if i > 0 && self.nibble_epoch[i] != self.nibble_epoch[i - 1] {
+                next_boundary = i as u32;
+            }
+        }
+        
+        self.nibbles_valid = true;
+        self.consumed_epoch = 0;
+        self.data_ready = false;
+    }
+
     fn catch_up(&mut self) {
         if !self.motor_on || self.track_data.is_empty() {
             self.pending_cycles = 0;
             return;
         }
 
-        // Process pending cycles based on mode (Slow=4us, Fast=2us)
-        let cycles_per_bit = if (self.mode & 0x10) != 0 { 2 } else { 4 };
+        self.ensure_nibbles();
 
-        while self.pending_cycles >= cycles_per_bit {
-            // Optimization: If we have a full byte and are close to the "present" (within 8 cycles),
-            // stop and return it..
-            if (self.latch & 0x80 != 0) && (self.pending_cycles <= (cycles_per_bit * 2)) {
-                break;
-            }
+        let cycles_per_bit: u64 = if (self.mode & 0x10) != 0 { 2 } else { 4 };
+        let track_bits = self.track_data.len() as u64 * 8;
+        if track_bits == 0 {
+            self.pending_cycles = 0;
+            return;
+        }
 
-            self.pending_cycles -= cycles_per_bit;
+        let bits_elapsed = self.pending_cycles / cycles_per_bit;
+        self.pending_cycles %= cycles_per_bit;
 
-            // Get the next bit
-            let byte_index = self.bit_index / 8;
-            let bit_offset = 7 - (self.bit_index % 8); // MSB first
-            
-            if byte_index >= self.track_data.len() {
-                // Loop back to start of track
-                self.bit_index = 0;
-                self.revolutions_counter += 1;
-                self.current_track_revolutions += 1;
-                continue;
-            }
+        if bits_elapsed == 0 { return; }
 
-            let bit = (self.track_data[byte_index] >> bit_offset) & 1;
-            self.bit_index += 1;
+        // Advance position
+        let new_pos = self.bit_index as u64 + bits_elapsed;
+        let revolutions = new_pos / track_bits;
+        let target_bit = (new_pos % track_bits) as usize;
 
-            let was_full = self.latch & 0x80 != 0;
+        self.revolutions_counter += revolutions;
+        self.current_track_revolutions += revolutions;
+        self.bit_index = target_bit;
 
-            // Apply "Hold on Zero" logic
-            if was_full {
-                // Latch is full
-                if bit == 0 {
-                    // Hold current value. Do nothing.
-                } else {
-                    // New byte starts
-                    self.latch = 0; // Clear
-                    self.latch = (self.latch << 1) | 1; // Shift in the 1
-                }
-            } else {
-                // Latch is not full, shift in bit
-                self.latch = (self.latch << 1) | bit;
-            }
-
-            // Check if it became full
-            if !was_full && (self.latch & 0x80 != 0) {
-                self.bytes_read_counter += 1;
-                if self.debug {
-                     println!("IWM: Read Byte {:02X}", self.latch);
-                }
-            }
+        // Check if a new byte has completed since the last CPU read.
+        // The epoch wraps around the track, so also account for revolutions.
+        let current_epoch = self.nibble_epoch[target_bit];
+        if current_epoch != self.consumed_epoch || revolutions > 0 {
+            self.latch = self.nibble_latch[target_bit];
+            self.data_ready = true;
         }
     }
 
@@ -317,15 +391,39 @@ impl Iwm {
 
         if self.motor_on {
             self.catch_up();
-            
-            // Optimization: if we are waiting for the start of a byte (latch is 0),
-            // and the CPU is reading, fast-forward through zeros to the next `1`.
-            // if self.latch == 0 {
-            //    self.fast_forward_zeros();
-            // }
 
-            if self.debug { println!("IWM: CPU Read Data {:02X}", self.latch); }
-            return self.latch;
+            let result = if self.data_ready {
+                // New byte available — return it with bit 7 set and consume it
+                self.consumed_epoch = if !self.nibble_epoch.is_empty() {
+                    self.nibble_epoch[self.bit_index]
+                } else {
+                    0
+                };
+                self.data_ready = false;
+                self.bytes_read_counter += 1;
+                self.latch
+            } else if self.fast_disk && !self.next_epoch_bit.is_empty() {
+                // Fast disk: skip ahead to the next complete byte instantly
+                let next_bit = self.next_epoch_bit[self.bit_index] as usize;
+                let total_bits = self.track_data.len() * 8;
+                if next_bit < total_bits {
+                    self.bit_index = next_bit;
+                    self.latch = self.nibble_latch[next_bit];
+                    self.consumed_epoch = self.nibble_epoch[next_bit];
+                    self.pending_cycles = 0;
+                    self.bytes_read_counter += 1;
+                    self.latch
+                } else {
+                    // Wrap around
+                    self.latch & 0x7F
+                }
+            } else {
+                // No new byte since last read — return latch with bit 7 clear
+                self.latch & 0x7F
+            };
+
+            if self.debug { println!("IWM: CPU Read Data {:02X}", result); }
+            return result;
         }
         // floating bus or random?
         0
@@ -387,6 +485,7 @@ impl Iwm {
                              if byte_index < self.track_data.len() {
                                  self.track_data[byte_index] = val;
                                  self.dirty = true;
+                                 self.nibbles_valid = false;
                                  self.bit_index += 8;
                                  if self.bit_index / 8 >= self.track_data.len() {
                                      self.bit_index = 0;

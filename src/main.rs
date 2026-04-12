@@ -70,6 +70,9 @@ struct Args {
     #[arg(long)]
     monochrome: bool,
 
+    #[arg(long, default_value_t = 0.5)]
+    scanline_intensity: f32,
+
     #[arg(long)]
     perf: bool,
 
@@ -116,6 +119,7 @@ fn main() -> Result<(), Error> {
     cpu.bus.iou.debug = args.debug;
     cpu.bus.iou.iwm.debug = args.debug;
     cpu.bus.video.set_monochrome(args.monochrome);
+    cpu.bus.video.scanline_intensity = args.scanline_intensity;
 
     let iic_rom_file = include_bytes!("../iic3.bin");
     let iic_rom = rom::ROM::load_from_bytes(iic_rom_file, cpu.system_type).unwrap();
@@ -186,9 +190,18 @@ fn main() -> Result<(), Error> {
         let frame_start = Instant::now();
         let mut cpu_time = Duration::ZERO;
 
+        // When fast disk is active and motor is spinning, run many more cycles
+        // per frame to speed through disk I/O without wall-clock delay
+        let iwm_fast = app.cpu.bus.iou.iwm.fast_disk && app.cpu.bus.iou.iwm.motor_on;
+        let effective_cpf = if iwm_fast && !fast_mode {
+            cycles_per_frame * 8
+        } else {
+            cycles_per_frame
+        };
+
         if app.window.is_some() {
             let mut cycles_run = 0;
-            while cycles_run < cycles_per_frame {
+            while cycles_run < effective_cpf {
                 if fast_mode && app.cpu.pc == fast_until_addr {
                     println!("Reached fast_until address {:04X}. Switching to normal speed and enabling logging.", fast_until_addr);
                     fast_mode = false;
@@ -261,7 +274,7 @@ fn main() -> Result<(), Error> {
 
         next_frame_time += target_frame_time;
         let now = Instant::now();
-        if now < next_frame_time {
+        if !iwm_fast && now < next_frame_time {
             std::thread::sleep(next_frame_time - now);
         } else {
             if now - next_frame_time > Duration::from_millis(50) {

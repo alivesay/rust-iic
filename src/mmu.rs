@@ -127,7 +127,12 @@ impl MMU {
             0x0000..=0x01FF => self.ram[altzp].read_byte(addr),
 
             // **80STORE-affected Display Memory (Text & Graphics)**
-            0x0400..=0x07FF | 0x2000..=0x3FFF if is_80store => {
+            // Text page ($0400-$07FF): always redirected by 80STORE+PAGE2
+            0x0400..=0x07FF if is_80store => {
+                self.ram[is_page2 as usize].read_byte(addr)
+            }
+            // HiRes page ($2000-$3FFF): only redirected by 80STORE+PAGE2 when HIRES is active
+            0x2000..=0x3FFF if is_80store && check_bits_u8!(video_mode, VideoModeMask::HIRES) => {
                 self.ram[is_page2 as usize].read_byte(addr)
             }
 
@@ -191,6 +196,7 @@ impl MMU {
         mem_state: u8,
         is_80store: bool,
         is_page2: bool,
+        is_hires: bool,
     ) -> u8 {
         let altzp = check_bits_u8!(mem_state, MemStateMask::ALTZP) as usize;
         let bank = check_bits_u8!(mem_state, MemStateMask::RDBNK) as usize;
@@ -202,7 +208,12 @@ impl MMU {
             0x0000..=0x01FF => self.ram[altzp].write_byte(addr, value),
 
             // **80STORE-affected Display Memory (Text & Graphics)**
-            0x0400..=0x07FF | 0x2000..=0x3FFF if is_80store => {
+            // Text page ($0400-$07FF): always redirected by 80STORE+PAGE2
+            0x0400..=0x07FF if is_80store => {
+                self.ram[is_page2 as usize].write_byte(addr, value)
+            }
+            // HiRes page ($2000-$3FFF): only redirected by 80STORE+PAGE2 when HIRES is active
+            0x2000..=0x3FFF if is_80store && is_hires => {
                 self.ram[is_page2 as usize].write_byte(addr, value)
             }
 
