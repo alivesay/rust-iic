@@ -236,6 +236,20 @@ impl Bus {
 
     pub fn tick(&mut self, cycles: u64) {
         self.iou.cycles += cycles;
+
+        // Track position within NTSC frame for VBL timing
+        // 262 scanlines × 65 cycles = 17030 cycles/frame
+        let old_scan = self.iou.scan_cycle;
+        self.iou.scan_cycle += cycles;
+        if self.iou.scan_cycle >= 17030 {
+            self.iou.scan_cycle -= 17030;
+        }
+        // Set VBL interrupt when entering VBL region (scanline 192+)
+        if old_scan < 12480 && self.iou.scan_cycle >= 12480 {
+            self.iou.mouse.vbl_int.set(true);
+        }
+
+        self.iou.mouse.tick(cycles);
         self.iou.iwm.tick(cycles);
         if self.iou.check_interrupts() {
             self.interrupts.request_irq();

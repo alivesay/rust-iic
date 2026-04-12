@@ -2,41 +2,91 @@ use std::path::Path;
 use std::time::Instant;
 use a2kit::img::{DiskImage, Track};
 
-pub struct Iwm {
-    pub motor_on: bool,
-    q6: bool,
-    q7: bool,
+/// Per-drive state
+struct DriveState {
     disk: Option<Box<dyn DiskImage>>,
     disk_path: Option<String>,
     dirty: bool,
     last_save: Instant,
-    pub debug: bool,
-    
-    phases: u8,
-    head_pos: u8, // 0-69 (Track = head_pos / 2)
-    
+
+    head_pos: u8, // 0-160 quarter tracks (track = head_pos / 4)
+
     track_data: Vec<u8>,
-    track_index: usize,
     loaded_track: Option<u8>,
-    
+
     bit_index: usize,
     latch: u8,
-    cycle_remainder: i64,
     pending_cycles: u64,
-    
-    pub mode: u8,
-    pub drive_select: bool, // false = Drive 1, true = Drive 2
-    cycles_since_save_check: u64,
-    
+
+    write_protect: bool,
+
     // Pre-decoded latch state at each bit position for O(1) reads
     nibble_latch: Vec<u8>,
-    nibble_epoch: Vec<u16>,  // Monotonic byte counter at each bit position
-    next_epoch_bit: Vec<u32>, // Bit position where the NEXT byte completes
+    nibble_epoch: Vec<u16>,
+    next_epoch_bit: Vec<u32>,
     nibbles_valid: bool,
-    consumed_epoch: u16,     // Epoch of the last byte the CPU consumed
-    data_ready: bool,        // True when a new byte is available for the CPU
-    pub fast_disk: bool,     // Skip BPL wait by fast-forwarding to next byte
-    
+    consumed_epoch: u16,
+    data_ready: bool,
+
+    // Write state
+    write_shift: u8,
+    write_bits_left: u8,
+    was_writing: bool,
+
+    cycles_since_save_check: u64,
+}
+
+impl DriveState {
+    fn new() -> Self {
+        Self {
+            disk: None,
+            disk_path: None,
+            dirty: false,
+            last_save: Instant::now(),
+            head_pos: 0,
+            track_data: Vec::new(),
+            loaded_track: None,
+            bit_index: 0,
+            latch: 0,
+            pending_cycles: 0,
+            write_protect: false,
+            nibble_latch: Vec::new(),
+            nibble_epoch: Vec::new(),
+            next_epoch_bit: Vec::new(),
+            nibbles_valid: false,
+            consumed_epoch: 0,
+            data_ready: false,
+            write_shift: 0,
+            write_bits_left: 0,
+            was_writing: false,
+            cycles_since_save_check: 0,
+        }
+    }
+
+    fn has_disk(&self) -> bool {
+        self.disk.is_some()
+    }
+}
+
+pub struct Iwm {
+    pub motor_on: bool,
+    q6: bool,
+    q7: bool,
+    pub debug: bool,
+
+    phases: u8,
+
+    pub mode: u8,
+    pub drive_select: bool, // false = Drive 1, true = Drive 2
+    pub fast_disk: bool,
+    cycles_since_last_read: u64,
+    motor_off_pending: bool,       // True when motor-off timer is counting down
+    motor_off_timer: u64,          // Cycles remaining before motor actually turns off
+
+    drives: [DriveState; 2],
+
+    diag_count: u8,
+
     // Metrics
     pub bytes_read_counter: u64,
     pub revolutions_counter: u64,
@@ -50,37 +100,36 @@ impl Iwm {
             motor_on: false,
             q6: false,
             q7: false,
-            disk: None,
-            disk_path: None,
-            dirty: false,
-            last_save: Instant::now(),
             debug: false,
             phases: 0,
-            head_pos: 0,
-            track_data: Vec::new(),
-            track_index: 0,
-            loaded_track: None,
-            bit_index: 0,
-            latch: 0,
-            cycle_remainder: 0,
-            pending_cycles: 0,
-            
+
             mode: 0,
             drive_select: false,
-            cycles_since_save_check: 0,
-            
-            nibble_latch: Vec::new(),
-            nibble_epoch: Vec::new(),
-            next_epoch_bit: Vec::new(),
-            nibbles_valid: false,
-            consumed_epoch: 0,
-            data_ready: false,
             fast_disk: true,
-            
+            cycles_since_last_read: 0,
+            motor_off_pending: false,
+            motor_off_timer: 0,
+
+            drives: [DriveState::new(), DriveState::new()],
+
+            diag_count: 0,
+
             bytes_read_counter: 0,
             revolutions_counter: 0,
             current_track_revolutions: 0,
             data_overrun_counter: 0,
+        }
+    }
+
+    /// Index of the currently selected drive (0 or 1).
+    /// Falls back to Drive 1 if Drive 2 is selected but has no disk
+    /// (single-drive mode — the real IIc internal drive responds to both).
+    #[inline]
+    fn di(&self) -> usize {
+        if self.drive_select && self.drives[1].has_disk() {
+            1
+        } else {
+            0
         }
     }
 
@@ -91,22 +140,54 @@ impl Iwm {
         self.bytes_read_counter = 0;
         self.revolutions_counter = 0;
         self.data_overrun_counter = 0;
-        (bytes, self.motor_on, self.head_pos / 2, revs, overruns)
+        let d = self.di();
+        (bytes, self.motor_on, self.drives[d].head_pos / 2, revs, overruns)
     }
 
 
     pub fn load_disk<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        self.load_disk_drive(0, path)
+    }
+
+    pub fn load_disk2<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        self.load_disk_drive(1, path)
+    }
+
+    fn load_disk_drive<P: AsRef<Path>>(&mut self, drive: usize, path: P) -> anyhow::Result<()> {
         let path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?;
-        self.disk = Some(a2kit::create_img_from_file(path_str).map_err(|e| anyhow::anyhow!(e.to_string()))?);
-        self.disk_path = Some(path_str.to_string());
-        self.dirty = false;
+        self.drives[drive].disk = Some(a2kit::create_img_from_file(path_str).map_err(|e| anyhow::anyhow!(e.to_string()))?);
+        self.drives[drive].disk_path = Some(path_str.to_string());
+        self.drives[drive].dirty = false;
         Ok(())
     }
 
     pub fn set_motor(&mut self, on: bool) {
-        self.motor_on = on;
         if on {
-            self.cycle_remainder = 0;
+            // Motor ON cancels any pending motor-off timer
+            self.motor_off_pending = false;
+            self.motor_off_timer = 0;
+            if !self.motor_on {
+                if self.debug { println!("IWM MOTOR: OFF → ON (drive={})", self.di() + 1); }
+            }
+            self.motor_on = true;
+            self.cycles_since_last_read = 0;
+        } else if self.motor_on {
+            // Motor OFF request — check mode bit 4 for delay behavior
+            if (self.mode & 0x10) != 0 {
+                // Mode bit 4 set: immediate motor off (no timer)
+                let d = self.di();
+                if self.drives[d].dirty {
+                    self.flush_track(d);
+                    self.save_disk(d);
+                }
+                self.motor_on = false;
+                if self.debug { println!("IWM MOTOR: ON → OFF immediate (drive={})", d + 1); }
+            } else {
+                // Mode bit 4 clear (default): start ~1 second motor-off timer
+                self.motor_off_pending = true;
+                self.motor_off_timer = 1_023_000; // ~1 second at 1.023 MHz
+                if self.debug { println!("IWM MOTOR: ON → OFF pending (drive={}, 1s timer)", self.di() + 1); }
+            }
         }
     }
 
@@ -120,40 +201,34 @@ impl Iwm {
     }
 
     fn step_motor(&mut self) {
-        // Calculate the target magnetic angle (0-7) based on active phases
-        // 0=P0, 1=P0+P1, 2=P1, 3=P1+P2, 4=P2, 5=P2+P3, 6=P3, 7=P3+P0
         let target_angle = match self.phases & 0xF {
-            0x1 => Some(0), // P0
-            0x3 => Some(1), // P0 + P1
-            0x2 => Some(2), // P1
-            0x6 => Some(3), // P1 + P2
-            0x4 => Some(4), // P2
-            0xC => Some(5), // P2 + P3
-            0x8 => Some(6), // P3
-            0x9 => Some(7), // P3 + P0
+            0x1 => Some(0),
+            0x3 => Some(1),
+            0x2 => Some(2),
+            0x6 => Some(3),
+            0x4 => Some(4),
+            0xC => Some(5),
+            0x8 => Some(6),
+            0x9 => Some(7),
             _ => None,
         };
 
         if let Some(target) = target_angle {
-            let current_angle = (self.head_pos % 8) as i32;
+            let d = self.di();
+            let current_angle = (self.drives[d].head_pos % 8) as i32;
             let mut delta = target - current_angle;
 
-            // Normalize delta to shortest path (-4 to +3)
-            if delta > 4 {
-                delta -= 8;
-            } else if delta <= -4 {
-                delta += 8;
-            }
+            if delta > 4 { delta -= 8; }
+            else if delta <= -4 { delta += 8; }
 
             if delta != 0 {
-                let new_pos = self.head_pos as i32 + delta;
-                // Clamp to valid range (0-160 quarter tracks)
+                let new_pos = self.drives[d].head_pos as i32 + delta;
                 if new_pos >= 0 && new_pos <= 160 {
-                    if self.head_pos != new_pos as u8 {
-                        self.head_pos = new_pos as u8;
+                    if self.drives[d].head_pos != new_pos as u8 {
+                        self.drives[d].head_pos = new_pos as u8;
                         self.current_track_revolutions = 0;
                         if self.debug {
-                            println!("IWM: Head moved to {} (Delta: {})", self.head_pos, delta);
+                            println!("IWM: Drive {} head moved to {} (Delta: {})", d + 1, self.drives[d].head_pos, delta);
                         }
                     }
                 }
@@ -162,79 +237,109 @@ impl Iwm {
     }
 
     pub fn tick(&mut self, cycles: u64) {
-        // Only tick if we are selecting Drive 1 (false) and we have a disk
-        if self.drive_select {
+        // Process motor-off timer even if motor appears on
+        if self.motor_off_pending {
+            if cycles >= self.motor_off_timer {
+                self.motor_off_timer = 0;
+                self.motor_off_pending = false;
+                let d = self.di();
+                if self.drives[d].dirty {
+                    self.flush_track(d);
+                    self.save_disk(d);
+                }
+                self.drives[d].was_writing = false;
+                self.motor_on = false;
+                if self.debug { println!("IWM MOTOR: delayed OFF fired (drive={})", d + 1); }
+            } else {
+                self.motor_off_timer -= cycles;
+            }
+        }
+
+        if !self.motor_on {
             return;
         }
 
-        if self.motor_on {
-             self.pending_cycles += cycles;
-             self.cycles_since_save_check += cycles;
+        let d = self.di();
+        if !self.drives[d].has_disk() {
+            return;
+        }
 
-             // Check if we need to load track
-             // Load when head is on a full track (0, 4, 8...)
-             if self.head_pos % 4 == 0 {
-                 let track_num = self.head_pos / 4;
-                 
-                 if self.loaded_track != Some(track_num) {
-                     // Flush previous track if dirty
-                     if self.dirty {
-                         self.flush_track();
-                         self.save_disk();
-                     }
+        self.drives[d].pending_cycles += cycles;
+        self.drives[d].cycles_since_save_check += cycles;
 
-                     if let Some(disk) = &mut self.disk {
-                         if let Ok(data) = disk.get_track_buf(Track::Num(track_num as usize)) {
-                             self.track_data = data;
-                             self.track_index = 0;
-                             self.bit_index = 0;
-                             self.loaded_track = Some(track_num);
-                             self.dirty = false;
-                             self.nibbles_valid = false;
-                             if self.debug {
-                                 println!("IWM: Loaded track {} (len {})", track_num, self.track_data.len());
-                             }
-                         }
-                     }
-                 }
-             }
+        // Check if we need to load track
+        if self.drives[d].head_pos % 4 == 0 {
+            let track_num = self.drives[d].head_pos / 4;
 
-             // Auto-save every 5 seconds if dirty
-             if self.cycles_since_save_check > 1_000_000 {
-                 self.cycles_since_save_check = 0;
-                 if self.dirty && self.last_save.elapsed().as_secs() >= 5 {
-                     self.flush_track();
-                     self.save_disk();
-                 }
-             }
+            if track_num < 35 && self.drives[d].loaded_track != Some(track_num) {
+                if self.drives[d].dirty {
+                    self.flush_track(d);
+                    self.save_disk(d);
+                }
+
+                if let Some(disk) = &mut self.drives[d].disk {
+                    if let Ok(data) = disk.get_track_buf(Track::Num(track_num as usize)) {
+                        self.drives[d].track_data = data;
+                        self.drives[d].bit_index = 0;
+                        self.drives[d].loaded_track = Some(track_num);
+                        self.drives[d].dirty = false;
+                        self.drives[d].nibbles_valid = false;
+                        if self.debug {
+                            println!("IWM: Drive {} loaded track {} (len {})", d + 1, track_num, self.drives[d].track_data.len());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Auto-off motor if no IWM access for ~10 seconds
+        self.cycles_since_last_read += cycles;
+        if self.cycles_since_last_read > 10_230_000 {
+            if self.drives[d].dirty {
+                self.flush_track(d);
+                self.save_disk(d);
+            }
+            self.drives[d].was_writing = false;
+            self.motor_on = false;
+            self.cycles_since_last_read = 0;
+            if self.debug { println!("IWM: Motor auto-off (no access for ~10s)"); }
+        }
+
+        // Auto-save every 5 seconds if dirty
+        if self.drives[d].cycles_since_save_check > 1_000_000 {
+            self.drives[d].cycles_since_save_check = 0;
+            if self.drives[d].dirty && self.drives[d].last_save.elapsed().as_secs() >= 5 {
+                self.flush_track(d);
+                self.save_disk(d);
+            }
         }
     }
 
-    fn flush_track(&mut self) {
-        if let Some(track_num) = self.loaded_track {
-            if let Some(disk) = &mut self.disk {
-                if let Err(e) = disk.set_track_buf(Track::Num(track_num as usize), &self.track_data) {
-                    println!("IWM Error: Failed to flush track {}: {}", track_num, e);
+    fn flush_track(&mut self, d: usize) {
+        if let Some(track_num) = self.drives[d].loaded_track {
+            if let Some(disk) = &mut self.drives[d].disk {
+                if let Err(e) = disk.set_track_buf(Track::Num(track_num as usize), &self.drives[d].track_data) {
+                    println!("IWM Error: Failed to flush drive {} track {}: {}", d + 1, track_num, e);
                 } else {
-                    if self.debug { println!("IWM: Flushed track {}", track_num); }
+                    if self.debug { println!("IWM: Drive {} flushed track {}", d + 1, track_num); }
                 }
             }
         }
     }
 
-    fn save_disk(&mut self) {
-        if let Some(path) = &self.disk_path {
-            if let Some(disk) = &mut self.disk {
+    fn save_disk(&mut self, d: usize) {
+        if let Some(path) = &self.drives[d].disk_path {
+            if let Some(disk) = &mut self.drives[d].disk {
                 let bytes = disk.to_bytes();
                 if let Err(e) = std::fs::write(path, bytes) {
                     println!("IWM Error: Failed to save disk: {}", e);
                 } else {
-                    if self.debug { println!("IWM: Saved disk to {}", path); }
+                    if self.debug { println!("IWM: Saved drive {} disk to {}", d + 1, path); }
                 }
             }
         }
-        self.last_save = Instant::now();
-        self.dirty = false;
+        self.drives[d].last_save = Instant::now();
+        self.drives[d].dirty = false;
     }
 
     /// Pre-decode the bitstream into lookup tables for O(1) reads.
@@ -249,29 +354,29 @@ impl Iwm {
     /// epoch. The next_epoch_bit table enables fast-disk mode by allowing O(1) skip
     /// to the next complete byte.
     fn ensure_nibbles(&mut self) {
-        if self.nibbles_valid { return; }
+        let d = self.di();
+        if self.drives[d].nibbles_valid { return; }
         
-        let total_bits = self.track_data.len() * 8;
+        let total_bits = self.drives[d].track_data.len() * 8;
         if total_bits == 0 {
-            self.nibble_latch.clear();
-            self.nibble_epoch.clear();
-            self.next_epoch_bit.clear();
-            self.nibbles_valid = true;
+            self.drives[d].nibble_latch.clear();
+            self.drives[d].nibble_epoch.clear();
+            self.drives[d].next_epoch_bit.clear();
+            self.drives[d].nibbles_valid = true;
             return;
         }
         
-        self.nibble_latch.resize(total_bits, 0);
-        self.nibble_epoch.resize(total_bits, 0);
-        self.next_epoch_bit.resize(total_bits, 0);
+        self.drives[d].nibble_latch.resize(total_bits, 0);
+        self.drives[d].nibble_epoch.resize(total_bits, 0);
+        self.drives[d].next_epoch_bit.resize(total_bits, 0);
         let mut shift_reg: u8 = 0;
         let mut latch: u8 = 0;
         let mut epoch: u16 = 0;
         
-        // Run 2 revolutions: first establishes steady-state, second records values
         for rev in 0..2u8 {
             if rev == 1 { epoch = 0; }
             for i in 0..total_bits {
-                let bit = (self.track_data[i >> 3] >> (7 - (i & 7))) & 1;
+                let bit = (self.drives[d].track_data[i >> 3] >> (7 - (i & 7))) & 1;
                 
                 shift_reg = (shift_reg << 1) | bit;
                 if shift_reg & 0x80 != 0 {
@@ -283,19 +388,16 @@ impl Iwm {
                 }
                 
                 if rev == 1 {
-                    self.nibble_latch[i] = latch;
-                    self.nibble_epoch[i] = epoch;
+                    self.drives[d].nibble_latch[i] = latch;
+                    self.drives[d].nibble_epoch[i] = epoch;
                 }
             }
         }
         
-        // Build next_epoch_bit by scanning backwards
-        // For each position, store where the next byte boundary is
-        // Find the first boundary in the track for wrap-around
         let wrap_boundary = {
             let mut b = 0u32;
             for i in 0..total_bits {
-                if i > 0 && self.nibble_epoch[i] != self.nibble_epoch[i - 1] {
+                if i > 0 && self.drives[d].nibble_epoch[i] != self.drives[d].nibble_epoch[i - 1] {
                     b = i as u32;
                     break;
                 }
@@ -304,136 +406,206 @@ impl Iwm {
         };
         let mut next_boundary = wrap_boundary;
         for i in (0..total_bits).rev() {
-            self.next_epoch_bit[i] = next_boundary;
-            if i > 0 && self.nibble_epoch[i] != self.nibble_epoch[i - 1] {
+            self.drives[d].next_epoch_bit[i] = next_boundary;
+            if i > 0 && self.drives[d].nibble_epoch[i] != self.drives[d].nibble_epoch[i - 1] {
                 next_boundary = i as u32;
             }
         }
         
-        self.nibbles_valid = true;
-        self.consumed_epoch = 0;
-        self.data_ready = false;
+        self.drives[d].nibbles_valid = true;
+        self.drives[d].consumed_epoch = 0;
+        self.drives[d].data_ready = false;
     }
 
     fn catch_up(&mut self) {
-        if !self.motor_on || self.track_data.is_empty() {
-            self.pending_cycles = 0;
+        let d = self.di();
+        if !self.motor_on || self.drives[d].track_data.is_empty() {
+            self.drives[d].pending_cycles = 0;
             return;
         }
 
+        if self.drives[d].was_writing && self.drives[d].write_bits_left > 0 {
+            self.catch_up_write();
+        } else {
+            self.catch_up_read();
+        }
+    }
+
+    fn catch_up_read(&mut self) {
         self.ensure_nibbles();
 
+        let d = self.di();
         let cycles_per_bit: u64 = if (self.mode & 0x10) != 0 { 2 } else { 4 };
-        let track_bits = self.track_data.len() as u64 * 8;
+        let track_bits = self.drives[d].track_data.len() as u64 * 8;
         if track_bits == 0 {
-            self.pending_cycles = 0;
+            self.drives[d].pending_cycles = 0;
             return;
         }
 
-        let bits_elapsed = self.pending_cycles / cycles_per_bit;
-        self.pending_cycles %= cycles_per_bit;
+        let bits_elapsed = self.drives[d].pending_cycles / cycles_per_bit;
+        self.drives[d].pending_cycles %= cycles_per_bit;
 
         if bits_elapsed == 0 { return; }
 
-        // Advance position
-        let new_pos = self.bit_index as u64 + bits_elapsed;
+        let new_pos = self.drives[d].bit_index as u64 + bits_elapsed;
         let revolutions = new_pos / track_bits;
         let target_bit = (new_pos % track_bits) as usize;
 
         self.revolutions_counter += revolutions;
         self.current_track_revolutions += revolutions;
-        self.bit_index = target_bit;
+        self.drives[d].bit_index = target_bit;
 
-        // Check if a new byte has completed since the last CPU read.
-        // The epoch wraps around the track, so also account for revolutions.
-        let current_epoch = self.nibble_epoch[target_bit];
-        if current_epoch != self.consumed_epoch || revolutions > 0 {
-            self.latch = self.nibble_latch[target_bit];
-            self.data_ready = true;
+        let current_epoch = self.drives[d].nibble_epoch[target_bit];
+        if current_epoch != self.drives[d].consumed_epoch || revolutions > 0 {
+            self.drives[d].latch = self.drives[d].nibble_latch[target_bit];
+            self.drives[d].data_ready = true;
         }
+    }
+
+    fn catch_up_write(&mut self) {
+        let d = self.di();
+        let cycles_per_bit: u64 = if (self.mode & 0x10) != 0 { 2 } else { 4 };
+        let track_bits = self.drives[d].track_data.len() * 8;
+        if track_bits == 0 {
+            self.drives[d].pending_cycles = 0;
+            return;
+        }
+
+        let mut bits_to_write = self.drives[d].pending_cycles / cycles_per_bit;
+        self.drives[d].pending_cycles %= cycles_per_bit;
+
+        while bits_to_write > 0 {
+            if self.drives[d].write_bits_left > 0 {
+                let bit = (self.drives[d].write_shift >> 7) & 1;
+                let byte_idx = self.drives[d].bit_index / 8;
+                let bit_offset = 7 - (self.drives[d].bit_index % 8);
+
+                if byte_idx < self.drives[d].track_data.len() {
+                    if bit == 1 {
+                        self.drives[d].track_data[byte_idx] |= 1 << bit_offset;
+                    } else {
+                        self.drives[d].track_data[byte_idx] &= !(1 << bit_offset);
+                    }
+                }
+
+                self.drives[d].write_shift <<= 1;
+                self.drives[d].write_bits_left -= 1;
+
+                self.drives[d].bit_index += 1;
+                if self.drives[d].bit_index >= track_bits {
+                    self.drives[d].bit_index = 0;
+                    self.revolutions_counter += 1;
+                    self.current_track_revolutions += 1;
+                }
+            } else {
+                let byte_idx = self.drives[d].bit_index / 8;
+                let bit_offset = 7 - (self.drives[d].bit_index % 8);
+                if byte_idx < self.drives[d].track_data.len() {
+                    self.drives[d].track_data[byte_idx] &= !(1 << bit_offset);
+                }
+
+                self.drives[d].bit_index += 1;
+                if self.drives[d].bit_index >= track_bits {
+                    self.drives[d].bit_index = 0;
+                    self.revolutions_counter += 1;
+                    self.current_track_revolutions += 1;
+                }
+            }
+
+            bits_to_write -= 1;
+        }
+    }
+
+    fn write_load(&mut self, val: u8) {
+        self.catch_up();
+        let d = self.di();
+        if !self.drives[d].was_writing {
+            self.drives[d].was_writing = true;
+            if self.debug { println!("IWM: Drive {} entering write mode at bit {}", d + 1, self.drives[d].bit_index); }
+        }
+        self.drives[d].write_shift = val;
+        self.drives[d].write_bits_left = 8;
+        self.drives[d].dirty = true;
+        self.drives[d].nibbles_valid = false;
+        if self.debug { println!("IWM: Drive {} write load {:02X} at bit {}", d + 1, val, self.drives[d].bit_index); }
     }
 
     #[allow(dead_code)]
     fn fast_forward_zeros(&mut self) {
-        if self.track_data.is_empty() { return; }
+        let d = self.di();
+        if self.drives[d].track_data.is_empty() { return; }
 
         let mut bits_checked = 0;
         while bits_checked < 10000 {
-            let byte_index = self.bit_index / 8;
-            let bit_offset = 7 - (self.bit_index % 8);
+            let byte_index = self.drives[d].bit_index / 8;
+            let bit_offset = 7 - (self.drives[d].bit_index % 8);
             
-            if byte_index >= self.track_data.len() {
-                self.bit_index = 0;
+            if byte_index >= self.drives[d].track_data.len() {
+                self.drives[d].bit_index = 0;
                 self.revolutions_counter += 1;
                 self.current_track_revolutions += 1;
                 continue;
             }
 
-            let bit = (self.track_data[byte_index] >> bit_offset) & 1;
+            let bit = (self.drives[d].track_data[byte_index] >> bit_offset) & 1;
             
             if bit == 1 {
-                // found a 1, shift in and stop.
-                self.latch = (self.latch << 1) | 1;
-                self.bit_index += 1;
+                self.drives[d].latch = (self.drives[d].latch << 1) | 1;
+                self.drives[d].bit_index += 1;
                 return;
             }
 
-            // it's a zero, skip
-            self.bit_index += 1;
+            self.drives[d].bit_index += 1;
             bits_checked += 1;
         }
     }
 
     pub fn read_data(&mut self) -> u8 {
-        if self.drive_select {
+        let d = self.di();
+        if !self.drives[d].has_disk() {
             return 0;
         }
 
         if self.motor_on {
             self.catch_up();
+            self.cycles_since_last_read = 0;
 
-            let result = if self.data_ready {
-                // New byte available — return it with bit 7 set and consume it
-                self.consumed_epoch = if !self.nibble_epoch.is_empty() {
-                    self.nibble_epoch[self.bit_index]
+            let result = if self.drives[d].data_ready {
+                self.drives[d].consumed_epoch = if !self.drives[d].nibble_epoch.is_empty() {
+                    self.drives[d].nibble_epoch[self.drives[d].bit_index]
                 } else {
                     0
                 };
-                self.data_ready = false;
+                self.drives[d].data_ready = false;
                 self.bytes_read_counter += 1;
-                self.latch
-            } else if self.fast_disk && !self.next_epoch_bit.is_empty() {
-                // Fast disk: skip ahead to the next complete byte instantly
-                let next_bit = self.next_epoch_bit[self.bit_index] as usize;
-                let total_bits = self.track_data.len() * 8;
+                self.drives[d].latch
+            } else if self.fast_disk && !self.drives[d].next_epoch_bit.is_empty() {
+                let next_bit = self.drives[d].next_epoch_bit[self.drives[d].bit_index] as usize;
+                let total_bits = self.drives[d].track_data.len() * 8;
                 if next_bit < total_bits {
-                    self.bit_index = next_bit;
-                    self.latch = self.nibble_latch[next_bit];
-                    self.consumed_epoch = self.nibble_epoch[next_bit];
-                    self.pending_cycles = 0;
+                    self.drives[d].bit_index = next_bit;
+                    self.drives[d].latch = self.drives[d].nibble_latch[next_bit];
+                    self.drives[d].consumed_epoch = self.drives[d].nibble_epoch[next_bit];
+                    self.drives[d].pending_cycles = 0;
                     self.bytes_read_counter += 1;
-                    self.latch
+                    self.drives[d].latch
                 } else {
-                    // Wrap around
-                    self.latch & 0x7F
+                    self.drives[d].latch & 0x7F
                 }
             } else {
-                // No new byte since last read — return latch with bit 7 clear
-                self.latch & 0x7F
+                self.drives[d].latch & 0x7F
             };
 
-            if self.debug { println!("IWM: CPU Read Data {:02X}", result); }
+            if self.debug { println!("IWM: Drive {} CPU Read Data {:02X}", d + 1, result); }
             return result;
         }
-        // floating bus or random?
         0
     }
 
     pub fn access(&mut self, addr: u16, val: u8, write: bool) -> u8 {
-        // catch up state before changing switches
         self.catch_up();
+        self.cycles_since_last_read = 0;
 
-        // Update state based on address
         match addr & 0xF {
             0x0 => self.set_phase(0, false),
             0x1 => self.set_phase(0, true),
@@ -443,7 +615,15 @@ impl Iwm {
             0x5 => self.set_phase(2, true),
             0x6 => self.set_phase(3, false),
             0x7 => self.set_phase(3, true),
-            0x8 => self.set_motor(false),
+            0x8 => {
+                let d = self.di();
+                if self.motor_on && self.drives[d].was_writing && self.drives[d].dirty {
+                    self.flush_track(d);
+                    self.save_disk(d);
+                    self.drives[d].was_writing = false;
+                }
+                self.set_motor(false);
+            },
             0x9 => self.set_motor(true),
             0xA => self.drive_select = false,
             0xB => self.drive_select = true,
@@ -452,6 +632,21 @@ impl Iwm {
             0xE => self.q7 = false,
             0xF => self.q7 = true,
             _ => {}
+        }
+
+        // Detect leaving write mode
+        let d = self.di();
+        if self.drives[d].was_writing {
+            let still_in_write_pos = self.q6 && !self.q7 && self.motor_on;
+            if !still_in_write_pos {
+                self.drives[d].was_writing = false;
+                self.drives[d].write_bits_left = 0;
+                if self.drives[d].dirty {
+                    self.flush_track(d);
+                    self.save_disk(d);
+                    if self.debug { println!("IWM: Drive {} left write mode, flushed", d + 1); }
+                }
+            }
         }
 
         if self.debug && write {
@@ -471,53 +666,38 @@ impl Iwm {
 
         if write {
              if (addr & 1) != 0 {
-                 // write allowed on odd addresses
                  if self.q6 && self.q7 {
-                     // mode register write (Q6=1, Q7=1)
                      self.mode = val;
                      if self.debug { println!("IWM Mode set to: {:02X}", self.mode); }
                  } else if self.q6 && !self.q7 {
-                     // write data register (load) (Q6=1, Q7=0)
-                     if self.motor_on {
-                         // write data logic...
-                         if !self.track_data.is_empty() {
-                             let byte_index = self.bit_index / 8;
-                             if byte_index < self.track_data.len() {
-                                 self.track_data[byte_index] = val;
-                                 self.dirty = true;
-                                 self.nibbles_valid = false;
-                                 self.bit_index += 8;
-                                 if self.bit_index / 8 >= self.track_data.len() {
-                                     self.bit_index = 0;
-                                 }
-                             }
-                         }
+                     if self.motor_on && !self.drives[d].write_protect {
+                         self.write_load(val);
                      }
                  }
              }
              0
         } else {
              if (addr & 1) == 0 {
-                 // read allowed on even addresses
                  match (self.q7, self.q6) {
-                     (false, false) => { // Q7=0, Q6=0: Read Data
+                     (false, false) => {
                          self.read_data()
                      },
-                     (false, true) => { // Q7=0, Q6=1: Read Status
+                     (false, true) => {
                          let mut status = self.mode & 0x1F;
                          if self.motor_on { status |= 0x20; }
-                         // Sense / Write Protect (Bit 7)
-                         // 0 = Write Enabled, 1 = Write Protected
-                         // TODO: implement write protect sensing, hardcoded to Write Protected for now
-                         status &= 0x7F; 
+                         if self.drives[d].write_protect {
+                             status |= 0x80;
+                         }
                          if self.debug { println!("IWM Read Status: {:02X}", status); }
                          status
                      },
-                     (true, false) => { // Q7=1, Q6=0: Read Handshake
-                         // if self.debug { println!("IWM Read Handshake: 80"); }
-                         0x80 // IWM Ready
+                     (true, false) => {
+                         let ready = self.drives[d].write_bits_left == 0;
+                         let handshake = if ready { 0x80 } else { 0x00 };
+                         if self.debug { println!("IWM Read Handshake: {:02X}", handshake); }
+                         handshake
                      },
-                     (true, true) => { // Q7=1, Q6=1: Write Mode (Read)
+                     (true, true) => {
                          if self.debug { println!("IWM Read Write Mode: 00"); }
                          0
                      }
@@ -528,7 +708,3 @@ impl Iwm {
         }
     }
 }
-
-
-
-
