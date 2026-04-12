@@ -47,6 +47,7 @@ pub struct IOU {
   pub mouse: Mouse,
   pub speaker: Speaker,
   pub cycles: u64,
+  pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
   pub debug: bool,
   pub self_test: bool,
 }
@@ -57,7 +58,7 @@ impl IOU {
           mem_state: Cell::new(MemStateMask::INIT),
           last_read_addr: Cell::new(0x0000),
           is_80store: Cell::new(false),
-          ioudis: Cell::new(false),
+          ioudis: Cell::new(true), // Firmware sets IOUDis ON at reset (enables DHIRES access)
         
           video_mode: Cell::new(VideoMode::TEXT),
           // extra_flags: Cell::new(0),
@@ -68,6 +69,7 @@ impl IOU {
           mouse: Mouse::new(),
           speaker: Speaker::new(),
           cycles: 0,
+          scan_cycle: 0,
           debug: false,
           self_test,
       }
@@ -90,6 +92,7 @@ impl IOU {
             },
 
             0xC001..=0xC00F => 0x00, 
+            0xC010 => { self.key_ready.set(false); 0x00 }, // KBDSTRB - clear keyboard strobe on read too
             
             // Status Reads (MMU & Video)
             0xC011 => (check_bits_cell!(self.mem_state, MemStateMask::RDBNK) as u8) << 7,
@@ -114,9 +117,13 @@ impl IOU {
             0xC018 => (is_80store as u8) << 7,
             
             0xC019 => { 
-                let val = (self.mouse.vbl_int.get() as u8) << 7;
-                self.mouse.vbl_int.set(false); 
-                val 
+                // Live VBL status based on scan_cycle position within NTSC frame
+                // 262 scanlines × 65 cycles = 17030 cycles/frame
+                // Active display: scanlines 0-191 (cycles 0-12479)
+                // VBL: scanlines 192-261 (cycles 12480-17029)
+                let in_vbl = self.scan_cycle >= 12480;
+                self.mouse.vbl_int.set(false); // Side effect: reset VBL interrupt
+                (in_vbl as u8) << 7
             }, //  RSTVBL         C   R   Reset Vertical Blanking Interrupt
 
             0xC01A => (check_bits_cell!(self.video_mode, VideoModeMask::TEXT) as u8) << 7,
@@ -140,7 +147,7 @@ impl IOU {
                 }
                 
                 match addr {
-                    0xC07E => (ioudis as u8) << 7,
+                    0xC07E => (!ioudis as u8) << 7, // RdIOUDis: 1 = off
                     0xC07F => (check_bits_cell!(self.video_mode, VideoModeMask::DHIRES) as u8) << 7,
                     _ => 0x00,
                 }
@@ -206,22 +213,23 @@ impl IOU {
           } else {
             0x00 // AN2 ON
           },
-          0xC05E => if !ioudis {
-            self.mouse.y0_edge.set(false); // Rising
-            0x00
-          } else {
-            // Annunciator 3 Off / DHIRES OFF
-            clear_bits_cell!(self.video_mode, VideoModeMask::DHIRES);
-            0x00 
-          },
-          0xC05F => if !ioudis {
-            self.mouse.y0_edge.set(true); // Falling
-            0x00
-          } else {
-            // Annunciator 3 On / DHIRES ON
+          0xC05E => if ioudis {
+            // IOUDis ON: AN3 OFF → DHIRES ON
             set_bits_cell!(self.video_mode, VideoModeMask::DHIRES);
-            0x00 
-          },            0xC060 => (check_bits_cell!(self.video_mode, VideoModeMask::COL80) as u8) << 7, //   C   R7  Status of 80/40 Column Switch
+            0x00
+          } else {
+            // IOUDis OFF: Mouse Y0 edge rising
+            self.mouse.y0_edge.set(false); 0x00
+          },
+          0xC05F => if ioudis {
+            // IOUDis ON: AN3 ON → DHIRES OFF
+            clear_bits_cell!(self.video_mode, VideoModeMask::DHIRES);
+            0x00
+          } else {
+            // IOUDis OFF: Mouse Y0 edge falling
+            self.mouse.y0_edge.set(true); 0x00
+          },
+            0xC060 => (check_bits_cell!(self.video_mode, VideoModeMask::COL80) as u8) << 7, //   C   R7  Status of 80/40 Column Switch
             0xC061 => {
                 // simulate holding the button for the first 2 seconds (2M cycles) if self_test is enabled
                 let pressed = self.mouse.button0.get() || (self.self_test && self.cycles < 2_000_000);
@@ -232,11 +240,11 @@ impl IOU {
                 let pressed = self.mouse.button1.get() || (self.self_test && self.cycles < 2_000_000);
                 (pressed as u8) << 7
             }, // C062 49250 RDBTN1        ECG  R7  Switch Input 1 / Open Apple
-            0xC063 => (!self.mouse.button1.get() as u8) << 7, //                           C   R7  Bit 7 = Mouse Button Not Pressed
+            0xC063 => (!self.mouse.button0.get() as u8) << 7, //                           C   R7  Bit 7 = Mouse Button Not Pressed
             0xC064 => 0x00, // C064 49252 PADDL0       OECG  R7  Analog Input 0
             0xC065 => 0x00, // C065 49253 PADDL1       OECG  R7  Analog Input 1
-            0xC066 => (self.mouse.x.get() as u8) & 0x80, //           RDMOUX1        C   R7  Mouse Horiz Position (Bit 7)
-            0xC067 => (self.mouse.y.get() as u8) & 0x80, //           RDMOUY1        C   R7  Mouse Vert Position (Bit 7)
+            0xC066 => (self.mouse.x_dir.get() as u8) << 7, //           RDMOUX1        C   R7  Mouse X1 Direction (1 = right)
+            0xC067 => (self.mouse.y_dir.get() as u8) << 7, //           RDMOUY1        C   R7  Mouse Y1 Direction (1 = down)
             0xC068 => 0x00, // STATEREG (IIGS) - Ignore on IIc
 
             0xC0E0..=0xC0EF => self.iwm.access(addr, 0, false),
@@ -287,6 +295,10 @@ impl IOU {
             
             0xC011..=0xC01F => 0x00,
 
+          0xC030 => 0x00, // Speaker toggle is READ-only on real hardware
+
+          0xC048 => { self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00 }, // RSTXY
+
           0xC070..=0xC07F => {
               // Trigger Paddle Timer (Not implemented)
               if addr == 0xC070 {
@@ -294,8 +306,8 @@ impl IOU {
               }
 
               match addr {
-                  0xC07E => { self.ioudis.set(true); 0x00 },
-                  0xC07F => { self.ioudis.set(false); 0x00 },
+                  0xC078 | 0xC07E => { self.ioudis.set(true); 0x00 },  // IOUDis ON (disable IOU/mouse, enable DHIRES)
+                  0xC079 | 0xC07F => { self.ioudis.set(false); 0x00 }, // IOUDis OFF (enable IOU/mouse, disable DHIRES)
                   _ => 0x00,
               }
           },
@@ -367,50 +379,50 @@ impl IOU {
           0xC068 => 0x00, // STATEREG (IIGS) - Ignore on IIc
 
           0xC058 => if !ioudis {
-            self.mouse.xy_mask.set(true); 0x00 // DISXY          C  WR   If IOUDIS off: Mask X0/Y0 Move Interrupts
+            self.mouse.xy_mask.set(true); 0x00 // DISXY  If IOUDIS off: Mask X0/Y0 Move Interrupts
           } else {
             0x00 // AN0 OFF
           },
           0xC059 => if !ioudis {
-            self.mouse.xy_mask.set(false); 0x00 // ENBXY          C  WR   If IOUDIS off: Allow X0/Y0 Move Interrupts
+            self.mouse.xy_mask.set(false); 0x00 // ENBXY  If IOUDIS off: Allow X0/Y0 Move Interrupts
           } else {
             0x00 // AN0 ON
           },
           0xC05A => if !ioudis {
-            self.mouse.vbl_mask.set(true); 0x00 // DISVBL         C  WR   If IOUDIS off: Disable VBL Interrupts
+            self.mouse.vbl_mask.set(true); 0x00 // DISVBL  If IOUDIS off: Disable VBL Interrupts
           } else {
             0x00 // AN1 OFF
           },
           0xC05B => if !ioudis {
-            self.mouse.vbl_mask.set(false); 0x00 // ENVBL          C  WR   If IOUDIS off: Enable VBL Interrupts
+            self.mouse.vbl_mask.set(false); 0x00 // ENVBL  If IOUDIS off: Enable VBL Interrupts
           } else {
             0x00 // AN1 ON
           },
           0xC05C => if !ioudis {
-            self.mouse.x0_edge.set(false); 0x00 // X0EDGE         C  WR   If IOUDIS off: Interrupt on X0 Rising
+            self.mouse.x0_edge.set(false); 0x00 // X0EDGE  If IOUDIS off: Interrupt on X0 Rising
           } else {
             0x00 // AN2 OFF
           },
           0xC05D => if !ioudis {
-            self.mouse.x0_edge.set(true); 0x00 // X0EDGE         C  WR   If IOUDIS off: Interrupt on X0 Falling
+            self.mouse.x0_edge.set(true); 0x00 // X0EDGE  If IOUDIS off: Interrupt on X0 Falling
           } else {
             0x00 // AN2 ON
           },
-          0xC05E => if !ioudis {
-            self.mouse.y0_edge.set(false); // Rising
-            0x00
-          } else {
-            // Annunciator 3 Off / DHIRES OFF
-            clear_bits_cell!(self.video_mode, VideoModeMask::DHIRES);
-            0x00 
-          },
-          0xC05F => if !ioudis {
-            self.mouse.y0_edge.set(true); // Falling
-            0x00
-          } else {
-            // Annunciator 3 On / DHIRES ON
+          0xC05E => if ioudis {
+            // IOUDis ON: AN3 OFF → DHIRES ON
             set_bits_cell!(self.video_mode, VideoModeMask::DHIRES);
-            0x00 
+            0x00
+          } else {
+            // IOUDis OFF: Mouse Y0 edge rising
+            self.mouse.y0_edge.set(false); 0x00
+          },
+          0xC05F => if ioudis {
+            // IOUDis ON: AN3 ON → DHIRES OFF
+            clear_bits_cell!(self.video_mode, VideoModeMask::DHIRES);
+            0x00
+          } else {
+            // IOUDis OFF: Mouse Y0 edge falling
+            self.mouse.y0_edge.set(true); 0x00
           },
 
 

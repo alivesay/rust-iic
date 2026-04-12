@@ -90,6 +90,9 @@ struct Args {
 
     #[arg(index = 1)]
     disk: Option<String>,
+
+    #[arg(long)]
+    disk2: Option<String>,
 }
 
 pub struct App {
@@ -99,6 +102,7 @@ pub struct App {
     last_width: u32,
     last_height: u32,
     modifiers: ModifiersState,
+    last_cursor_pos: Option<(f64, f64)>,
 }
 
 fn main() -> Result<(), Error> {
@@ -137,8 +141,13 @@ fn main() -> Result<(), Error> {
     });
 
     if let Some(path) = disk_path {
-        println!("Loading disk: {}", path);
+        println!("Loading disk 1: {}", path);
         cpu.bus.iou.iwm.load_disk(path).unwrap();
+    }
+
+    if let Some(path) = &args.disk2 {
+        println!("Loading disk 2: {}", path);
+        cpu.bus.iou.iwm.load_disk2(path).unwrap();
     }
 
     if args.monitor {
@@ -159,6 +168,7 @@ fn main() -> Result<(), Error> {
         last_width: width,
         last_height: height,
         modifiers: ModifiersState::default(),
+        last_cursor_pos: None,
     };
 
     let timeout = Some(Duration::ZERO);
@@ -216,9 +226,6 @@ fn main() -> Result<(), Error> {
 
                 cycles_run += app.cpu.tick();
             }
-            
-            // trigger VBL Interrupt at end of frame
-            app.cpu.bus.iou.mouse.vbl_int.set(true);
 
             cpu_time = frame_start.elapsed();
             if cpu_time > Duration::from_millis(17) {
@@ -276,10 +283,8 @@ fn main() -> Result<(), Error> {
         let now = Instant::now();
         if !iwm_fast && now < next_frame_time {
             std::thread::sleep(next_frame_time - now);
-        } else {
-            if now - next_frame_time > Duration::from_millis(50) {
-                next_frame_time = now;
-            }
+        } else if now - next_frame_time > Duration::from_millis(50) {
+            next_frame_time = now;
         }
     }
 }
@@ -398,11 +403,14 @@ impl winit::application::ApplicationHandler for App {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                if let Some(pixels) = self.pixels.as_ref() {
-                    if let Ok((x, y)) = pixels.window_pos_to_pixel((position.x as f32, position.y as f32)) {
-                        self.cpu.bus.iou.mouse.set_xy(x as u16, y as u16);
-                    }
+                let x = position.x;
+                let y = position.y;
+                if let Some((lx, ly)) = self.last_cursor_pos {
+                    let dx = x - lx;
+                    let dy = y - ly;
+                    self.cpu.bus.iou.mouse.add_delta(dx, dy);
                 }
+                self.last_cursor_pos = Some((x, y));
             }
 
             WindowEvent::MouseInput { state, button, .. } => {

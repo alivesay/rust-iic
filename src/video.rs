@@ -615,65 +615,78 @@ impl Video {
     #[allow(dead_code)]
     fn render_double_hires_mode(&mut self, iou: &IOU, mmu: &MMU) {
         let base_vram: u16 = 0x2000;
-        let _video_mode = iou.video_mode.get();
-        // let is_80store = iou.is_80store.get();
 
         for group in 0..24_u16 {
             for row in 0..8_u16 {
-                // Apple II Hi-Res Interleaving:
-                // Row Offset = (row * 1024) + (group % 8) * 128 + (group / 8) * 40
                 let row_base = base_vram
                         .wrapping_add(row.wrapping_mul(1024))
                         .wrapping_add((group % 8).wrapping_mul(128))
                         .wrapping_add((group / 8).wrapping_mul(40));
 
-                for col in 0..40_u16 {
-                    let addr = row_base.wrapping_add(col);
-                    
-                    // double Hi-Res always uses Main and Aux memory at $2000-$3FFF
-                    let main_byte = mmu.read_main_byte(addr);
-                    let aux_byte = mmu.read_aux_byte(addr);
+                let y = (group * 8 + row) * 2; // double height
 
-                    // Double Hi-Res: 14 pixels per column (7 Aux + 7 Main)
-                    // Aux bits 0-6 map to x offsets 0-6
-                    // Main bits 0-6 map to x offsets 7-13
-                    
-                    let y = (group.wrapping_mul(8).wrapping_add(row)) * 2; // double height
+                if self.monochrome {
+                    // Monochrome: 560 pixels (1 bit = 1 pixel)
+                    for col in 0..40_u16 {
+                        let addr = row_base.wrapping_add(col);
+                        let aux_byte = mmu.read_aux_byte(addr);
+                        let main_byte = mmu.read_main_byte(addr);
 
-                    // Draw Aux pixels (First 7)
-                    for bit in 0..7_u16 {
-                        let pixel_on = (aux_byte >> bit) & 1 != 0;
-                        let color = if pixel_on {
-                            if self.monochrome { [0, 255, 0, 255] } else { [255, 255, 255, 255] }
-                        } else {
-                            [0, 0, 0, 255]
-                        };
-                        
-                        let x = (col as usize) * 14 + (bit as usize);
-                        
-                        for dy in 0..2 {
-                            let index = self.fb_index(x, y as usize + dy);
-                            if index + 4 <= self.framebuffer.len() {
-                                self.framebuffer[index..index + 4].copy_from_slice(&color);
+                        for bit in 0..7_u16 {
+                            let pixel_on = (aux_byte >> bit) & 1 != 0;
+                            let color = if pixel_on { [0, 255, 0, 255] } else { [0, 0, 0, 255] };
+                            let x = col as usize * 14 + bit as usize;
+                            for dy in 0..2 {
+                                let index = self.fb_index(x, y as usize + dy);
+                                if index + 4 <= self.framebuffer.len() {
+                                    self.framebuffer[index..index + 4].copy_from_slice(&color);
+                                }
+                            }
+                        }
+                        for bit in 0..7_u16 {
+                            let pixel_on = (main_byte >> bit) & 1 != 0;
+                            let color = if pixel_on { [0, 255, 0, 255] } else { [0, 0, 0, 255] };
+                            let x = col as usize * 14 + 7 + bit as usize;
+                            for dy in 0..2 {
+                                let index = self.fb_index(x, y as usize + dy);
+                                if index + 4 <= self.framebuffer.len() {
+                                    self.framebuffer[index..index + 4].copy_from_slice(&color);
+                                }
                             }
                         }
                     }
+                } else {
+                    // Color: 140 pixels (4-bit nibbles from sliding window across aux/main pairs)
+                    // Process 2 columns at a time: 4 bytes = 28 bits = 7 color pixels
+                    for col_pair in 0..20_u16 {
+                        let col0 = col_pair * 2;
+                        let col1 = col0 + 1;
 
-                    // draw main pixels (Next 7)
-                    for bit in 0..7_u16 {
-                        let pixel_on = (main_byte >> bit) & 1 != 0;
-                        let color = if pixel_on {
-                            if self.monochrome { [0, 255, 0, 255] } else { [255, 255, 255, 255] }
-                        } else {
-                            [0, 0, 0, 255]
-                        };
-                        
-                        let x = (col as usize) * 14 + 7 + (bit as usize);
-                        
-                        for dy in 0..2 {
-                            let index = self.fb_index(x, y as usize + dy);
-                            if index + 4 <= self.framebuffer.len() {
-                                self.framebuffer[index..index + 4].copy_from_slice(&color);
+                        let aux0 = mmu.read_aux_byte(row_base.wrapping_add(col0)) as u32;
+                        let main0 = mmu.read_main_byte(row_base.wrapping_add(col0)) as u32;
+                        let aux1 = mmu.read_aux_byte(row_base.wrapping_add(col1)) as u32;
+                        let main1 = mmu.read_main_byte(row_base.wrapping_add(col1)) as u32;
+
+                        // Build 28-bit stream: aux0[0:6], main0[0:6], aux1[0:6], main1[0:6]
+                        let bits = (aux0 & 0x7F)
+                                 | ((main0 & 0x7F) << 7)
+                                 | ((aux1 & 0x7F) << 14)
+                                 | ((main1 & 0x7F) << 21);
+
+                        // Extract 7 nibbles, each is a 4-bit color index
+                        for nib in 0..7_u32 {
+                            let color_idx = ((bits >> (nib * 4)) & 0x0F) as u8;
+                            let rgba = self.lores_color_lookup(color_idx);
+
+                            let base_x = (col_pair as usize * 7 + nib as usize) * 4;
+                            for px in 0..4 {
+                                let x = base_x + px;
+                                for dy in 0..2 {
+                                    let index = self.fb_index(x, y as usize + dy);
+                                    if index + 4 <= self.framebuffer.len() {
+                                        self.framebuffer[index..index + 4].copy_from_slice(&rgba);
+                                    }
+                                }
                             }
                         }
                     }

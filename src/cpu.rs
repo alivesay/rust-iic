@@ -102,6 +102,7 @@ pub struct CPU {
 
     pub entry_point_override: Option<u16>,
     pub debug: bool,
+    extra_cycles: u64,  // Extra cycles for taken branches / page crosses
 }
 
 impl CPU {
@@ -118,6 +119,7 @@ impl CPU {
             entry_point_override: None,
             symbol_table: SymbolTable::new(),
             debug: false,
+            extra_cycles: 0,
         }
     }
 
@@ -358,6 +360,16 @@ impl CPU {
         self.bus.read_byte(0x0100 | self.regs.sp as u16)
     }
 
+    /// Take a relative branch: +1 cycle for taken, +1 more if page crossed
+    fn branch(&mut self, offset: i8) {
+        let old_pc = self.pc;
+        self.pc = self.pc.wrapping_add_signed(offset as i16);
+        self.extra_cycles += 1; // +1 for taken branch
+        if (old_pc & 0xFF00) != (self.pc & 0xFF00) {
+            self.extra_cycles += 1; // +1 for page cross
+        }
+    }
+
     fn execute_bit(&mut self, value: u8) {
         // Z Flag: Set if (A & M) == 0
         self.p.set(Flags::ZERO, (self.regs.a & value) == 0);
@@ -418,9 +430,10 @@ impl CPU {
 
         let opcode = self.fetch_byte();
 
+        self.extra_cycles = 0;
         self.decode_execute(opcode);
 
-        let cycles = CYCLE_TABLE[opcode as usize];
+        let cycles = CYCLE_TABLE[opcode as usize] + self.extra_cycles;
         self.bus.tick(cycles);
 
         if self.debug {
@@ -943,7 +956,7 @@ impl CPU {
 
             0x80 => {
                 let offset = self.fetch_byte() as i8;
-                self.pc = self.pc.wrapping_add_signed(offset as i16);
+                self.branch(offset);
             }
 
             0x9C => {
@@ -1055,7 +1068,7 @@ impl CPU {
                 let offset = self.fetch_byte() as i8;
 
                 if !self.p.contains(Flags::NEGATIVE) {
-                    self.pc = self.pc.wrapping_add_signed(offset.into());
+                    self.branch(offset);
                 }
             }
 
@@ -1066,7 +1079,7 @@ impl CPU {
             0x30 => {
                 let offset = self.fetch_byte() as i8;
                 if self.p.contains(Flags::NEGATIVE) {
-                    self.pc = self.pc.wrapping_add(offset as u16);
+                    self.branch(offset);
                 }
             }
 
@@ -1079,7 +1092,7 @@ impl CPU {
             0xF0 => {
                 let offset = self.fetch_byte() as i8;
                 if self.p.contains(Flags::ZERO) {
-                    self.pc = self.pc.wrapping_add_signed(offset as i16);
+                    self.branch(offset);
                 }
             }
 
@@ -1111,7 +1124,7 @@ impl CPU {
             0xD0 => {
                 let offset = self.fetch_byte() as i8;
                 if !self.p.contains(Flags::ZERO) {
-                    self.pc = self.pc.wrapping_add_signed(offset as i16);
+                    self.branch(offset);
                 }
             }
 
@@ -1137,7 +1150,7 @@ impl CPU {
             0x90 => {
                 let offset = self.fetch_byte() as i8;
                 if !self.p.contains(Flags::CARRY) {
-                    self.pc = self.pc.wrapping_add(offset as u16);
+                    self.branch(offset);
                 }
             }
 
@@ -1145,12 +1158,7 @@ impl CPU {
                 let offset = self.fetch_byte() as i8;
 
                 if self.p.contains(Flags::CARRY) {
-                    self.pc = self.pc.wrapping_add(offset as u16);
-
-                    // page-crossing penalty...
-                    // if (old_pc & 0xFF00) != (self.pc & 0xFF00) {
-                    //     self.cycle_count += 1;
-                    // }
+                    self.branch(offset);
                 }
             }
 
@@ -1182,14 +1190,14 @@ impl CPU {
             0x50 => {
                 let offset = self.fetch_byte() as i8;
                 if !self.p.contains(Flags::OVERFLOW) {
-                    self.pc = self.pc.wrapping_add(offset as u16);
+                    self.branch(offset);
                 }
             }
 
             0x70 => {
                 let offset = self.fetch_byte() as i8;
                 if self.p.contains(Flags::OVERFLOW) {
-                    self.pc = self.pc.wrapping_add(offset as u16);
+                    self.branch(offset);
                 }
             }
 
@@ -1760,23 +1768,23 @@ impl CPU {
 
             0x0F | 0x1F | 0x2F | 0x3F | 0x4F | 0x5F | 0x6F | 0x7F => {
                 let zp_addr = self.fetch_byte() as u16;
-                let rel_offset = self.fetch_byte() as i8 as i16;
+                let rel_offset = self.fetch_byte() as i8;
                 let value = self.bus.read_byte(zp_addr);
                 let bit = 1 << ((opcode.wrapping_sub(0x0F)) / 0x10);
 
                 if (value & bit) == 0 {
-                    self.pc = self.pc.wrapping_add_signed(rel_offset);
+                    self.branch(rel_offset);
                 }
             }
 
             0x8F | 0x9F | 0xAF | 0xBF | 0xCF | 0xDF | 0xEF | 0xFF => {
                 let zp_addr = self.fetch_byte() as u16;
-                let rel_offset = self.fetch_byte() as i8 as i16;
+                let rel_offset = self.fetch_byte() as i8;
                 let value = self.bus.read_byte(zp_addr);
                 let bit = 1 << ((opcode.wrapping_sub(0x8F)) / 0x10);
 
                 if (value & bit) != 0 {
-                    self.pc = self.pc.wrapping_add_signed(rel_offset);
+                    self.branch(rel_offset);
                 }
             }
 
