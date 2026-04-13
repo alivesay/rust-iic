@@ -580,12 +580,12 @@ impl Video {
                                 } else {
                                     if palette_flag {
                                         // High Palette (Bit 7 = 1)
-                                        if x_logical % 2 == 0 { [0, 0, 255, 255] }       // Blue (Even)
-                                        else { [255, 165, 0, 255] }              // Orange (Odd)
+                                        if x_logical % 2 == 0 { [20, 207, 253, 255] }    // Blue (Even)
+                                        else { [255, 106, 60, 255] }             // Orange (Odd)
                                     } else {
                                         // Low Palette (Bit 7 = 0)
-                                        if x_logical % 2 == 0 { [160, 32, 240, 255] }    // Violet (Even)
-                                        else { [0, 255, 0, 255] }                // Green (Odd)
+                                        if x_logical % 2 == 0 { [255, 68, 253, 255] }    // Violet (Even)
+                                        else { [20, 245, 60, 255] }              // Green (Odd)
                                     }
                                 };
 
