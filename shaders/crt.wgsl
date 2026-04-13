@@ -28,7 +28,11 @@ const VIGNETTE_STRENGTH: f32 = 0.4;
 const HJITTER_AMOUNT: f32   = 0.00008; // Per-scanline horizontal jitter
 const NOISE_AMOUNT: f32     = 0.03;    // Analog noise intensity
 const GLOW_STRENGTH: f32    = 0.35;    // Bloom mix strength
+const GLOW_OVERDRIVE: f32   = 1.2;     // Source pixel intensity boost (phosphor self-glow)
 const EDGE_WIDTH: f32       = 0.005;   // Soft-clip fade width at CRT edge
+
+// Scanlines are baked into the framebuffer by video.rs (pixel-perfect alignment).
+// The shader does NOT apply scanlines.
 
 // --- Types ---
 
@@ -173,8 +177,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     color.r = mix(color.r, textureSample(r_texture, r_sampler, clamp_uv(cuv + vec2(-ca, 0.0), uv_lo, uv_hi, half_px)).r, 0.3);
     color.b = mix(color.b, textureSample(r_texture, r_sampler, clamp_uv(cuv + vec2( ca, 0.0), uv_lo, uv_hi, half_px)).b, 0.3);
 
-    // 4. Phosphor bloom
-    color += textureSample(r_bloom, r_sampler, tex_uv).rgb * GLOW_STRENGTH;
+    // 4. Phosphor bloom — glow spreads from bright pixels into dark areas
+    //    Clamp bloom sample to emulator area so toolbar doesn't bleed glow
+    let bloom_uv = vec2<f32>(tex_uv.x, min(tex_uv.y, bar_y - half_px.y));
+    let bloom_sample = textureSample(r_bloom, r_sampler, bloom_uv).rgb;
+    // Overdrive: boost bright source pixels (phosphor self-glow)
+    let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    color *= mix(1.0, GLOW_OVERDRIVE, luma);
+    // Additive bloom — only visible where base is dark (transparent over bright pixels)
+    color += bloom_sample * GLOW_STRENGTH * (1.0 - color);
 
     // 5. Phosphor mask (RGB triads)
     let col = i32(in.position.x) % 3;
