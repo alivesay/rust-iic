@@ -212,9 +212,9 @@ impl Iwm {
             self.motor_on = true;
             self.cycles_since_last_read = 0;
         } else if self.motor_on {
-            // Motor OFF request — check mode bit 4 for delay behavior
-            if (self.mode & 0x10) != 0 {
-                // Mode bit 4 set: immediate motor off (no timer)
+            // Motor OFF request — check mode bit 2 for delay behavior
+            if (self.mode & 0x04) != 0 {
+                // Mode bit 2 set: immediate motor off (no timer)
                 let d = self.di();
                 if self.drives[d].dirty {
                     self.flush_track(d);
@@ -223,7 +223,7 @@ impl Iwm {
                 self.motor_on = false;
                 if self.debug { println!("IWM MOTOR: ON → OFF immediate (drive={})", d + 1); }
             } else {
-                // Mode bit 4 clear (default): start ~1 second motor-off timer
+                // Mode bit 2 clear (default): start ~1 second motor-off timer
                 self.motor_off_pending = true;
                 self.motor_off_timer = 1_023_000; // ~1 second at 1.023 MHz
                 if self.debug { println!("IWM MOTOR: ON → OFF pending (drive={}, 1s timer)", self.di() + 1); }
@@ -453,7 +453,14 @@ impl Iwm {
         }
         
         self.drives[d].nibbles_valid = true;
-        self.drives[d].consumed_epoch = 0;
+        // Sync consumed_epoch to current bit position so we don't
+        // immediately see a stale nibble as "new data"
+        let bi = self.drives[d].bit_index;
+        self.drives[d].consumed_epoch = if bi < self.drives[d].nibble_epoch.len() {
+            self.drives[d].nibble_epoch[bi]
+        } else {
+            0
+        };
         self.drives[d].data_ready = false;
     }
 
@@ -475,7 +482,8 @@ impl Iwm {
         self.ensure_nibbles();
 
         let d = self.di();
-        let cycles_per_bit: u64 = if (self.mode & 0x10) != 0 { 2 } else { 4 };
+        // Apple IIc 5.25" drives always use 4 CPU cycles per bit cell (~4μs at 1.023 MHz)
+        let cycles_per_bit: u64 = 4;
         let track_bits = self.drives[d].track_data.len() as u64 * 8;
         if track_bits == 0 {
             self.drives[d].pending_cycles = 0;
@@ -504,7 +512,8 @@ impl Iwm {
 
     fn catch_up_write(&mut self) {
         let d = self.di();
-        let cycles_per_bit: u64 = if (self.mode & 0x10) != 0 { 2 } else { 4 };
+        // Apple IIc 5.25" drives always use 4 CPU cycles per bit cell (~4μs at 1.023 MHz)
+        let cycles_per_bit: u64 = 4;
         let track_bits = self.drives[d].track_data.len() * 8;
         if track_bits == 0 {
             self.drives[d].pending_cycles = 0;

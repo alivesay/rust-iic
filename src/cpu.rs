@@ -455,11 +455,20 @@ impl CPU {
 
         let opcode = self.fetch_byte();
 
+        // Tick base cycles BEFORE execution so that iou.cycles is accurate
+        // when softswitch handlers (e.g. speaker toggle) read it
+        let base_cycles = CYCLE_TABLE[opcode as usize] as u64;
+        self.bus.tick(base_cycles);
+
         self.extra_cycles = 0;
         self.decode_execute(opcode);
 
-        let cycles = CYCLE_TABLE[opcode as usize] + self.extra_cycles;
-        self.bus.tick(cycles);
+        // Tick any extra cycles from branches/page crosses
+        if self.extra_cycles > 0 {
+            self.bus.tick(self.extra_cycles);
+        }
+
+        let cycles = base_cycles + self.extra_cycles;
 
         if self.debug {
             println!(
