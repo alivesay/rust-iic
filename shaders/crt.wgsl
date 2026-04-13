@@ -17,14 +17,15 @@
 // letterbox/pillarbox regions are passed through unmodified.
 
 // --- Tunable constants ---
-const CURVATURE: f32        = 0.08;    // Barrel distortion strength
+const CURVATURE_X: f32      = 0.15;    // Horizontal barrel distortion
+const CURVATURE_Y: f32      = 0.20;    // Vertical barrel distortion
 const CHROMA_SHIFT: f32     = 0.15;    // Chromatic aberration (texels)
 const MASK_STRENGTH: f32    = 0.08;    // Phosphor mask intensity
 const BRIGHTNESS: f32       = 1.08;
 const CONTRAST: f32         = 1.1;
 const SATURATION: f32       = 1.05;
 const FLICKER_AMOUNT: f32   = 0.02;    // Global brightness wobble
-const VIGNETTE_STRENGTH: f32 = 0.4;
+const VIGNETTE_STRENGTH: f32 = 0.6;
 const HJITTER_AMOUNT: f32   = 0.00008; // Per-scanline horizontal jitter
 const NOISE_AMOUNT: f32     = 0.03;    // Analog noise intensity
 const GLOW_STRENGTH: f32    = 0.35;    // Bloom mix strength
@@ -68,13 +69,13 @@ fn vs_main(@location(0) position: vec2<f32>) -> VertexOutput {
 
 // --- Helper functions ---
 
-// Barrel distortion in normalised emulator space, aspect-corrected.
-fn barrel_distort(uv: vec2<f32>, amount: f32, aspect: f32) -> vec2<f32> {
-    var c = uv - 0.5;
-    c.y /= aspect;
-    c *= 1.0 + amount * dot(c, c);
-    c.y *= aspect;
-    return c + 0.5;
+// Barrel distortion with independent X/Y warp.
+fn barrel_distort(uv: vec2<f32>, warp_x: f32, warp_y: f32) -> vec2<f32> {
+    let c = uv - 0.5;
+    return vec2<f32>(
+        c.x * (1.0 + warp_x * c.y * c.y),
+        c.y * (1.0 + warp_y * c.x * c.x),
+    ) + 0.5;
 }
 
 // Map emulator-local [0,1]² UV back to full-texture UV.
@@ -145,7 +146,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     );
 
     // 1. Barrel distortion
-    let curved = barrel_distort(emu_uv, CURVATURE, src_h / src_w);
+    let curved = barrel_distort(emu_uv, CURVATURE_X, CURVATURE_Y);
 
     // Soft edge fade (smoothstep to black over EDGE_WIDTH)
     let edge = min(

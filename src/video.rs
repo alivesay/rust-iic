@@ -83,7 +83,7 @@ impl Video {
             frame_count: 0,
             monochrome: false,
             crt_enabled: false,
-            scanline_intensity: 0.45,
+            scanline_intensity: 0.15,
             border_size: border,
         }
     }
