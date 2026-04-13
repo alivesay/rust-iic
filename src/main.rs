@@ -105,6 +105,8 @@ pub struct App {
     cpu: CPU,
     surface_width: u32,
     surface_height: u32,
+    buffer_width: u32,
+    buffer_height: u32,
     modifiers: ModifiersState,
     last_cursor_pos: Option<(f64, f64)>,
 }
@@ -171,6 +173,8 @@ fn main() -> Result<(), Error> {
         cpu,
         surface_width: width * 2,
         surface_height: height * 2,
+        buffer_width: width * 2,
+        buffer_height: height * 2,
         modifiers: ModifiersState::default(),
         last_cursor_pos: None,
     };
@@ -337,10 +341,12 @@ impl winit::application::ApplicationHandler for App {
         let window_size = window.inner_size();
         self.surface_width = window_size.width;
         self.surface_height = window_size.height;
+        self.buffer_width = window_size.width;
+        self.buffer_height = window_size.height;
         let surface_texture =
             SurfaceTexture::new(window_size.width, window_size.height, window.clone());
 
-        // Create pixels buffer at window size so we control scaling ourselves
+        // Create pixels buffer at initial window size; GPU handles scaling on resize
         self.pixels = match Pixels::new(window_size.width, window_size.height, surface_texture) {
             Ok(pixels) => {
                 window.request_redraw();
@@ -373,10 +379,6 @@ impl winit::application::ApplicationHandler for App {
                             error!("pixels.resize_surface failed: {}", err);
                             event_loop.exit();
                         }
-                        if let Err(err) = pixels.resize_buffer(size.width, size.height) {
-                            error!("pixels.resize_buffer failed: {}", err);
-                            event_loop.exit();
-                        }
                     }
                 }
             }
@@ -393,8 +395,8 @@ impl winit::application::ApplicationHandler for App {
 
                     let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
                     let video_pixels = self.cpu.bus.video.get_pixels();
-                    let surf_w = self.surface_width;
-                    let surf_h = self.surface_height;
+                    let surf_w = self.buffer_width;
+                    let surf_h = self.buffer_height;
                     let bar_h = STATUS_BAR_HEIGHT;
 
                     let frame = pixels.frame_mut();
@@ -461,36 +463,39 @@ impl winit::application::ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 if pressed {
-                    // Check if click is on a drive icon in the status bar
+                    // Check if click is on a UI element in the status bar
                     if let Some((wx, wy)) = self.last_cursor_pos {
-                        if let Some(window) = &self.window {
-                            let win_size = window.inner_size();
-                            // CursorMoved position is already in physical pixels
-                            let px = wx as u32;
-                            let py = wy as u32;
+                        // Use the pixels crate's coordinate mapping which correctly
+                        // accounts for aspect-ratio-preserving GPU scaling.
+                        let mapped = self.pixels.as_ref()
+                            .and_then(|p| p.window_pos_to_pixel((wx as f32, wy as f32)).ok());
+
+                        if let Some((bx, by)) = mapped {
+                        let px = bx as u32;
+                        let py = by as u32;
 
                             // Check reset button (warm reset — Ctrl+Reset equivalent)
-                            if button == MouseButton::Left && hit_test_reset_button(px, py, win_size.height, STATUS_BAR_HEIGHT) {
+                            if button == MouseButton::Left && hit_test_reset_button(px, py, self.buffer_height, STATUS_BAR_HEIGHT) {
                                 println!("Warm Reset Triggered (RST button)");
                                 self.cpu.reset();
                                 return;
                             }
 
                             // Check power button (cold reboot — power cycle equivalent)
-                            if button == MouseButton::Left && hit_test_power_button(px, py, win_size.height, STATUS_BAR_HEIGHT) {
+                            if button == MouseButton::Left && hit_test_power_button(px, py, self.buffer_height, STATUS_BAR_HEIGHT) {
                                 println!("Power Cycle Triggered (PWR button)");
                                 self.cpu.power_cycle();
                                 return;
                             }
 
                             // Check 80/40 column switch toggle
-                            if button == MouseButton::Left && hit_test_col_button(px, py, win_size.height, STATUS_BAR_HEIGHT) {
+                            if button == MouseButton::Left && hit_test_col_button(px, py, self.buffer_height, STATUS_BAR_HEIGHT) {
                                 self.cpu.bus.iou.col80_switch = !self.cpu.bus.iou.col80_switch;
                                 println!("Column switch: {}", if self.cpu.bus.iou.col80_switch { "80" } else { "40" });
                                 return;
                             }
 
-                            if let Some(drive) = hit_test_drive_icon(px, py, win_size.width, win_size.height, STATUS_BAR_HEIGHT) {
+                            if let Some(drive) = hit_test_drive_icon(px, py, self.buffer_width, self.buffer_height, STATUS_BAR_HEIGHT) {
                                 match button {
                                     MouseButton::Left => {
                                         // Open file dialog to load a disk
@@ -524,7 +529,7 @@ impl winit::application::ApplicationHandler for App {
                                     _ => {}
                                 }
                             }
-                        }
+                    }
                     }
                 }
                 match button {

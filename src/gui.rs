@@ -5,6 +5,9 @@ pub struct DriveStatusInfo {
     pub is_write_protected: bool,
 }
 
+/// Apple II character ROM — same font used by the emulator for in-emulator text.
+const CHAR_ROM: &[u8; 1024] = include_bytes!("../font.bin");
+
 /// Height of the native-resolution status bar at the bottom of the window.
 pub const STATUS_BAR_HEIGHT: u32 = 96;
 
@@ -180,29 +183,7 @@ fn draw_disk_icon(frame: &mut [u8], stride: u32, x: u32, y: u32, color: &[u8; 4]
 }
 
 fn draw_tiny_digit(frame: &mut [u8], stride: u32, x: u32, y: u32, digit: u8, color: &[u8; 4]) {
-    #[rustfmt::skip]
-    let patterns: &[&[u8; 15]] = &[
-        &[1,1,1, 1,0,1, 1,0,1, 1,0,1, 1,1,1], // 0
-        &[0,1,0, 1,1,0, 0,1,0, 0,1,0, 1,1,1], // 1
-        &[1,1,1, 0,0,1, 1,1,1, 1,0,0, 1,1,1], // 2
-    ];
-    let idx = match digit { 1 => 1, 2 => 2, _ => 0 };
-    let pattern = patterns[idx];
-    // Each logical pixel is 4×4 physical pixels for Retina
-    for dy in 0..5u32 {
-        for dx in 0..3u32 {
-            if pattern[(dy * 3 + dx) as usize] == 1 {
-                for sy in 0..4u32 {
-                    for sx in 0..4u32 {
-                        let pi = ((y + dy * 4 + sy) * stride + (x + dx * 4 + sx)) as usize * 4;
-                        if pi + 4 <= frame.len() {
-                            frame[pi..pi + 4].copy_from_slice(color);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    draw_font_char(frame, stride, x, y, b'0' + digit, 4, color);
 }
 
 /// Returns (x, y, w, h) for the reset button.
@@ -237,7 +218,7 @@ fn col_button_rect(bar_y: u32, bar_h: u32) -> (u32, u32, u32, u32) {
     (bx, by, btn_w, btn_h)
 }
 
-/// Draw a button at (x, y) with size (w, h) and a label.
+/// Draw a button at (x, y) with size (w, h) and a label using the Apple II character ROM.
 fn draw_button(frame: &mut [u8], stride: u32, x: u32, y: u32, w: u32, h: u32, label: &[u8], text_color: &[u8; 4]) {
     // Button outline
     let border = [100u8, 100, 100, 255];
@@ -265,37 +246,43 @@ fn draw_button(frame: &mut [u8], stride: u32, x: u32, y: u32, w: u32, h: u32, la
         if l + 4 <= frame.len() { frame[l..l + 4].copy_from_slice(&border); }
         if r + 4 <= frame.len() { frame[r..r + 4].copy_from_slice(&border); }
     }
-    // Draw label text centered (3 chars × 12px wide + 4px gap = 44px, centered in 128px)
-    let char_w = 16u32;
+    // Draw label text centered using the Apple II character ROM (7×8 at 4× scale = 28×32 per char)
+    let scale = 4u32;
+    let char_w = 7 * scale; // 28px per char
+    let char_h = 8 * scale; // 32px per char
+    let gap = 4u32;          // 4px gap between chars
     let num_chars = label.len() as u32;
-    let text_total_w = num_chars * char_w - 4; // subtract trailing gap
+    let text_total_w = num_chars * char_w + num_chars.saturating_sub(1) * gap;
     let text_x = x + (w.saturating_sub(text_total_w)) / 2;
-    let text_y = y + (h - 20) / 2;
+    let text_y = y + (h.saturating_sub(char_h)) / 2;
     for (i, &ch) in label.iter().enumerate() {
-        draw_tiny_letter(frame, stride, text_x + i as u32 * char_w, text_y, ch, text_color);
+        draw_font_char(frame, stride, text_x + i as u32 * (char_w + gap), text_y, ch, scale, text_color);
     }
 }
 
-/// Draw a 4x-scaled 3×5 letter at (x, y). Supports R, S, T, P, W, O, 0, 4, 8.
-fn draw_tiny_letter(frame: &mut [u8], stride: u32, x: u32, y: u32, ch: u8, color: &[u8; 4]) {
-    #[rustfmt::skip]
-    let pattern: &[u8; 15] = match ch {
-        b'R' => &[1,1,0, 1,0,1, 1,1,0, 1,0,1, 1,0,1],
-        b'S' => &[0,1,1, 1,0,0, 0,1,0, 0,0,1, 1,1,0],
-        b'T' => &[1,1,1, 0,1,0, 0,1,0, 0,1,0, 0,1,0],
-        b'P' => &[1,1,0, 1,0,1, 1,1,0, 1,0,0, 1,0,0],
-        b'W' => &[1,0,1, 1,0,1, 1,0,1, 1,1,1, 1,0,1],
-        b'0' | b'O' => &[1,1,1, 1,0,1, 1,0,1, 1,0,1, 1,1,1],
-        b'4' => &[1,0,1, 1,0,1, 1,1,1, 0,0,1, 0,0,1],
-        b'8' => &[1,1,1, 1,0,1, 1,1,1, 1,0,1, 1,1,1],
-        _    => &[0,0,0, 0,0,0, 0,0,0, 0,0,0, 0,0,0],
+/// Draw a character from the Apple II character ROM at (x, y) with the given scale factor.
+/// ASCII uppercase letters and digits are in the ROM at offsets 0x40-0x5F (uppercase) and
+/// 0x30-0x39 (digits within 0x20-0x3F symbols range). Each char is 7 pixels wide × 8 rows.
+fn draw_font_char(frame: &mut [u8], stride: u32, x: u32, y: u32, ch: u8, scale: u32, color: &[u8; 4]) {
+    // Map ASCII to font ROM index (font layout: 0x00-0x1F mousetext, 0x20-0x3F symbols/digits, 0x40-0x5F uppercase)
+    let font_idx = if ch.is_ascii_uppercase() {
+        ch as usize  // A=0x41 etc — directly indexes uppercase block
+    } else if ch.is_ascii_digit() {
+        (ch - b'0' + 0x30) as usize // '0'=0x30 etc — symbols/digits block
+    } else {
+        0x20 // space
     };
-    for dy in 0..5u32 {
-        for dx in 0..3u32 {
-            if pattern[(dy * 3 + dx) as usize] == 1 {
-                for sy in 0..4u32 {
-                    for sx in 0..4u32 {
-                        let pi = ((y + dy * 4 + sy) * stride + (x + dx * 4 + sx)) as usize * 4;
+    let rom_offset = font_idx * 8;
+
+    for row in 0..8u32 {
+        let font_byte = CHAR_ROM[rom_offset + row as usize];
+        for bit in 0..7u32 {
+            if (font_byte >> bit) & 1 != 0 {
+                for sy in 0..scale {
+                    for sx in 0..scale {
+                        let px = x + bit * scale + sx;
+                        let py = y + row * scale + sy;
+                        let pi = (py * stride + px) as usize * 4;
                         if pi + 4 <= frame.len() {
                             frame[pi..pi + 4].copy_from_slice(color);
                         }
