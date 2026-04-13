@@ -145,6 +145,7 @@ fn main() -> Result<(), Error> {
     cpu.bus.iou.iwm.debug = args.debug;
     cpu.bus.iou.iwm.fast_disk = args.fast_disk;
     cpu.bus.video.set_monochrome(args.monochrome);
+    cpu.bus.video.crt_enabled = args.crt;
     cpu.bus.video.scanline_intensity = args.scanline_intensity;
 
     let iic_rom_file = include_bytes!("../iic3.bin");

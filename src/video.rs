@@ -56,6 +56,7 @@ pub struct Video {
     extra: Cell<u8>,
     frame_count: usize,
     pub monochrome: bool,
+    pub crt_enabled: bool,
     pub scanline_intensity: f32, // 0.0 = full black gap, 1.0 = no scanlines
     pub border_size: usize,     // Black border in pixels around active area
 }
@@ -77,6 +78,7 @@ impl Video {
             extra: Cell::new(0),
             frame_count: 0,
             monochrome: false,
+            crt_enabled: false,
             scanline_intensity: 0.5,
             border_size: border,
         }
@@ -240,6 +242,11 @@ impl Video {
     #[allow(dead_code)]
     pub fn render_text_mode_overlay(&mut self, iou: &IOU, mmu: &MMU) {
         self.render_text_rows(iou, mmu, 20..24);
+        // In mixed mode, color burst stays active on text lines,
+        // so text shows NTSC color fringing on white→black edges.
+        if !self.monochrome {
+            self.apply_mixed_mode_text_fringing(20);
+        }
     }
 
     fn render_text_rows(&mut self, iou: &IOU, mmu: &MMU, rows: std::ops::Range<u16>) {
@@ -373,6 +380,79 @@ impl Video {
 
                 if end_index <= self.framebuffer.len() {
                     self.framebuffer[start_index..end_index].copy_from_slice(&rgba_row[0..(char_width as usize * 4)]);
+                }
+            }
+        }
+    }
+
+    /// Apply subtle NTSC color fringing to text rows in mixed mode.
+    /// In mixed mode the color burst is active, so white pixels show
+    /// artifact color at transitions to black, just like hires pixels.
+    fn apply_mixed_mode_text_fringing(&mut self, start_text_row: usize) {
+        let fringe_strength: u16 = 60; // subtle — about 24% intensity
+        // Scan the text area: rows start_text_row..24, each 8 font rows * 2 (doubled)
+        let y_start = start_text_row * 8 * 2;
+        let y_end = 24 * 8 * 2;
+
+        for y in (y_start..y_end).step_by(2) {
+            for x in 1..self.active_width - 1 {
+                let idx = self.fb_index(x, y);
+                if idx + 4 > self.framebuffer.len() { continue; }
+
+                let r = self.framebuffer[idx] as u16;
+                let g = self.framebuffer[idx + 1] as u16;
+                let b = self.framebuffer[idx + 2] as u16;
+                let is_bright = r + g + b > 400; // white-ish
+
+                if !is_bright { continue; }
+
+                // Check right neighbor — if it's dark, add right fringe
+                let ridx = self.fb_index(x + 1, y);
+                if ridx + 4 <= self.framebuffer.len() {
+                    let rr = self.framebuffer[ridx] as u16;
+                    let rg = self.framebuffer[ridx + 1] as u16;
+                    let rb = self.framebuffer[ridx + 2] as u16;
+                    if rr + rg + rb < 100 {
+                        // Fringe color depends on pixel phase (x position mod 4)
+                        let fringe = match x % 4 {
+                            0 => [0, fringe_strength, 0],           // green tint
+                            1 => [fringe_strength, 0, fringe_strength], // violet tint
+                            2 => [0, 0, fringe_strength],           // blue tint
+                            _ => [fringe_strength, fringe_strength / 2, 0], // orange tint
+                        };
+                        for dy in 0..2 {
+                            let fi = self.fb_index(x + 1, y + dy);
+                            if fi + 4 <= self.framebuffer.len() {
+                                self.framebuffer[fi] = fringe[0] as u8;
+                                self.framebuffer[fi + 1] = fringe[1] as u8;
+                                self.framebuffer[fi + 2] = fringe[2] as u8;
+                            }
+                        }
+                    }
+                }
+
+                // Check left neighbor — if it's dark, add left fringe
+                let lidx = self.fb_index(x - 1, y);
+                if lidx + 4 <= self.framebuffer.len() {
+                    let lr = self.framebuffer[lidx] as u16;
+                    let lg = self.framebuffer[lidx + 1] as u16;
+                    let lb = self.framebuffer[lidx + 2] as u16;
+                    if lr + lg + lb < 100 {
+                        let fringe = match (x - 1) % 4 {
+                            0 => [0, fringe_strength, 0],
+                            1 => [fringe_strength, 0, fringe_strength],
+                            2 => [0, 0, fringe_strength],
+                            _ => [fringe_strength, fringe_strength / 2, 0],
+                        };
+                        for dy in 0..2 {
+                            let fi = self.fb_index(x - 1, y + dy);
+                            if fi + 4 <= self.framebuffer.len() {
+                                self.framebuffer[fi] = fringe[0] as u8;
+                                self.framebuffer[fi + 1] = fringe[1] as u8;
+                                self.framebuffer[fi + 2] = fringe[2] as u8;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -560,10 +640,8 @@ impl Video {
                         if pixel_on {
                             if self.monochrome {
                                 let color = [0, 255, 0, 255];
-                                // draw 2x2 block (since we don't do artifacting width adjustments)
-                                let width = 2;
                                 for dy in 0..2 {
-                                    for dx in 0..width {
+                                    for dx in 0..2_usize {
                                         if x + dx < self.active_width {
                                             let index = self.fb_index(x + dx, y + dy);
                                             if index + 4 <= self.framebuffer.len() {
@@ -574,31 +652,69 @@ impl Video {
                                     }
                                 }
                             } else {
-                                let is_white = prev_on || next_on;
-                                let color = if is_white {
-                                    [255, 255, 255, 255] // White
+                                // Artifact color for this pixel's phase position
+                                // On real hardware, an ON pixel has full white luma;
+                                // NTSC decoding adds color to that brightness.
+                                // These must be bright — the pixel IS on, color is overlaid.
+                                let artifact_color = if palette_flag {
+                                    if x_logical % 2 == 0 { [100, 140, 255, 255] }   // Blue (Even)
+                                    else { [255, 180, 80, 255] }             // Orange (Odd)
                                 } else {
-                                    if palette_flag {
-                                        // High Palette (Bit 7 = 1)
-                                        if x_logical % 2 == 0 { [20, 207, 253, 255] }    // Blue (Even)
-                                        else { [255, 106, 60, 255] }             // Orange (Odd)
-                                    } else {
-                                        // Low Palette (Bit 7 = 0)
-                                        if x_logical % 2 == 0 { [255, 68, 253, 255] }    // Violet (Even)
-                                        else { [20, 245, 60, 255] }              // Green (Odd)
-                                    }
+                                    if x_logical % 2 == 0 { [180, 100, 255, 255] }   // Violet (Even)
+                                    else { [100, 255, 100, 255] }            // Green (Odd)
                                 };
 
-                                // draw 2x2 block for White, 4x2 block for Colors
-                                let width = if is_white { 2 } else { 4 };
+                                let is_white = prev_on || next_on;
+                                let color = if is_white {
+                                    [240, 240, 240, 255]
+                                } else {
+                                    artifact_color
+                                };
 
+                                // Draw pixel at standard 2x2 size
                                 for dy in 0..2 {
-                                    for dx in 0..width {
+                                    for dx in 0..2_usize {
                                         if x + dx < self.active_width {
                                             let index = self.fb_index(x + dx, y + dy);
                                             if index + 4 <= self.framebuffer.len() {
                                                 self.framebuffer[index..index + 4]
                                                     .copy_from_slice(&color);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Color fringing at edges of white runs:
+                                // Subtle NTSC chroma bleed — blend artifact color with black
+                                // at ~40% intensity (real composite signal decay, not full color)
+                                if is_white {
+                                    let fringe = [
+                                        (artifact_color[0] as u16 * 100 / 255) as u8,
+                                        (artifact_color[1] as u16 * 100 / 255) as u8,
+                                        (artifact_color[2] as u16 * 100 / 255) as u8,
+                                        255,
+                                    ];
+                                    if !prev_on && x > 0 {
+                                        let fx = x - 1;
+                                        for dy in 0..2 {
+                                            if fx < self.active_width {
+                                                let index = self.fb_index(fx, y + dy);
+                                                if index + 4 <= self.framebuffer.len() {
+                                                    self.framebuffer[index..index + 4]
+                                                        .copy_from_slice(&fringe);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !next_on {
+                                        let fx = x + 2;
+                                        for dy in 0..2 {
+                                            if fx < self.active_width {
+                                                let index = self.fb_index(fx, y + dy);
+                                                if index + 4 <= self.framebuffer.len() {
+                                                    self.framebuffer[index..index + 4]
+                                                        .copy_from_slice(&fringe);
+                                                }
                                             }
                                         }
                                     }
@@ -707,22 +823,22 @@ impl Video {
 
     fn lores_color_lookup(&self, color: u8) -> [u8; 4] {
         let rgba = match color & 0x0F {
-            0x0 => [0, 0, 0, 255],
-            0x1 => [227, 30, 96, 255],
-            0x2 => [96, 78, 189, 255],
-            0x3 => [255, 68, 253, 255],
-            0x4 => [0, 163, 96, 255],
-            0x5 => [156, 156, 156, 255],
-            0x6 => [20, 207, 253, 255],
-            0x7 => [208, 195, 255, 255],
-            0x8 => [96, 114, 3, 255],
-            0x9 => [255, 106, 60, 255],
-            0xA => [156, 156, 156, 255],
-            0xB => [255, 160, 208, 255],
-            0xC => [20, 245, 60, 255],
-            0xD => [208, 221, 141, 255],
-            0xE => [114, 255, 208, 255],
-            0xF => [255, 255, 255, 255],
+            0x0 => [32, 8, 32, 255],       // Black
+            0x1 => [128, 34, 34, 255],     // Deep Red
+            0x2 => [34, 34, 128, 255],     // Dark Blue
+            0x3 => [73, 0, 128, 255],      // Purple
+            0x4 => [39, 84, 18, 255],      // Dark Green
+            0x5 => [99, 99, 99, 255],      // Gray 1
+            0x6 => [64, 99, 255, 255],     // Medium Blue
+            0x7 => [74, 219, 255, 255],    // Light Blue
+            0x8 => [123, 69, 19, 255],     // Brown
+            0x9 => [255, 140, 0, 255],     // Orange
+            0xA => [129, 129, 129, 255],   // Gray 2
+            0xB => [248, 126, 252, 255],   // Pink
+            0xC => [34, 255, 34, 255],     // Green
+            0xD => [255, 255, 34, 255],    // Yellow
+            0xE => [173, 255, 241, 255],   // Aqua
+            0xF => [240, 240, 240, 255],   // White
             _ => [0, 0, 0, 255],
         };
 

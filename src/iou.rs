@@ -155,6 +155,10 @@ impl IOU {
             0xC01E => (check_bits_cell!(self.video_mode, VideoModeMask::ALTCHAR) as u8) << 7,
             0xC01F => (check_bits_cell!(self.video_mode, VideoModeMask::COL80) as u8) << 7,
 
+            0xC020 => ((self.cycles & 1) as u8) << 7, // TAPEOUT / Cassette input — bit 7 toggles, used as entropy source
+
+            0xC028 => { toggle_bits_cell!(self.mem_state, MemStateMask::ALTROM); 0x00 }, // ROMBANK
+
             0xC030 => { self.speaker.toggle(self.cycles); 0x00 }, // C030 48200 SPKR         OECG  R   Toggle Speaker
             0xC040 => (self.mouse.xy_mask.get() as u8) << 7, // RDXYMSK        C   R7  Read X0/Y0 Interrupt
             0xC041 => (self.mouse.vbl_mask.get() as u8) << 7, // C041 49217 RDVBLMSK       C   R7  Read VBL Interrupt
@@ -317,7 +321,7 @@ impl IOU {
             
             0xC011..=0xC01F => 0x00,
 
-          0xC030 => 0x00, // Speaker toggle is READ-only on real hardware
+          0xC030 => { self.speaker.toggle(self.cycles); 0x00 }, // Speaker toggles on any access
 
           0xC048 => { self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00 }, // RSTXY
 

@@ -18,7 +18,7 @@
 
 // --- Tunable constants ---
 const CURVATURE: f32        = 0.08;    // Barrel distortion strength
-const CHROMA_SHIFT: f32     = 0.3;     // Chromatic aberration (texels)
+const CHROMA_SHIFT: f32     = 0.15;    // Chromatic aberration (texels)
 const MASK_STRENGTH: f32    = 0.08;    // Phosphor mask intensity
 const BRIGHTNESS: f32       = 1.08;
 const CONTRAST: f32         = 1.1;
