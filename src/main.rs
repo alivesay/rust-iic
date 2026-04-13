@@ -19,7 +19,7 @@ mod video;
 
 use crate::cpu::CPU;
 use crate::crt::CrtRenderer;
-use crate::gui::{DriveStatusInfo, STATUS_BAR_HEIGHT, blit_scaled, render_status_bar, hit_test_reset_button, hit_test_power_button, hit_test_col_button, hit_test_drive_icon};
+use crate::gui::{DriveStatusInfo, STATUS_BAR_HEIGHT, blit_scaled, render_status_bar, hit_test_reset_button, hit_test_power_button, hit_test_col_button, hit_test_drive_icon, hit_test_write_toggle};
 use crate::monitor::Monitor;
 use clap::Parser;
 use cpu::{CpuType, SystemType};
@@ -123,6 +123,7 @@ pub struct App {
     modifiers: ModifiersState,
     last_cursor_pos: Option<(f64, f64)>,
     show_toolbar: bool,
+    last_drive_click: Option<(usize, Instant)>,
 }
 
 fn main() -> Result<(), Error> {
@@ -197,6 +198,7 @@ fn main() -> Result<(), Error> {
         modifiers: ModifiersState::default(),
         last_cursor_pos: None,
         show_toolbar: true,
+        last_drive_click: None,
     };
 
     let timeout = Some(Duration::ZERO);
@@ -350,7 +352,7 @@ impl winit::application::ApplicationHandler for App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("Apple //c Emulator")
+                        .with_title("Apple //c")
                         .with_inner_size(LogicalSize::new(win_w, win_h)),
                 )
                 .unwrap(),
@@ -436,6 +438,28 @@ impl winit::application::ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // Pending single-click on drive icon: open file dialog after double-click window expires
+                if let Some((drive, click_time)) = self.last_drive_click {
+                    if click_time.elapsed() >= Duration::from_millis(400) {
+                        self.last_drive_click = None;
+                        let file = rfd::FileDialog::new()
+                            .add_filter("WOZ Disk Image", &["woz"])
+                            .pick_file();
+                        if let Some(path) = file {
+                            println!("Loading disk into drive {}: {}", drive + 1, path.display());
+                            if drive == 0 {
+                                if let Err(e) = self.cpu.bus.iou.iwm.load_disk(&path) {
+                                    println!("Error loading disk: {}", e);
+                                }
+                            } else {
+                                if let Err(e) = self.cpu.bus.iou.iwm.load_disk2(&path) {
+                                    println!("Error loading disk: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Some(pixels) = self.pixels.as_mut() {
                     // Lazily resize buffer to match surface (deferred from Resized
                     // to avoid blocking the event loop during fullscreen transitions)
@@ -588,25 +612,37 @@ impl winit::application::ApplicationHandler for App {
                                 return;
                             }
 
+                            // Write-protect toggle switch
+                            if button == MouseButton::Left {
+                                if let Some(drive) = hit_test_write_toggle(px, py, self.buffer_width, self.buffer_height, STATUS_BAR_HEIGHT) {
+                                    let (has_disk, _, _) = self.cpu.bus.iou.iwm.drive_status(drive);
+                                    if has_disk {
+                                        self.cpu.bus.iou.iwm.toggle_write_protect(drive);
+                                        let (_, _, wp) = self.cpu.bus.iou.iwm.drive_status(drive);
+                                        println!("Drive {}: write protect {}", drive + 1, if wp { "ON" } else { "OFF" });
+                                    }
+                                    return;
+                                }
+                            }
+
                             if let Some(drive) = hit_test_drive_icon(px, py, self.buffer_width, self.buffer_height, STATUS_BAR_HEIGHT) {
                                 match button {
                                     MouseButton::Left => {
-                                        // Open file dialog to load a disk
-                                        let file = rfd::FileDialog::new()
-                                            .add_filter("WOZ Disk Image", &["woz"])
-                                            .pick_file();
-                                        if let Some(path) = file {
-                                            println!("Loading disk into drive {}: {}", drive + 1, path.display());
-                                            if drive == 0 {
-                                                if let Err(e) = self.cpu.bus.iou.iwm.load_disk(&path) {
-                                                    println!("Error loading disk: {}", e);
+                                        let now = Instant::now();
+                                        // Double-click: eject
+                                        if let Some((prev_drive, prev_time)) = self.last_drive_click {
+                                            if prev_drive == drive && now.duration_since(prev_time) < Duration::from_millis(400) {
+                                                self.last_drive_click = None;
+                                                let (has_disk, _, _) = self.cpu.bus.iou.iwm.drive_status(drive);
+                                                if has_disk {
+                                                    self.cpu.bus.iou.iwm.eject_disk(drive);
+                                                    println!("Drive {}: ejected", drive + 1);
                                                 }
-                                            } else {
-                                                if let Err(e) = self.cpu.bus.iou.iwm.load_disk2(&path) {
-                                                    println!("Error loading disk: {}", e);
-                                                }
+                                                return;
                                             }
                                         }
+                                        // Record click; dialog opens after 400ms if no second click
+                                        self.last_drive_click = Some((drive, now));
                                         return; // Don't forward to Apple mouse
                                     }
                                     MouseButton::Right => {
@@ -673,7 +709,7 @@ impl winit::application::ApplicationHandler for App {
                     if let Some(code) = key_code {
                         self.cpu.bus.iou.last_key.set(code);
                         self.cpu.bus.iou.key_ready.set(true);
-                        println!("Key Pressed: 0x{:X}", code);
+                        // println!("Key Pressed: 0x{:X}", code);
                     }
                 }
 
@@ -700,7 +736,7 @@ impl winit::application::ApplicationHandler for App {
                 if event.logical_key == Key::Named(NamedKey::F6) && event.state.is_pressed() {
                     self.show_toolbar = !self.show_toolbar;
                     let bar_h = if self.show_toolbar { STATUS_BAR_HEIGHT } else { 0 };
-                    // Only update CRT uniforms — buffer stays fixed at init size
+                    // Only update CRT uniforms, buffer stays fixed at init size
                     if let Some(pixels) = self.pixels.as_mut() {
                         if let Some(crt) = self.crt_renderer.as_mut() {
                             let (src_w, src_h) = self.cpu.bus.video.get_dimensions();

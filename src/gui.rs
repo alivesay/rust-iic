@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 /// Drive status info passed from the IWM to the GUI renderer.
 pub struct DriveStatusInfo {
     pub has_disk: bool,
@@ -5,8 +7,23 @@ pub struct DriveStatusInfo {
     pub is_write_protected: bool,
 }
 
-/// Apple II character ROM — same font used by the emulator for in-emulator text.
-const CHAR_ROM: &[u8; 1024] = include_bytes!("../font.bin");
+/// Apple II character ROM
+const CHAR_ROM: &[u8; 1024] = include_bytes!("../assets/font.bin");
+
+/// Decode a PNG (white-on-black) into a 32×32 luminance mask at first use.
+fn decode_icon_mask(png_bytes: &[u8]) -> [u8; 1024] {
+    let img = image::load_from_memory(png_bytes).expect("bad icon PNG").to_luma8();
+    let mut mask = [0u8; 1024];
+    for (i, p) in img.pixels().enumerate().take(1024) {
+        mask[i] = p.0[0];
+    }
+    mask
+}
+
+static DISK1_MASK: LazyLock<[u8; 1024]> =
+    LazyLock::new(|| decode_icon_mask(include_bytes!("../assets/disk1.png")));
+static DISK2_MASK: LazyLock<[u8; 1024]> =
+    LazyLock::new(|| decode_icon_mask(include_bytes!("../assets/disk2.png")));
 
 /// Height of the native-resolution status bar at the bottom of the window.
 pub const STATUS_BAR_HEIGHT: u32 = 96;
@@ -70,120 +87,114 @@ pub fn render_status_bar(
     let col_color = if col80 { [100, 200, 100, 255] } else { [200, 200, 100, 255] };
     draw_button(frame, surf_w, cx, cy, cw, ch, col_label, &col_color);
 
-    // Drive slots in the bottom-right (4x base scale for Retina)
-    let slot_width: u32 = 136;
-    let total_slots_width = slot_width * 2 + 32;
+    // Drive slots in the bottom-right — 32×32 icons scaled 2× = 64×64
+    let icon_scale = 2u32;
+    let icon_dim = 32 * icon_scale; // 64px
+    let toggle_gap = 8u32;
+    let toggle_w = 12u32;
+    let toggle_h = 40u32;
+    let slot_width = icon_dim + toggle_gap + toggle_w;
+    let slot_gap = 24u32;
+    let total_slots_width = slot_width * 2 + slot_gap;
     let start_x = surf_w.saturating_sub(total_slots_width + 32);
 
-    for drive in 0..2usize {
-        let slot_x = start_x + drive as u32 * (slot_width + 32);
-        let slot_y = bar_y + (bar_h.saturating_sub(56)) / 2;
+    let masks: [&[u8; 1024]; 2] = [&*DISK1_MASK, &*DISK2_MASK];
 
-        // LED indicator (24×24)
-        let led_color = if drives[drive].is_active {
-            [0u8, 255, 0, 255]
-        } else if drives[drive].has_disk {
-            [0u8, 64, 0, 255]
-        } else {
-            [48u8, 48, 48, 255]
-        };
-        let led_x = slot_x;
-        let led_y = slot_y + 16;
-        for dy in 0..24u32 {
-            for dx in 0..24u32 {
-                let idx = ((led_y + dy) * surf_w + (led_x + dx)) as usize * 4;
+    for drive in 0..2usize {
+        let slot_x = start_x + drive as u32 * (slot_width + slot_gap);
+        let icon_y = bar_y + (bar_h.saturating_sub(icon_dim)) / 2;
+
+        // Dark fill behind disk icon
+        let fill = [32u8, 32, 32, 255];
+        for dy in 0..icon_dim {
+            for dx in 0..icon_dim {
+                let idx = ((icon_y + dy) * surf_w + (slot_x + dx)) as usize * 4;
                 if idx + 4 <= frame.len() {
-                    frame[idx..idx + 4].copy_from_slice(&led_color);
+                    frame[idx..idx + 4].copy_from_slice(&fill);
                 }
             }
         }
 
-        // Disk icon (64×56)
-        let icon_x = slot_x + 40;
-        let icon_y = slot_y;
-        let disk_color: [u8; 4] = if drives[drive].has_disk {
+        // Disk icon (32×32 mask scaled 2×)
+        let icon_color: [u8; 4] = if drives[drive].is_active {
+            [120, 255, 120, 255]
+        } else if drives[drive].has_disk {
             [180, 180, 180, 255]
         } else {
             [80, 80, 80, 255]
         };
-        draw_disk_icon(frame, surf_w, icon_x, icon_y, &disk_color);
+        blit_mask(frame, surf_w, masks[drive], 32, 32, slot_x, icon_y, icon_scale, &icon_color);
 
-        // Write-protect indicator
-        if drives[drive].has_disk && drives[drive].is_write_protected {
-            let lock = [255u8, 80, 80, 255];
-            let lx = icon_x + 4;
-            let ly = icon_y + 4;
-            for dy in 0..20u32 {
-                for dx in 0..4u32 {
-                    let idx = ((ly + dy) * surf_w + (lx + dx)) as usize * 4;
-                    if idx + 4 <= frame.len() {
-                        frame[idx..idx + 4].copy_from_slice(&lock);
-                    }
-                }
-            }
-            for dx in 4..12u32 {
-                for dy2 in 0..4u32 {
-                    let idx = ((ly + 16 + dy2) * surf_w + (lx + dx)) as usize * 4;
-                    if idx + 4 <= frame.len() {
-                        frame[idx..idx + 4].copy_from_slice(&lock);
-                    }
-                }
-            }
+        // Write-protect toggle switch (only when disk loaded)
+        if drives[drive].has_disk {
+            let tx = slot_x + icon_dim + toggle_gap;
+            let ty = icon_y + (icon_dim.saturating_sub(toggle_h)) / 2;
+            draw_toggle_switch(frame, surf_w, tx, ty, toggle_w, toggle_h, !drives[drive].is_write_protected);
         }
-
-        // Drive number label
-        let label_x = icon_x + 72;
-        let label_y = slot_y + 18;
-        let label_color = [128u8, 128, 128, 255];
-        draw_tiny_digit(frame, surf_w, label_x, label_y, (drive + 1) as u8, &label_color);
     }
 }
 
-fn draw_disk_icon(frame: &mut [u8], stride: u32, x: u32, y: u32, color: &[u8; 4]) {
-    let dark = [color[0] / 2, color[1] / 2, color[2] / 2, 255];
-    let slot_color = [color[0] / 3, color[1] / 3, color[2] / 3, 255];
-
-    // Body (64×56)
-    for dy in 0..56u32 {
-        for dx in 0..64u32 {
-            let idx = ((y + dy) * stride + (x + dx)) as usize * 4;
-            if idx + 4 <= frame.len() {
-                frame[idx..idx + 4].copy_from_slice(color);
-            }
-        }
-    }
-    // Top label area
-    for dy in 4..20u32 {
-        for dx in 12..52u32 {
-            let idx = ((y + dy) * stride + (x + dx)) as usize * 4;
-            if idx + 4 <= frame.len() {
-                frame[idx..idx + 4].copy_from_slice(&dark);
-            }
-        }
-    }
-    // Bottom slot
-    for dy in 36..52u32 {
-        for dx in 16..48u32 {
-            let idx = ((y + dy) * stride + (x + dx)) as usize * 4;
-            if idx + 4 <= frame.len() {
-                frame[idx..idx + 4].copy_from_slice(&slot_color);
-            }
-        }
-    }
-    // Metal shutter
-    let shutter = [color[0].saturating_add(40), color[1].saturating_add(40), color[2].saturating_add(40), 255];
-    for dy in 36..52u32 {
-        for dx in 28..32u32 {
-            let idx = ((y + dy) * stride + (x + dx)) as usize * 4;
-            if idx + 4 <= frame.len() {
-                frame[idx..idx + 4].copy_from_slice(&shutter);
+/// Blit a single-channel luminance mask at (x, y) with integer scale, tinting non-zero
+/// pixels with the given color (mask value modulates brightness).
+fn blit_mask(
+    frame: &mut [u8], stride: u32,
+    mask: &[u8], src_w: u32, src_h: u32,
+    x: u32, y: u32, scale: u32, color: &[u8; 4],
+) {
+    for sy in 0..src_h {
+        for sx in 0..src_w {
+            let v = mask[(sy * src_w + sx) as usize] as u32;
+            if v == 0 { continue; }
+            let r = (color[0] as u32 * v / 255) as u8;
+            let g = (color[1] as u32 * v / 255) as u8;
+            let b = (color[2] as u32 * v / 255) as u8;
+            let px = [r, g, b, 255u8];
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let idx = ((y + sy * scale + dy) * stride + (x + sx * scale + dx)) as usize * 4;
+                    if idx + 4 <= frame.len() {
+                        frame[idx..idx + 4].copy_from_slice(&px);
+                    }
+                }
             }
         }
     }
 }
 
-fn draw_tiny_digit(frame: &mut [u8], stride: u32, x: u32, y: u32, digit: u8, color: &[u8; 4]) {
-    draw_font_char(frame, stride, x, y, b'0' + digit, 4, color);
+/// Draw a vertical toggle switch at (x, y) with size (w, h).
+/// `on` = true means write-enabled, false = write-protected.
+fn draw_toggle_switch(frame: &mut [u8], stride: u32, x: u32, y: u32, w: u32, h: u32, on: bool) {
+    let border = [80u8, 80, 80, 255];
+    let track = [44u8, 44, 44, 255];
+    let knob_h = h / 3;
+
+    // Track background
+    for dy in 0..h {
+        for dx in 0..w {
+            let on_border = dy == 0 || dy == h - 1 || dx == 0 || dx == w - 1;
+            let c = if on_border { &border } else { &track };
+            let idx = ((y + dy) * stride + (x + dx)) as usize * 4;
+            if idx + 4 <= frame.len() {
+                frame[idx..idx + 4].copy_from_slice(c);
+            }
+        }
+    }
+
+    // Knob position: bottom when on (write-enabled), top when off (write-protected)
+    let knob_y = if on { y + h - knob_h - 1 } else { y + 1 };
+    let knob_color = if on { [220u8, 60, 60, 255] } else { [120u8, 120, 120, 255] };
+    let knob_highlight = if on { [255u8, 100, 100, 255] } else { [160u8, 160, 160, 255] };
+
+    for dy in 0..knob_h {
+        for dx in 1..w - 1 {
+            // Slight highlight on top row of knob
+            let c = if dy == 0 { &knob_highlight } else { &knob_color };
+            let idx = ((knob_y + dy) * stride + (x + dx)) as usize * 4;
+            if idx + 4 <= frame.len() {
+                frame[idx..idx + 4].copy_from_slice(c);
+            }
+        }
+    }
 }
 
 /// Returns (x, y, w, h) for the reset button.
@@ -321,15 +332,49 @@ pub fn hit_test_drive_icon(px: u32, py: u32, surf_w: u32, surf_h: u32, bar_h: u3
         return None;
     }
 
-    let slot_width: u32 = 136;
-    let total_slots_width = slot_width * 2 + 32;
-    let start_x = surf_w.saturating_sub(total_slots_width + 32);
+    let (icon_dim, slot_width, slot_gap, start_x) = drive_slot_layout(surf_w);
 
     for drive in 0..2u32 {
-        let slot_x = start_x + drive * (slot_width + 32);
-        if px >= slot_x && px < slot_x + slot_width {
+        let slot_x = start_x + drive * (slot_width + slot_gap);
+        // Hit-test the icon area only (not the toggle)
+        if px >= slot_x && px < slot_x + icon_dim {
             return Some(drive as usize);
         }
     }
     None
+}
+
+/// Hit-test the write-protect toggle switch for a drive.
+pub fn hit_test_write_toggle(px: u32, py: u32, surf_w: u32, surf_h: u32, bar_h: u32) -> Option<usize> {
+    let bar_y = surf_h.saturating_sub(bar_h);
+    if py < bar_y || py >= surf_h {
+        return None;
+    }
+
+    let (icon_dim, slot_width, slot_gap, start_x) = drive_slot_layout(surf_w);
+    let toggle_gap = 8u32;
+    let toggle_w = 12u32;
+    let toggle_h = 40u32;
+
+    for drive in 0..2u32 {
+        let slot_x = start_x + drive * (slot_width + slot_gap);
+        let tx = slot_x + icon_dim + toggle_gap;
+        let ty = bar_y + (bar_h.saturating_sub(icon_dim)) / 2 + (icon_dim.saturating_sub(toggle_h)) / 2;
+        if px >= tx && px < tx + toggle_w && py >= ty && py < ty + toggle_h {
+            return Some(drive as usize);
+        }
+    }
+    None
+}
+
+/// Shared drive slot layout: returns (icon_dim, slot_width, slot_gap, start_x).
+fn drive_slot_layout(surf_w: u32) -> (u32, u32, u32, u32) {
+    let icon_dim = 32 * 2u32;
+    let toggle_gap = 8u32;
+    let toggle_w = 12u32;
+    let slot_width = icon_dim + toggle_gap + toggle_w;
+    let slot_gap = 24u32;
+    let total_slots_width = slot_width * 2 + slot_gap;
+    let start_x = surf_w.saturating_sub(total_slots_width + 32);
+    (icon_dim, slot_width, slot_gap, start_x)
 }
