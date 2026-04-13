@@ -91,6 +91,7 @@ impl MMU {
     //         self.mem_state.set(MemStateMask::INIT);
     // }
 
+    #[allow(dead_code)]
     pub fn clear_ram(&mut self) {
         for bank in &mut self.ram {
             bank.clear();

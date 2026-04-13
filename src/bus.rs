@@ -71,6 +71,7 @@ impl Bus {
         //self.mmu.init_mem_state();
     }
 
+    #[allow(dead_code)]
     pub fn clear_ram(&mut self) {
         self.mmu.clear_ram();
     }

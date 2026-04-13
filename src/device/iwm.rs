@@ -103,7 +103,7 @@ impl Iwm {
 
             mode: 0,
             drive_select: false,
-            fast_disk: true,
+            fast_disk: false,
             cycles_since_last_read: 0,
             motor_off_pending: false,
             motor_off_timer: 0,
@@ -622,6 +622,8 @@ impl Iwm {
                 self.bytes_read_counter += 1;
                 self.drives[d].latch
             } else if self.fast_disk && !self.drives[d].next_epoch_bit.is_empty() {
+                // Fast disk: skip ahead to the next complete nibble,
+                // eliminating rotational latency (like Virtual II fast disk mode)
                 let next_bit = self.drives[d].next_epoch_bit[self.drives[d].bit_index] as usize;
                 let total_bits = self.drives[d].track_data.len() * 8;
                 if next_bit < total_bits {

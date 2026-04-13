@@ -16,6 +16,7 @@ impl Memory {
         }
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.data.fill(0x00);
     }
