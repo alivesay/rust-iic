@@ -623,7 +623,7 @@ impl Iwm {
                 self.drives[d].latch
             } else if self.fast_disk && !self.drives[d].next_epoch_bit.is_empty() {
                 // Fast disk: skip ahead to the next complete nibble,
-                // eliminating rotational latency (like Virtual II fast disk mode)
+                // eliminating rotational latency
                 let next_bit = self.drives[d].next_epoch_bit[self.drives[d].bit_index] as usize;
                 let total_bits = self.drives[d].track_data.len() * 8;
                 if next_bit < total_bits {
