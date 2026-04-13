@@ -21,3 +21,6 @@ Cargo.lock
 #.idea/
 
 tools
+disks
+*.log
+build
