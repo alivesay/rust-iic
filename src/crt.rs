@@ -1,0 +1,665 @@
+use wgpu::util::DeviceExt;
+
+/// Post-processing CRT shader renderer with multi-pass bloom.
+///
+/// Pass 1: scaling renderer → intermediate texture (full resolution)
+/// Pass 2: intermediate → bloom texture (1/4 resolution, blurred)
+/// Pass 3: CRT shader composites both → final surface
+pub struct CrtRenderer {
+    // CRT composite pass
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    vertex_buffer: wgpu::Buffer,
+    uniform_buffer: wgpu::Buffer,
+    sampler: wgpu::Sampler,
+    // Intermediate texture (full resolution, scaling renderer output)
+    intermediate_texture: wgpu::Texture,
+    intermediate_view: wgpu::TextureView,
+    intermediate_render_view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    tex_width: u32,
+    tex_height: u32,
+    // Bloom pass
+    bloom_pipeline: wgpu::RenderPipeline,
+    bloom_bind_group_layout: wgpu::BindGroupLayout,
+    bloom_texture: wgpu::Texture,
+    bloom_view: wgpu::TextureView,
+    bloom_bind_group: wgpu::BindGroup,
+    bloom_vertex_buffer: wgpu::Buffer,
+    // Mipmap generation
+    mipgen_pipeline: wgpu::RenderPipeline,
+    mipgen_bind_group_layout: wgpu::BindGroupLayout,
+    mipgen_vertex_buffer: wgpu::Buffer,
+    mip_level_count: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CrtUniforms {
+    // Content rect in UV space: (left, top, right, bottom)
+    content_rect: [f32; 4],
+    // x = bar_uv_y (status bar boundary in UV), y = source_height, z = time (seconds), w = source_width
+    params: [f32; 4],
+}
+
+impl CrtRenderer {
+    pub fn new(
+        device: &wgpu::Device,
+        surface_width: u32,
+        surface_height: u32,
+        buffer_width: u32,
+        buffer_height: u32,
+        bar_height: u32,
+        source_width: f32,
+        source_height: f32,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/crt.wgsl"));
+
+        // Full-screen triangle
+        let vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("crt_vertex_buffer"),
+            contents: bytemuck::cast_slice(&vertex_data),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let uniforms = Self::compute_uniforms(
+            surface_width, surface_height,
+            buffer_width, buffer_height,
+            bar_height, source_width, source_height,
+        );
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("crt_uniform_buffer"),
+            contents: bytemuck::bytes_of(&uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("crt_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // --- Mipmap generation pipeline ---
+        let mipgen_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/mipgen.wgsl"));
+
+        let mipgen_vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
+        let mipgen_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mipgen_vertex_buffer"),
+            contents: bytemuck::cast_slice(&mipgen_vertex_data),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let mipgen_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mipgen_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let mipgen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mipgen_pipeline_layout"),
+            bind_group_layouts: &[&mipgen_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let mipgen_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mipgen_pipeline"),
+            layout: Some(&mipgen_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &mipgen_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &mipgen_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        // --- Bloom pass resources ---
+        let bloom_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/bloom.wgsl"));
+
+        let bloom_vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
+        let bloom_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bloom_vertex_buffer"),
+            contents: bytemuck::cast_slice(&bloom_vertex_data),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let bloom_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bloom_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let bloom_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("bloom_pipeline_layout"),
+            bind_group_layouts: &[&bloom_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let bloom_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("bloom_pipeline"),
+            layout: Some(&bloom_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &bloom_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &bloom_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        // Bloom texture at 1/4 resolution (no mipmaps)
+        let (bloom_texture, bloom_view, _) = Self::create_intermediate(
+            device,
+            (surface_width / 4).max(1),
+            (surface_height / 4).max(1),
+            surface_format,
+            1,
+        );
+
+        // --- CRT composite pass ---
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("crt_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("crt_pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("crt_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        // Create intermediate texture at surface size with mipmaps
+        let mip_level_count = Self::mip_levels(surface_width, surface_height);
+        let (intermediate_texture, intermediate_view, intermediate_render_view) =
+            Self::create_intermediate(device, surface_width, surface_height, surface_format, mip_level_count);
+
+        let bloom_bind_group = Self::create_bloom_bind_group(
+            device, &bloom_bind_group_layout, &intermediate_view, &sampler,
+        );
+
+        let bind_group = Self::create_bind_group(
+            device,
+            &bind_group_layout,
+            &intermediate_view,
+            &sampler,
+            &uniform_buffer,
+            &bloom_view,
+        );
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            vertex_buffer,
+            uniform_buffer,
+            sampler,
+            intermediate_texture,
+            intermediate_view,
+            intermediate_render_view,
+            bind_group,
+            tex_width: surface_width,
+            tex_height: surface_height,
+            bloom_pipeline,
+            bloom_bind_group_layout,
+            bloom_texture,
+            bloom_view,
+            bloom_bind_group,
+            bloom_vertex_buffer,
+            mipgen_pipeline,
+            mipgen_bind_group_layout,
+            mipgen_vertex_buffer,
+            mip_level_count,
+        }
+    }
+
+    fn mip_levels(width: u32, height: u32) -> u32 {
+        (width.max(height) as f32).log2().floor() as u32 + 1
+    }
+
+    fn create_intermediate(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        mip_level_count: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("crt_intermediate_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        // Full view (all mip levels) for sampling
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Mip-0-only view for use as render target
+        let render_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        (texture, view, render_view)
+    }
+
+    fn create_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        texture_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
+        bloom_view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("crt_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(bloom_view),
+                },
+            ],
+        })
+    }
+
+    fn create_bloom_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        intermediate_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bloom_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(intermediate_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
+    }
+
+    /// Call when the surface is resized to recreate the intermediate texture.
+    pub fn resize(
+        &mut self, device: &wgpu::Device, queue: &wgpu::Queue,
+        width: u32, height: u32,
+        buffer_width: u32, buffer_height: u32,
+        bar_height: u32, source_width: f32, source_height: f32,
+    ) {
+        // Always update uniforms (bar_height may have changed even if size didn't)
+        let uniforms = Self::compute_uniforms(
+            width, height,
+            buffer_width, buffer_height,
+            bar_height, source_width, source_height,
+        );
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+
+        if width == self.tex_width && height == self.tex_height {
+            return;
+        }
+        self.tex_width = width;
+        self.tex_height = height;
+
+        let format = self.intermediate_texture.format();
+        let mip_level_count = Self::mip_levels(width, height);
+        self.mip_level_count = mip_level_count;
+        let (tex, view, render_view) = Self::create_intermediate(device, width, height, format, mip_level_count);
+        self.intermediate_texture = tex;
+        self.intermediate_view = view;
+        self.intermediate_render_view = render_view;
+
+        // Recreate bloom texture at 1/4 resolution (no mipmaps needed)
+        let (bloom_tex, bloom_v, _) = Self::create_intermediate(
+            device,
+            (width / 4).max(1),
+            (height / 4).max(1),
+            format,
+            1,
+        );
+        self.bloom_texture = bloom_tex;
+        self.bloom_view = bloom_v;
+
+        // Recreate bloom bind group (reads from intermediate)
+        self.bloom_bind_group = Self::create_bloom_bind_group(
+            device, &self.bloom_bind_group_layout, &self.intermediate_view, &self.sampler,
+        );
+
+        // Recreate CRT bind group (reads from intermediate + bloom)
+        self.bind_group = Self::create_bind_group(
+            device,
+            &self.bind_group_layout,
+            &self.intermediate_view,
+            &self.sampler,
+            &self.uniform_buffer,
+            &self.bloom_view,
+        );
+    }
+
+    /// Update the time uniform for flicker effects. Call once per frame.
+    pub fn update_time(&self, queue: &wgpu::Queue, time: f32) {
+        // params.z is at byte offset 16 (content_rect) + 8 (params.x, params.y) = 24
+        queue.write_buffer(&self.uniform_buffer, 24, bytemuck::bytes_of(&time));
+    }
+
+    /// Compute the content rect and bar boundary in intermediate texture UV space.
+    /// The scaling renderer maps the pixel buffer to the surface with aspect-ratio
+    /// preservation, creating pillarbox/letterbox bars.  We need to know exactly
+    /// where the content sits so the shader can separate emulator from status bar.
+    fn compute_uniforms(
+        surface_w: u32, surface_h: u32,
+        buffer_w: u32, buffer_h: u32,
+        bar_h: u32, source_width: f32, source_height: f32,
+    ) -> CrtUniforms {
+        let sw = surface_w as f64;
+        let sh = surface_h as f64;
+        let bw = buffer_w as f64;
+        let bh = buffer_h as f64;
+
+        let scale = (sw / bw).min(sh / bh);
+        let content_w = bw * scale;
+        let content_h = bh * scale;
+        let offset_x = (sw - content_w) / 2.0;
+        let offset_y = (sh - content_h) / 2.0;
+
+        // Content rect in UV [0,1] space
+        let left = offset_x / sw;
+        let top = offset_y / sh;
+        let right = (offset_x + content_w) / sw;
+        let bottom = (offset_y + content_h) / sh;
+
+        // Status bar boundary: the emulator occupies (buffer_h - bar_h) / buffer_h
+        // of the content height
+        let emu_frac_of_content = (bh - bar_h as f64) / bh;
+        let bar_uv_y = top + emu_frac_of_content * (bottom - top);
+
+        CrtUniforms {
+            content_rect: [left as f32, top as f32, right as f32, bottom as f32],
+            params: [bar_uv_y as f32, source_height, 0.0, source_width],
+        }
+    }
+
+    /// Get a reference to the intermediate texture view.
+    /// The scaling renderer should render into this instead of the final surface.
+    pub fn intermediate_view(&self) -> &wgpu::TextureView {
+        &self.intermediate_render_view
+    }
+
+    /// Render the CRT post-processing passes:
+    /// 1. Bloom: blur intermediate → bloom texture (1/4 res)
+    /// 2. Composite: CRT shader with intermediate + bloom → final surface
+    pub fn render(&self, encoder: &mut wgpu::CommandEncoder, render_target: &wgpu::TextureView, device: &wgpu::Device) {
+        // Pass 0: Generate mip chain for the intermediate texture
+        if self.mip_level_count > 1 {
+            let mut mip_w = self.tex_width;
+            let mut mip_h = self.tex_height;
+            for level in 1..self.mip_level_count {
+                let src_view = self.intermediate_texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: level - 1,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                });
+                let dst_view = self.intermediate_texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                });
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mipgen_bind_group"),
+                    layout: &self.mipgen_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&src_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+
+                mip_w = (mip_w / 2).max(1);
+                mip_h = (mip_h / 2).max(1);
+
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("mipgen_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &dst_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rpass.set_pipeline(&self.mipgen_pipeline);
+                rpass.set_bind_group(0, &bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.mipgen_vertex_buffer.slice(..));
+                rpass.draw(0..3, 0..1);
+            }
+        }
+
+        // Pass 1: Bloom blur (intermediate → bloom_texture)
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.bloom_pipeline);
+            rpass.set_bind_group(0, &self.bloom_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.bloom_vertex_buffer.slice(..));
+            rpass.draw(0..3, 0..1);
+        }
+
+        // Pass 2: CRT composite (intermediate + bloom → screen)
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("crt_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: render_target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.pipeline);
+            rpass.set_bind_group(0, &self.bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            rpass.draw(0..3, 0..1);
+        }
+    }
+}

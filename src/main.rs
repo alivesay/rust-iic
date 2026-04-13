@@ -11,18 +11,20 @@ mod memory;
 mod mmu;
 mod monitor;
 mod gui;
+mod crt;
 mod rom;
 mod util;
 mod video;
 
 
 use crate::cpu::CPU;
+use crate::crt::CrtRenderer;
 use crate::gui::{DriveStatusInfo, STATUS_BAR_HEIGHT, blit_scaled, render_status_bar, hit_test_reset_button, hit_test_power_button, hit_test_col_button, hit_test_drive_icon};
 use crate::monitor::Monitor;
 use clap::Parser;
 use cpu::{CpuType, SystemType};
 use log::error;
-use pixels::{Error, Pixels, SurfaceTexture};
+use pixels::{Error, Pixels, ScalingMode, SurfaceTexture};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -95,6 +97,14 @@ struct Args {
 
     #[arg(long)]
     disk2: Option<String>,
+
+    /// Enable fast disk mode (skip rotational latency)
+    #[arg(long)]
+    fast_disk: bool,
+
+    /// Enable CRT post-processing shader
+    #[arg(long)]
+    crt: bool,
 }
 
 
@@ -107,8 +117,12 @@ pub struct App {
     surface_height: u32,
     buffer_width: u32,
     buffer_height: u32,
+    crt_renderer: Option<CrtRenderer>,
+    crt_enabled: bool,
+    crt_start_time: Instant,
     modifiers: ModifiersState,
     last_cursor_pos: Option<(f64, f64)>,
+    show_toolbar: bool,
 }
 
 fn main() -> Result<(), Error> {
@@ -128,6 +142,7 @@ fn main() -> Result<(), Error> {
     cpu.bus.debug = args.debug;
     cpu.bus.iou.debug = args.debug;
     cpu.bus.iou.iwm.debug = args.debug;
+    cpu.bus.iou.iwm.fast_disk = args.fast_disk;
     cpu.bus.video.set_monochrome(args.monochrome);
     cpu.bus.video.scanline_intensity = args.scanline_intensity;
 
@@ -167,6 +182,7 @@ fn main() -> Result<(), Error> {
 
     let mut event_loop = EventLoop::new().unwrap();
     let (width, height) = cpu.bus.video.get_dimensions();
+    let crt_enabled = args.crt;
     let mut app = App {
         pixels: None,
         window: None,
@@ -175,8 +191,12 @@ fn main() -> Result<(), Error> {
         surface_height: height * 2,
         buffer_width: width * 2,
         buffer_height: height * 2,
+        crt_renderer: None,
+        crt_enabled,
+        crt_start_time: Instant::now(),
         modifiers: ModifiersState::default(),
         last_cursor_pos: None,
+        show_toolbar: true,
     };
 
     let timeout = Some(Duration::ZERO);
@@ -208,11 +228,11 @@ fn main() -> Result<(), Error> {
         let frame_start = Instant::now();
         let mut cpu_time = Duration::ZERO;
 
-        // When fast disk is active and motor is spinning, run many more cycles
-        // per frame to speed through disk I/O without wall-clock delay
+        // When fast disk is active and motor is spinning, run extra cycles
+        // per frame to speed through disk I/O (frame pacing still applies)
         let iwm_fast = app.cpu.bus.iou.iwm.fast_disk && app.cpu.bus.iou.iwm.motor_on;
-        let effective_cpf = if iwm_fast && !fast_mode {
-            cycles_per_frame * 8
+        let effective_cpf = if iwm_fast {
+            cycles_per_frame * 2
         } else {
             cycles_per_frame
         };
@@ -289,7 +309,7 @@ fn main() -> Result<(), Error> {
 
         next_frame_time += target_frame_time;
         let now = Instant::now();
-        if !iwm_fast && now < next_frame_time {
+        if now < next_frame_time {
             std::thread::sleep(next_frame_time - now);
         } else if now - next_frame_time > Duration::from_millis(50) {
             next_frame_time = now;
@@ -320,7 +340,7 @@ impl winit::application::ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let (emu_w, emu_h) = self.cpu.bus.video.get_dimensions();
 
-        // Window size: emulator width at 1x logical, height at 2x + status bar.
+        // Window size: emulator at 2× logical height + status bar.
         // STATUS_BAR_HEIGHT is in physical pixels; convert to logical by dividing
         // by the expected scale factor (2.0 on Retina).
         let win_w = emu_w as f64;
@@ -348,7 +368,25 @@ impl winit::application::ApplicationHandler for App {
 
         // Create pixels buffer at initial window size; GPU handles scaling on resize
         self.pixels = match Pixels::new(window_size.width, window_size.height, surface_texture) {
-            Ok(pixels) => {
+            Ok(mut pixels) => {
+                // Use Fill scaling so fractional scaling works at any resolution
+                pixels.set_scaling_mode(ScalingMode::Fill);
+                // Create CRT renderer if enabled
+                if self.crt_enabled {
+                    let surface_format = pixels.render_texture_format();
+                    let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
+                    self.crt_renderer = Some(CrtRenderer::new(
+                        pixels.device(),
+                        window_size.width,
+                        window_size.height,
+                        self.buffer_width,
+                        self.buffer_height,
+                        STATUS_BAR_HEIGHT,
+                        src_w as f32,
+                        src_h as f32,
+                        surface_format,
+                    ));
+                }
                 window.request_redraw();
                 Some(pixels)
             }
@@ -379,12 +417,44 @@ impl winit::application::ApplicationHandler for App {
                             error!("pixels.resize_surface failed: {}", err);
                             event_loop.exit();
                         }
+                        if let Some(crt) = self.crt_renderer.as_mut() {
+                            let bar_h = if self.show_toolbar { STATUS_BAR_HEIGHT } else { 0 };
+                            let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
+                            crt.resize(
+                                pixels.device(), pixels.queue(),
+                                size.width, size.height,
+                                self.buffer_width, self.buffer_height,
+                                bar_h, src_w as f32, src_h as f32,
+                            );
+                        }
+                    }
+                    // Re-assert focus after fullscreen transition on macOS
+                    if let Some(window) = &self.window {
+                        window.focus_window();
                     }
                 }
             }
 
             WindowEvent::RedrawRequested => {
                 if let Some(pixels) = self.pixels.as_mut() {
+                    // Lazily resize buffer to match surface (deferred from Resized
+                    // to avoid blocking the event loop during fullscreen transitions)
+                    if self.surface_width != self.buffer_width || self.surface_height != self.buffer_height {
+                        self.buffer_width = self.surface_width;
+                        self.buffer_height = self.surface_height;
+                        let _ = pixels.resize_buffer(self.surface_width, self.surface_height);
+                        if let Some(crt) = self.crt_renderer.as_mut() {
+                            let bar_h = if self.show_toolbar { STATUS_BAR_HEIGHT } else { 0 };
+                            let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
+                            crt.resize(
+                                pixels.device(), pixels.queue(),
+                                self.surface_width, self.surface_height,
+                                self.buffer_width, self.buffer_height,
+                                bar_h, src_w as f32, src_h as f32,
+                            );
+                        }
+                    }
+
                     let render_start = Instant::now();
                     self.cpu.video_update();
 
@@ -397,7 +467,7 @@ impl winit::application::ApplicationHandler for App {
                     let video_pixels = self.cpu.bus.video.get_pixels();
                     let surf_w = self.buffer_width;
                     let surf_h = self.buffer_height;
-                    let bar_h = STATUS_BAR_HEIGHT;
+                    let bar_h = if self.show_toolbar { STATUS_BAR_HEIGHT } else { 0 };
 
                     let frame = pixels.frame_mut();
 
@@ -408,12 +478,14 @@ impl winit::application::ApplicationHandler for App {
                         chunk[3] = 255;
                     }
 
-                    // Calculate scaled emulator display to fit above the status bar
+                    // Calculate scaled emulator display to fit above the status bar.
+                    // Use integer scale so CPU scanlines (every-other-row dimming)
+                    // remain uniform — fractional scales cause moiré.
                     let display_region_h = surf_h.saturating_sub(bar_h);
                     if display_region_h > 0 && surf_w > 0 {
                         let scale_x = surf_w as f64 / src_w as f64;
                         let scale_y = display_region_h as f64 / src_h as f64;
-                        let scale = scale_x.min(scale_y);
+                        let scale = scale_x.min(scale_y).floor().max(1.0);
 
                         let dst_w = (src_w as f64 * scale) as u32;
                         let dst_h = (src_h as f64 * scale) as u32;
@@ -440,9 +512,27 @@ impl winit::application::ApplicationHandler for App {
                         },
                     ];
                     let col80 = self.cpu.bus.iou.col80_switch;
-                    render_status_bar(frame, surf_w, surf_h, bar_h, &drive_status, col80);
+                    if self.show_toolbar {
+                        render_status_bar(frame, surf_w, surf_h, bar_h, &drive_status, col80);
+                    }
 
-                    if let Err(err) = pixels.render() {
+                    let render_result = if let Some(crt) = &self.crt_renderer {
+                        // Update time uniform for flicker effect
+                        let elapsed = self.crt_start_time.elapsed().as_secs_f32();
+                        crt.update_time(pixels.queue(), elapsed);
+                        let device = pixels.device();
+                        // Multi-pass: scaling renderer → intermediate → mipmaps → bloom → CRT → screen
+                        pixels.render_with(|encoder, render_target, context| {
+                            // Pass 1: scale pixel buffer into the CRT intermediate texture
+                            context.scaling_renderer.render(encoder, crt.intermediate_view());
+                            // Pass 2+: generate mipmaps, bloom, CRT composite
+                            crt.render(encoder, render_target, device);
+                            Ok(())
+                        })
+                    } else {
+                        pixels.render()
+                    };
+                    if let Err(err) = render_result {
                         error!("pixels.render() failed: {}", err);
                         event_loop.exit();
                     }
@@ -474,6 +564,7 @@ impl winit::application::ApplicationHandler for App {
                         let px = bx as u32;
                         let py = by as u32;
 
+                            if self.show_toolbar {
                             // Check reset button (warm reset — Ctrl+Reset equivalent)
                             if button == MouseButton::Left && hit_test_reset_button(px, py, self.buffer_height, STATUS_BAR_HEIGHT) {
                                 println!("Warm Reset Triggered (RST button)");
@@ -485,6 +576,8 @@ impl winit::application::ApplicationHandler for App {
                             if button == MouseButton::Left && hit_test_power_button(px, py, self.buffer_height, STATUS_BAR_HEIGHT) {
                                 println!("Power Cycle Triggered (PWR button)");
                                 self.cpu.power_cycle();
+                                // Clear warm-start magic so ROM does a full cold boot
+                                self.cpu.bus.write_byte(0x03F4, 0x00);
                                 return;
                             }
 
@@ -529,6 +622,7 @@ impl winit::application::ApplicationHandler for App {
                                     _ => {}
                                 }
                             }
+                            } // end if self.show_toolbar
                     }
                     }
                 }
@@ -601,6 +695,26 @@ impl winit::application::ApplicationHandler for App {
                     self.cpu.bus.iou.debug = new_debug_state;
                     self.cpu.bus.iou.iwm.debug = new_debug_state;
                     println!("Debug Logging: {}", if new_debug_state { "ON" } else { "OFF" });
+                }
+
+                if event.logical_key == Key::Named(NamedKey::F6) && event.state.is_pressed() {
+                    self.show_toolbar = !self.show_toolbar;
+                    let bar_h = if self.show_toolbar { STATUS_BAR_HEIGHT } else { 0 };
+                    // Only update CRT uniforms — buffer stays fixed at init size
+                    if let Some(pixels) = self.pixels.as_mut() {
+                        if let Some(crt) = self.crt_renderer.as_mut() {
+                            let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
+                            crt.resize(
+                                pixels.device(), pixels.queue(),
+                                self.surface_width, self.surface_height,
+                                self.buffer_width, self.buffer_height,
+                                bar_h, src_w as f32, src_h as f32,
+                            );
+                        }
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
 

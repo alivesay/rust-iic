@@ -209,8 +209,8 @@ impl CPU {
     pub fn power_cycle(&mut self) {
         println!("CPU POWER CYCLE: Full cold reboot...");
 
-        // Clear all RAM (simulates power loss)
-        self.bus.clear_ram();
+        // RAM is NOT cleared — real Apple IIc preserves whatever was in memory.
+        // The ROM checks $03F4 for warm-start magic to decide cold vs warm boot.
 
         // Full re-init: registers, flags, soft switches
         self.initialize_registers();
