@@ -4,6 +4,10 @@ use crate::{iou::IOU, mmu::MMU, util::apple_iic_font_index};
 
 const CHAR_ROM: &[u8; 1024] = include_bytes!("../assets/font.bin");
 
+/// Apple IIc Monitor G2 (P1 phosphor) green — paler than pure green
+const MONO_GREEN: (u8, u8, u8) = (51, 255, 51);
+const MONO_GREEN_RGBA: [u8; 4] = [MONO_GREEN.0, MONO_GREEN.1, MONO_GREEN.2, 255];
+
 pub const TEXT_MODE_BASE_ADDRESSES: [u16; 24] = [
     0x0400, 0x0480, 0x0500, 0x0580, 0x0600, 0x0680, 0x0700, 0x0780, 0x0428, 0x04A8, 0x0528, 0x05A8,
     0x0628, 0x06A8, 0x0728, 0x07A8, 0x0450, 0x04D0, 0x0550, 0x05D0, 0x0650, 0x06D0, 0x0750, 0x07D0,
@@ -79,7 +83,7 @@ impl Video {
             frame_count: 0,
             monochrome: false,
             crt_enabled: false,
-            scanline_intensity: 0.5,
+            scanline_intensity: 0.45,
             border_size: border,
         }
     }
@@ -175,7 +179,7 @@ impl Video {
             self.render_text_mode(iou, mmu);
         }
 
-        // Apply scanline effect: dim every odd row (the 2nd row of each doubled pair)
+        // Apply scanline effect: black out every odd row (the 2nd row of each doubled pair)
         if self.scanline_intensity < 1.0 {
             self.apply_scanlines();
         }
@@ -197,7 +201,9 @@ impl Video {
 
     fn apply_scanlines(&mut self) {
         let intensity = self.scanline_intensity.clamp(0.0, 1.0);
-        // Dim every odd row (row 1, 3, 5, ...) within the active area
+        // Black out every odd row (row 1, 3, 5, ...) within the active area.
+        // Each source line is rendered to 2 rows: row 0 = pixel data, row 1 = scanline gap.
+        // The gap is the space between beam traces, not an overlay on pixel data.
         for y in (1..self.active_height).step_by(2) {
             let abs_y = y + self.border_size;
             let row_start = (abs_y * self.width + self.border_size) * 4;
@@ -337,7 +343,7 @@ impl Video {
                 let pixel_on = (font_byte >> bit) & 1 != 0;
                 let (r, g, b) = if pixel_on {
                     if self.monochrome {
-                        (0, 255, 0)
+                        (MONO_GREEN.0, MONO_GREEN.1, MONO_GREEN.2)
                     } else {
                         (255, 255, 255)
                     }
@@ -639,7 +645,7 @@ impl Video {
                         // Apple II Hi-Res Color Logic
                         if pixel_on {
                             if self.monochrome {
-                                let color = [0, 255, 0, 255];
+                                let color = MONO_GREEN_RGBA;
                                 for dy in 0..2 {
                                     for dx in 0..2_usize {
                                         if x + dx < self.active_width {
@@ -750,7 +756,7 @@ impl Video {
 
                         for bit in 0..7_u16 {
                             let pixel_on = (aux_byte >> bit) & 1 != 0;
-                            let color = if pixel_on { [0, 255, 0, 255] } else { [0, 0, 0, 255] };
+                            let color = if pixel_on { MONO_GREEN_RGBA } else { [0, 0, 0, 255] };
                             let x = col as usize * 14 + bit as usize;
                             for dy in 0..2 {
                                 let index = self.fb_index(x, y as usize + dy);
@@ -761,7 +767,7 @@ impl Video {
                         }
                         for bit in 0..7_u16 {
                             let pixel_on = (main_byte >> bit) & 1 != 0;
-                            let color = if pixel_on { [0, 255, 0, 255] } else { [0, 0, 0, 255] };
+                            let color = if pixel_on { MONO_GREEN_RGBA } else { [0, 0, 0, 255] };
                             let x = col as usize * 14 + 7 + bit as usize;
                             for dy in 0..2 {
                                 let index = self.fb_index(x, y as usize + dy);
@@ -844,7 +850,7 @@ impl Video {
 
         if self.monochrome {
             let y = (0.299 * rgba[0] as f32 + 0.587 * rgba[1] as f32 + 0.114 * rgba[2] as f32) as u8;
-            [0, y, 0, 255]
+            [MONO_GREEN.0.min(20), y, MONO_GREEN.2.min(20), 255]
         } else {
             rgba
         }

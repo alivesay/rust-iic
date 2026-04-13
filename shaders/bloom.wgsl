@@ -1,7 +1,7 @@
-// Bloom downsample + blur shader
-// Reads the full-resolution intermediate texture and produces a soft blurred version.
-// The output texture is 1/4 resolution, and the bilinear downsample + blur taps
-// create a wide, smooth glow suitable for additive bloom compositing.
+// Multi-LOD bloom shader
+// Samples multiple mip levels of the intermediate texture to build a rich,
+// progressive-blur phosphor glow. Each LOD contributes a wider blur radius
+// with increasing intensity to simulate CRT phosphor bloom.
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -22,32 +22,27 @@ fn vs_main(@location(0) position: vec2<f32>) -> VertexOutput {
     return out;
 }
 
+// sRGB to linear approximation for proper bloom accumulation
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+
+fn to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = in.tex_coord;
-    let tex_size = vec2<f32>(textureDimensions(r_texture));
-    let px = 1.0 / tex_size.x;
-    let py = 1.0 / tex_size.y;
 
-    // 13-tap Gaussian-weighted cross blur
-    // At 1/4 res, each pixel covers 4x4 source pixels, so even small offsets
-    // in output-pixel space span many source pixels in input space.
-    // We use offsets of 2, 4, 6 input pixels to get a wide ~24px radius blur.
-    var acc = textureSample(r_texture, r_sampler, uv).rgb * 0.20;
+    // Sample mid-range mip levels for a tight phosphor halo.
+    var bloom = to_linear(textureSampleLevel(r_texture, r_sampler, uv, 2.0).rgb) * 0.5;
+    bloom += to_linear(textureSampleLevel(r_texture, r_sampler, uv, 3.0).rgb) * 0.8;
+    bloom += to_linear(textureSampleLevel(r_texture, r_sampler, uv, 4.0).rgb) * 1.0;
+    bloom += to_linear(textureSampleLevel(r_texture, r_sampler, uv, 5.0).rgb) * 0.6;
 
-    acc += textureSample(r_texture, r_sampler, uv + vec2<f32>(2.0 * px, 0.0)).rgb * 0.15;
-    acc += textureSample(r_texture, r_sampler, uv - vec2<f32>(2.0 * px, 0.0)).rgb * 0.15;
-    acc += textureSample(r_texture, r_sampler, uv + vec2<f32>(4.0 * px, 0.0)).rgb * 0.08;
-    acc += textureSample(r_texture, r_sampler, uv - vec2<f32>(4.0 * px, 0.0)).rgb * 0.08;
-    acc += textureSample(r_texture, r_sampler, uv + vec2<f32>(6.0 * px, 0.0)).rgb * 0.04;
-    acc += textureSample(r_texture, r_sampler, uv - vec2<f32>(6.0 * px, 0.0)).rgb * 0.04;
+    // Normalize and convert back to sRGB
+    bloom = bloom / 2.9;
 
-    acc += textureSample(r_texture, r_sampler, uv + vec2<f32>(0.0, 2.0 * py)).rgb * 0.07;
-    acc += textureSample(r_texture, r_sampler, uv - vec2<f32>(0.0, 2.0 * py)).rgb * 0.07;
-    acc += textureSample(r_texture, r_sampler, uv + vec2<f32>(0.0, 4.0 * py)).rgb * 0.04;
-    acc += textureSample(r_texture, r_sampler, uv - vec2<f32>(0.0, 4.0 * py)).rgb * 0.04;
-    acc += textureSample(r_texture, r_sampler, uv + vec2<f32>(0.0, 6.0 * py)).rgb * 0.02;
-    acc += textureSample(r_texture, r_sampler, uv - vec2<f32>(0.0, 6.0 * py)).rgb * 0.02;
-
-    return vec4<f32>(acc, 1.0);
+    return vec4<f32>(to_srgb(bloom), 1.0);
 }
