@@ -234,7 +234,7 @@ fn main() -> Result<(), Error> {
         // per frame to speed through disk I/O (frame pacing still applies)
         let iwm_fast = app.cpu.bus.iou.iwm.fast_disk && app.cpu.bus.iou.iwm.motor_on;
         let effective_cpf = if iwm_fast {
-            cycles_per_frame * 2
+            cycles_per_frame * 8
         } else {
             cycles_per_frame
         };
