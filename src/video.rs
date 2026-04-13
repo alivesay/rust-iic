@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use crate::{iou::IOU, mmu::MMU, util::apple_iic_font_index};
 
-const CHAR_ROM: &[u8; 1024] = include_bytes!("../font.bin");
+const CHAR_ROM: &[u8; 1024] = include_bytes!("../assets/font.bin");
 
 pub const TEXT_MODE_BASE_ADDRESSES: [u16; 24] = [
     0x0400, 0x0480, 0x0500, 0x0580, 0x0600, 0x0680, 0x0700, 0x0780, 0x0428, 0x04A8, 0x0528, 0x05A8,

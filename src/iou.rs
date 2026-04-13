@@ -263,8 +263,8 @@ impl IOU {
                 (pressed as u8) << 7
             }, // C062 49250 RDBTN1        ECG  R7  Switch Input 1 / Open Apple
             0xC063 => (!self.mouse.button0.get() as u8) << 7, //                           C   R7  Bit 7 = Mouse Button Not Pressed
-            0xC064 => 0x00, // C064 49252 PADDL0       OECG  R7  Analog Input 0
-            0xC065 => 0x00, // C065 49253 PADDL1       OECG  R7  Analog Input 1
+            0xC064 => 0x80, // C064 49252 PADDL0       OECG  R7  Analog Input 0 (no joystick: timer never expires)
+            0xC065 => 0x80, // C065 49253 PADDL1       OECG  R7  Analog Input 1 (no joystick: timer never expires)
             0xC066 => (self.mouse.x_dir.get() as u8) << 7, //           RDMOUX1        C   R7  Mouse X1 Direction (1 = right)
             0xC067 => (self.mouse.y_dir.get() as u8) << 7, //           RDMOUY1        C   R7  Mouse Y1 Direction (1 = down)
             0xC068 => 0x00, // STATEREG (IIGS) - Ignore on IIc
