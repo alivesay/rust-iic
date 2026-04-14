@@ -130,19 +130,6 @@ fn emu_to_tex(emu_xy: vec2<f32>, cr_l: f32, cr_t: f32, cs: vec2<f32>) -> vec2<f3
     return vec2<f32>(cr_l + emu_xy.x * cs.x, cr_t + emu_xy.y * cs.y);
 }
 
-// --- Halation blur with gaussian edge taper ---
-// tex_uv: where to sample the blur texture (texture UV space)
-// emu_c: emulator-space [0,1] coordinate for edge taper calculation
-
-fn texblur(tex_uv: vec2<f32>, emu_c: vec2<f32>, CRTg: f32, bw: f32) -> vec3<f32> {
-    let col = pow(max(textureSampleLevel(r_blur, r_sampler, tex_uv, 0.0).rgb, vec3<f32>(0.0)), vec3<f32>(CRTg));
-    let w = bw / 320.0;
-    let c = min(emu_c, vec2<f32>(1.0) - emu_c) * ASPECT * vec2<f32>(1.0 / w);
-    let e2c = exp(-c * c);
-    let s = (step(vec2<f32>(0.0), c) - vec2<f32>(0.5)) * sqrt(vec2<f32>(1.0) - e2c) * (vec2<f32>(1.0) + vec2<f32>(0.1749) * e2c) + vec2<f32>(0.5);
-    return col * vec3<f32>(s.x * s.y);
-}
-
 // --- Procedural shadow masks ---
 
 // Aperture grille (vertical RGB stripes, period = 3 pixels)
@@ -245,7 +232,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let cval = corner_mask(xy, ovs, csize, csmooth);
 
     // --- Raster bloom: expand/contract based on average brightness ---
-    let avgbright = dot(textureSampleLevel(r_blur, r_sampler, vec2<f32>(0.5, 0.5), 9.0).rgb, vec3<f32>(1.0)) / 3.0;
+    // Sample from intermediate texture (has full mip chain) not blur (no mipmaps)
+    let avgbright = dot(textureSampleLevel(r_texture, r_sampler, vec2<f32>(0.5, 0.5), 9.0).rgb, vec3<f32>(1.0)) / 3.0;
     let rbloom = 1.0 - rbloom_amt * (avgbright - 0.5);
     let xy_bloomed = (xy - vec2<f32>(0.5)) * rbloom + vec2<f32>(0.5);
     let xy0 = xy_bloomed;  // save for halation sampling
@@ -322,9 +310,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var mul_res = (col * w1 + col2 * w2).rgb;
 
-    // --- Halation: mix blurred image ---
+    // --- Halation: mix in pre-blurred image from Gaussian blur passes ---
     let blur_uv = emu_to_tex(xy0, cr_left, cr_top, content_span);
-    let blur = texblur(blur_uv, xy0, CRTgamma, blur_w);
+    let blur_raw = textureSampleLevel(r_blur, r_sampler, blur_uv, 0.0).rgb;
+    let blur = pow(max(blur_raw, vec3<f32>(0.0)), vec3<f32>(CRTgamma));
     mul_res = mix(mul_res, blur, halation_amt) * vec3<f32>(cval * rbloom);
 
     // --- Energy-conserving shadow mask (from deluxe) ---
