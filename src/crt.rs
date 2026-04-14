@@ -31,6 +31,8 @@ pub struct CrtRenderer {
     mipgen_bind_group_layout: wgpu::BindGroupLayout,
     mipgen_vertex_buffer: wgpu::Buffer,
     mip_level_count: u32,
+    // Shader params (shared between CRT and bloom passes)
+    shader_params_buffer: wgpu::Buffer,
 }
 
 #[repr(C)]
@@ -40,6 +42,8 @@ struct CrtUniforms {
     content_rect: [f32; 4],
     // x = bar_uv_y (status bar boundary in UV), y = source_height, z = time (seconds), w = source_width
     params: [f32; 4],
+    // x = monochrome (0.0 or 1.0), y/z/w = reserved
+    extra: [f32; 4],
 }
 
 impl CrtRenderer {
@@ -184,6 +188,16 @@ impl CrtRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -276,6 +290,16 @@ impl CrtRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -324,8 +348,16 @@ impl CrtRenderer {
         let (intermediate_texture, intermediate_view, intermediate_render_view) =
             Self::create_intermediate(device, surface_width, surface_height, surface_format, mip_level_count);
 
+        // Shader params buffer (shared between CRT and bloom passes)
+        let default_params = shader_ui::ShaderParams::default().to_gpu();
+        let shader_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shader_params_buffer"),
+            contents: bytemuck::bytes_of(&default_params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let bloom_bind_group = Self::create_bloom_bind_group(
-            device, &bloom_bind_group_layout, &intermediate_view, &sampler,
+            device, &bloom_bind_group_layout, &intermediate_view, &sampler, &shader_params_buffer,
         );
 
         let bind_group = Self::create_bind_group(
@@ -335,6 +367,7 @@ impl CrtRenderer {
             &sampler,
             &uniform_buffer,
             &bloom_view,
+            &shader_params_buffer,
         );
 
         Self {
@@ -359,6 +392,7 @@ impl CrtRenderer {
             mipgen_bind_group_layout,
             mipgen_vertex_buffer,
             mip_level_count,
+            shader_params_buffer,
         }
     }
 
@@ -405,6 +439,7 @@ impl CrtRenderer {
         sampler: &wgpu::Sampler,
         uniform_buffer: &wgpu::Buffer,
         bloom_view: &wgpu::TextureView,
+        shader_params_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("crt_bind_group"),
@@ -426,6 +461,10 @@ impl CrtRenderer {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(bloom_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: shader_params_buffer.as_entire_binding(),
+                },
             ],
         })
     }
@@ -435,6 +474,7 @@ impl CrtRenderer {
         layout: &wgpu::BindGroupLayout,
         intermediate_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
+        shader_params_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom_bind_group"),
@@ -448,25 +488,20 @@ impl CrtRenderer {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: shader_params_buffer.as_entire_binding(),
+                },
             ],
         })
     }
 
     /// Call when the surface is resized to recreate the intermediate texture.
+    /// Uniforms (content_rect) are now updated per-frame via update_content_rect.
     pub fn resize(
-        &mut self, device: &wgpu::Device, queue: &wgpu::Queue,
+        &mut self, device: &wgpu::Device, _queue: &wgpu::Queue,
         width: u32, height: u32,
-        buffer_width: u32, buffer_height: u32,
-        bar_height: u32, source_width: f32, source_height: f32,
     ) {
-        // Always update uniforms (bar_height may have changed even if size didn't)
-        let uniforms = Self::compute_uniforms(
-            width, height,
-            buffer_width, buffer_height,
-            bar_height, source_width, source_height,
-        );
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
-
         if width == self.tex_width && height == self.tex_height {
             return;
         }
@@ -494,7 +529,7 @@ impl CrtRenderer {
 
         // Recreate bloom bind group (reads from intermediate)
         self.bloom_bind_group = Self::create_bloom_bind_group(
-            device, &self.bloom_bind_group_layout, &self.intermediate_view, &self.sampler,
+            device, &self.bloom_bind_group_layout, &self.intermediate_view, &self.sampler, &self.shader_params_buffer,
         );
 
         // Recreate CRT bind group (reads from intermediate + bloom)
@@ -505,6 +540,7 @@ impl CrtRenderer {
             &self.sampler,
             &self.uniform_buffer,
             &self.bloom_view,
+            &self.shader_params_buffer,
         );
     }
 
@@ -512,6 +548,53 @@ impl CrtRenderer {
     pub fn update_time(&self, queue: &wgpu::Queue, time: f32) {
         // params.z is at byte offset 16 (content_rect) + 8 (params.x, params.y) = 24
         queue.write_buffer(&self.uniform_buffer, 24, bytemuck::bytes_of(&time));
+    }
+
+    /// Update all tunable shader parameters. Call once per frame.
+    pub fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams) {
+        let gpu = params.to_gpu();
+        queue.write_buffer(&self.shader_params_buffer, 0, bytemuck::bytes_of(&gpu));
+    }
+
+    /// Update the content rect and source dimensions based on actual blit geometry.
+    /// Call each frame with the real position/size of the emulator content in the surface.
+    pub fn update_content_rect(
+        &self, queue: &wgpu::Queue,
+        surface_w: u32, surface_h: u32,
+        offset_x: u32, offset_y: u32,
+        dst_w: u32, dst_h: u32,
+        bar_h: u32,
+        source_width: f32, source_height: f32,
+    ) {
+        let sw = surface_w as f64;
+        let sh = surface_h as f64;
+
+        let left = offset_x as f64 / sw;
+        let top = offset_y as f64 / sh;
+        let right = (offset_x + dst_w) as f64 / sw;
+        let bottom = (offset_y + dst_h) as f64 / sh;
+
+        // bar_uv_y: if toolbar visible, its top edge in UV space
+        // The bar sits below the blit area in the surface
+        let bar_uv_y = if bar_h > 0 {
+            (surface_h - bar_h) as f64 / sh
+        } else {
+            bottom // no bar = bar boundary at bottom of content
+        };
+
+        let uniforms = CrtUniforms {
+            content_rect: [left as f32, top as f32, right as f32, bottom as f32],
+            params: [bar_uv_y as f32, source_height, 0.0, source_width],
+            extra: [0.0, 0.0, 0.0, 0.0],
+        };
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+    }
+
+    /// Update the monochrome flag. Call when mode changes or once per frame.
+    pub fn update_monochrome(&self, queue: &wgpu::Queue, monochrome: bool) {
+        // extra.x is at byte offset 16 (content_rect) + 16 (params) = 32
+        let val: f32 = if monochrome { 1.0 } else { 0.0 };
+        queue.write_buffer(&self.uniform_buffer, 32, bytemuck::bytes_of(&val));
     }
 
     /// Compute the content rect and bar boundary in intermediate texture UV space.
@@ -548,6 +631,7 @@ impl CrtRenderer {
         CrtUniforms {
             content_rect: [left as f32, top as f32, right as f32, bottom as f32],
             params: [bar_uv_y as f32, source_height, 0.0, source_width],
+            extra: [0.0, 0.0, 0.0, 0.0],
         }
     }
 
@@ -616,7 +700,7 @@ impl CrtRenderer {
             }
         }
 
-        // Pass 1: Bloom blur (intermediate → bloom_texture)
+        // Pass 1: Bloom/halation blur (intermediate → bloom_texture)
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom_render_pass"),
@@ -639,7 +723,7 @@ impl CrtRenderer {
             rpass.draw(0..3, 0..1);
         }
 
-        // Pass 2: CRT composite (intermediate + bloom → screen)
+        // Pass 2: CRT-Geom-Deluxe composite (intermediate + blur → screen)
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("crt_render_pass"),

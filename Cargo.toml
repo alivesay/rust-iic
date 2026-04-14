@@ -15,6 +15,9 @@ bitflags = "2.8.0"
 bytemuck = { version = "1", features = ["derive"] }
 clap = { version = "4.5.27", features = ["derive"] }
 cpal = "0.16.0"
+egui = "0.33"
+egui-wgpu = "0.33"
+egui-winit = "0.33"
 fastrand = "2.0"
 env_logger = "0.11.6"
 image = "0.25.5"
@@ -24,5 +27,6 @@ pixels = "0.16.0"
 regex = "1.11.1"
 rfd = "0.15"
 ringbuf = "0.4.8"
+shader_ui = { path = "shader_ui" }
 wgpu = "27"
 winit = "0.30.8"

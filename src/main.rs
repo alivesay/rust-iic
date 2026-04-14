@@ -25,6 +25,7 @@ use clap::Parser;
 use cpu::{CpuType, SystemType};
 use log::error;
 use pixels::{Error, Pixels, ScalingMode, SurfaceTexture};
+use shader_ui::ShaderParams;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -124,6 +125,12 @@ pub struct App {
     last_cursor_pos: Option<(f64, f64)>,
     show_toolbar: bool,
     last_drive_click: Option<(usize, Instant)>,
+    // egui state for shader parameter UI
+    egui_ctx: egui::Context,
+    egui_state: Option<egui_winit::State>,
+    egui_renderer: Option<egui_wgpu::Renderer>,
+    shader_params: ShaderParams,
+    show_shader_ui: bool,
 }
 
 fn main() -> Result<(), Error> {
@@ -200,6 +207,11 @@ fn main() -> Result<(), Error> {
         last_cursor_pos: None,
         show_toolbar: true,
         last_drive_click: None,
+        egui_ctx: egui::Context::default(),
+        egui_state: None,
+        egui_renderer: None,
+        shader_params: ShaderParams::default(),
+        show_shader_ui: false,
     };
 
     let timeout = Some(Duration::ZERO);
@@ -389,6 +401,23 @@ impl winit::application::ApplicationHandler for App {
                         src_h as f32,
                         surface_format,
                     ));
+
+                    // Initialize egui for shader parameter UI
+                    let egui_state = egui_winit::State::new(
+                        self.egui_ctx.clone(),
+                        egui::ViewportId::ROOT,
+                        window.as_ref(),
+                        Some(window.scale_factor() as f32),
+                        None,
+                        Some(pixels.device().limits().max_texture_dimension_2d as usize),
+                    );
+                    let egui_renderer = egui_wgpu::Renderer::new(
+                        pixels.device(),
+                        surface_format,
+                        Default::default(),
+                    );
+                    self.egui_state = Some(egui_state);
+                    self.egui_renderer = Some(egui_renderer);
                 }
                 window.request_redraw();
                 Some(pixels)
@@ -402,6 +431,18 @@ impl winit::application::ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Forward events to egui — if consumed, skip emulator input handling
+        let egui_consumed = if let Some(egui_state) = self.egui_state.as_mut() {
+            if let Some(window) = self.window.as_ref() {
+                let response = egui_state.on_window_event(window.as_ref(), &event);
+                response.consumed
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         match event {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -421,13 +462,9 @@ impl winit::application::ApplicationHandler for App {
                             event_loop.exit();
                         }
                         if let Some(crt) = self.crt_renderer.as_mut() {
-                            let bar_h = if self.show_toolbar { STATUS_BAR_HEIGHT } else { 0 };
-                            let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
                             crt.resize(
                                 pixels.device(), pixels.queue(),
                                 size.width, size.height,
-                                self.buffer_width, self.buffer_height,
-                                bar_h, src_w as f32, src_h as f32,
                             );
                         }
                     }
@@ -469,13 +506,9 @@ impl winit::application::ApplicationHandler for App {
                         self.buffer_height = self.surface_height;
                         let _ = pixels.resize_buffer(self.surface_width, self.surface_height);
                         if let Some(crt) = self.crt_renderer.as_mut() {
-                            let bar_h = if self.show_toolbar { STATUS_BAR_HEIGHT } else { 0 };
-                            let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
                             crt.resize(
                                 pixels.device(), pixels.queue(),
                                 self.surface_width, self.surface_height,
-                                self.buffer_width, self.buffer_height,
-                                bar_h, src_w as f32, src_h as f32,
                             );
                         }
                     }
@@ -507,21 +540,25 @@ impl winit::application::ApplicationHandler for App {
                     // Use integer scale so CPU scanlines (every-other-row dimming)
                     // remain uniform — fractional scales cause moiré.
                     let display_region_h = surf_h.saturating_sub(bar_h);
+                    let mut blit_offset_x = 0u32;
+                    let mut blit_offset_y = 0u32;
+                    let mut blit_dst_w = 0u32;
+                    let mut blit_dst_h = 0u32;
                     if display_region_h > 0 && surf_w > 0 {
                         let scale_x = surf_w as f64 / src_w as f64;
                         let scale_y = display_region_h as f64 / src_h as f64;
                         let scale = scale_x.min(scale_y).floor().max(1.0);
 
-                        let dst_w = (src_w as f64 * scale) as u32;
-                        let dst_h = (src_h as f64 * scale) as u32;
-                        let offset_x = (surf_w - dst_w) / 2;
-                        let offset_y = (display_region_h - dst_h) / 2;
+                        blit_dst_w = (src_w as f64 * scale) as u32;
+                        blit_dst_h = (src_h as f64 * scale) as u32;
+                        blit_offset_x = (surf_w - blit_dst_w) / 2;
+                        blit_offset_y = (display_region_h - blit_dst_h) / 2;
 
                         // Nearest-neighbor blit
                         blit_scaled(
                             frame, surf_w,
                             video_pixels, src_w, src_h,
-                            offset_x, offset_y, dst_w, dst_h,
+                            blit_offset_x, blit_offset_y, blit_dst_w, blit_dst_h,
                         );
                     }
 
@@ -542,18 +579,116 @@ impl winit::application::ApplicationHandler for App {
                     }
 
                     let render_result = if let Some(crt) = &self.crt_renderer {
+                        // Compute active area within blit (excluding video border)
+                        let border = self.cpu.bus.video.border_size as u32;
+                        let blit_scale = if src_w > 0 { blit_dst_w / src_w } else { 1 };
+                        let active_offset_x = blit_offset_x + border * blit_scale;
+                        let active_offset_y = blit_offset_y + border * blit_scale;
+                        let active_w = src_w - border * 2;
+                        let active_h = src_h - border * 2;
+                        let active_dst_w = active_w * blit_scale;
+                        let active_dst_h = active_h * blit_scale;
+
+                        // Update CRT uniforms with active area geometry
+                        // Video doubles each scanline to 2 rows (384 pixels for 192 scanlines),
+                        // so pass true scanline count (active_h / 2) for beam profile alignment.
+                        crt.update_content_rect(
+                            pixels.queue(),
+                            surf_w, surf_h,
+                            active_offset_x, active_offset_y,
+                            active_dst_w, active_dst_h,
+                            bar_h,
+                            active_w as f32, (active_h / 2) as f32,
+                        );
+
                         // Update time uniform for flicker effect
                         let elapsed = self.crt_start_time.elapsed().as_secs_f32();
                         crt.update_time(pixels.queue(), elapsed);
+                        crt.update_monochrome(pixels.queue(), self.cpu.bus.video.monochrome);
+                        crt.update_shader_params(pixels.queue(), &self.shader_params);
+
+                        // Run egui UI
+                        let egui_output = if self.show_shader_ui {
+                            if let Some(egui_state) = self.egui_state.as_mut() {
+                                let window = self.window.as_ref().unwrap();
+                                let raw_input = egui_state.take_egui_input(window.as_ref());
+                                let output = self.egui_ctx.run(raw_input, |ctx| {
+                                    shader_ui::render_shader_ui(ctx, &mut self.shader_params, &mut self.show_shader_ui);
+                                });
+                                egui_state.handle_platform_output(window.as_ref(), output.platform_output.clone());
+                                let ppp = output.pixels_per_point;
+                                let jobs = self.egui_ctx.tessellate(output.shapes.clone(), ppp);
+                                Some((output, jobs, ppp))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        // Upload egui textures before render_with
                         let device = pixels.device();
-                        // Multi-pass: scaling renderer → intermediate → mipmaps → bloom → CRT → screen
-                        pixels.render_with(|encoder, render_target, context| {
+                        let queue = pixels.queue();
+                        if let Some((ref output, _, _)) = egui_output {
+                            if let Some(egui_renderer) = self.egui_renderer.as_mut() {
+                                for (id, delta) in &output.textures_delta.set {
+                                    egui_renderer.update_texture(device, queue, *id, delta);
+                                }
+                            }
+                        }
+
+                        let sw = self.surface_width;
+                        let sh = self.surface_height;
+                        let egui_renderer = self.egui_renderer.as_mut();
+
+                        // Multi-pass: scaling renderer → intermediate → mipmaps → bloom → CRT → egui → screen
+                        let render_res = pixels.render_with(|encoder, render_target, context| {
                             // Pass 1: scale pixel buffer into the CRT intermediate texture
                             context.scaling_renderer.render(encoder, crt.intermediate_view());
                             // Pass 2+: generate mipmaps, bloom, CRT composite
                             crt.render(encoder, render_target, device);
+
+                            // Pass 3: egui overlay
+                            if let (Some(egui_rend), Some((_, ref jobs, ppp))) = (egui_renderer, &egui_output) {
+                                let screen_desc = egui_wgpu::ScreenDescriptor {
+                                    size_in_pixels: [sw, sh],
+                                    pixels_per_point: *ppp,
+                                };
+                                let _ = egui_rend.update_buffers(device, queue, encoder, jobs, &screen_desc);
+                                {
+                                    let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                        label: Some("egui_render_pass"),
+                                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                            view: render_target,
+                                            resolve_target: None,
+                                            depth_slice: None,
+                                            ops: wgpu::Operations {
+                                                load: wgpu::LoadOp::Load,
+                                                store: wgpu::StoreOp::Store,
+                                            },
+                                        })],
+                                        depth_stencil_attachment: None,
+                                        timestamp_writes: None,
+                                        occlusion_query_set: None,
+                                    });
+                                    let mut rpass = rpass.forget_lifetime();
+                                    egui_rend.render(&mut rpass, jobs, &screen_desc);
+                                }
+                            }
+
                             Ok(())
-                        })
+                        });
+
+                        // Free old egui textures after render
+                        if let Some((ref output, _, _)) = egui_output {
+                            if let Some(egui_renderer) = self.egui_renderer.as_mut() {
+                                for id in &output.textures_delta.free {
+                                    egui_renderer.free_texture(id);
+                                }
+                            }
+                        }
+
+                        render_res
                     } else {
                         pixels.render()
                     };
@@ -567,15 +702,18 @@ impl winit::application::ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let x = position.x;
                 let y = position.y;
-                if let Some((lx, ly)) = self.last_cursor_pos {
-                    let dx = x - lx;
-                    let dy = y - ly;
-                    self.cpu.bus.iou.mouse.add_delta(dx, dy);
+                if !egui_consumed {
+                    if let Some((lx, ly)) = self.last_cursor_pos {
+                        let dx = x - lx;
+                        let dy = y - ly;
+                        self.cpu.bus.iou.mouse.add_delta(dx, dy);
+                    }
                 }
                 self.last_cursor_pos = Some((x, y));
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                if egui_consumed { return; }
                 let pressed = state == ElementState::Pressed;
                 if pressed {
                     // Check if click is on a UI element in the status bar
@@ -671,6 +809,17 @@ impl winit::application::ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
+                // F7 always toggles shader UI, even when egui has focus
+                if event.logical_key == Key::Named(NamedKey::F7) && event.state.is_pressed() {
+                    if self.crt_enabled {
+                        self.show_shader_ui = !self.show_shader_ui;
+                        println!("Shader UI: {}", if self.show_shader_ui { "ON" } else { "OFF" });
+                    }
+                    return;
+                }
+
+                if egui_consumed { return; }
+
                 if event.state.is_pressed() {
                     // check for Reset (Control + Backspace/Delete)
                     if event.logical_key == Key::Named(NamedKey::Backspace) && self.modifiers.control_key() {
@@ -736,19 +885,7 @@ impl winit::application::ApplicationHandler for App {
 
                 if event.logical_key == Key::Named(NamedKey::F6) && event.state.is_pressed() {
                     self.show_toolbar = !self.show_toolbar;
-                    let bar_h = if self.show_toolbar { STATUS_BAR_HEIGHT } else { 0 };
-                    // Only update CRT uniforms, buffer stays fixed at init size
-                    if let Some(pixels) = self.pixels.as_mut() {
-                        if let Some(crt) = self.crt_renderer.as_mut() {
-                            let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
-                            crt.resize(
-                                pixels.device(), pixels.queue(),
-                                self.surface_width, self.surface_height,
-                                self.buffer_width, self.buffer_height,
-                                bar_h, src_w as f32, src_h as f32,
-                            );
-                        }
-                    }
+                    // Toolbar toggle — content rect will update next frame automatically
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
