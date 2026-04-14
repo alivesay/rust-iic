@@ -1,41 +1,18 @@
-// CRT post-processing shader for Apple IIc emulator.
+// CRT-Geom-Deluxe shader ported to WGSL for Apple IIc emulator.
+// Based on CRT-Geom-Deluxe by cgwg, Themaister and DOLLS (GPL v2+).
+// Features: curvature, Lanczos2 horizontal, 3x oversampled beam profile,
+//           halation via blur texture, raster bloom, energy-conserving shadow mask.
 //
-// Pipeline: scaling_renderer → intermediate (mipmapped) → bloom (1/4 res) → this shader → screen
-//
-// Effects applied (in order):
-//   1. Barrel distortion with soft edge fade
-//   2. Per-scanline horizontal jitter
-//   3. Chromatic aberration (RGB channel offset)
-//   4. Phosphor bloom (additive, from pre-blurred texture)
-//   5. Phosphor mask (RGB triads)
-//   6. Brightness / contrast / saturation
-//   7. Temporal flicker
-//   8. Analog noise
-//   9. Vignette
-//
-// Scanlines are applied CPU-side (video.rs). The status bar and any
-// letterbox/pillarbox regions are passed through unmodified.
+// Bindings:
+//   0: intermediate texture  1: sampler  2: uniforms  3: blur_texture  4: ShaderParams
 
-// --- Tunable constants ---
-const CURVATURE_X: f32      = 0.15;    // Horizontal barrel distortion
-const CURVATURE_Y: f32      = 0.20;    // Vertical barrel distortion
-const CHROMA_SHIFT: f32     = 0.15;    // Chromatic aberration (texels)
-const MASK_STRENGTH: f32    = 0.08;    // Phosphor mask intensity
-const BRIGHTNESS: f32       = 1.08;
-const CONTRAST: f32         = 1.1;
-const SATURATION: f32       = 1.05;
-const FLICKER_AMOUNT: f32   = 0.02;    // Global brightness wobble
-const VIGNETTE_STRENGTH: f32 = 0.6;
-const HJITTER_AMOUNT: f32   = 0.00008; // Per-scanline horizontal jitter
-const NOISE_AMOUNT: f32     = 0.03;    // Analog noise intensity
-const GLOW_STRENGTH: f32    = 0.35;    // Bloom mix strength
-const GLOW_OVERDRIVE: f32   = 1.2;     // Source pixel intensity boost (phosphor self-glow)
-const EDGE_WIDTH: f32       = 0.005;   // Soft-clip fade width at CRT edge
-
-// Scanlines are baked into the framebuffer by video.rs (pixel-perfect alignment).
-// The shader does NOT apply scanlines.
-
-// --- Types ---
+struct ShaderParams {
+    group0: vec4<f32>,  // CRTgamma, monitorgamma, d, R
+    group1: vec4<f32>,  // cornersize, cornersmooth, overscan_x, overscan_y
+    group2: vec4<f32>,  // aperture_strength, aperture_brightboost, scanline_weight, lum
+    group3: vec4<f32>,  // curvature_on, saturation, halation, rasterbloom
+    group4: vec4<f32>,  // blur_width, mask_type, reserved, reserved
+};
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -43,18 +20,16 @@ struct VertexOutput {
 };
 
 struct Uniforms {
-    content_rect: vec4<f32>,  // UV bounds of scaled content (left, top, right, bottom)
-    params: vec4<f32>,        // (bar_uv_y, source_height, time, source_width)
+    content_rect: vec4<f32>,
+    params: vec4<f32>,
+    extra: vec4<f32>,
 };
 
-// --- Bindings ---
-
-@group(0) @binding(0) var r_texture: texture_2d<f32>;  // Intermediate (mipmapped)
+@group(0) @binding(0) var r_texture: texture_2d<f32>;
 @group(0) @binding(1) var r_sampler: sampler;
 @group(0) @binding(2) var<uniform> uniforms: Uniforms;
-@group(0) @binding(3) var r_bloom: texture_2d<f32>;     // Bloom (1/4 res, blurred)
-
-// --- Vertex shader (fullscreen triangle) ---
+@group(0) @binding(3) var r_blur: texture_2d<f32>;
+@group(0) @binding(4) var<uniform> params: ShaderParams;
 
 @vertex
 fn vs_main(@location(0) position: vec2<f32>) -> VertexOutput {
@@ -67,149 +42,313 @@ fn vs_main(@location(0) position: vec2<f32>) -> VertexOutput {
     return out;
 }
 
-// --- Helper functions ---
+const PI: f32 = 3.141592653589;
+const ASPECT: vec2<f32> = vec2<f32>(1.0, 0.75);
 
-// Barrel distortion with independent X/Y warp.
-fn barrel_distort(uv: vec2<f32>, warp_x: f32, warp_y: f32) -> vec2<f32> {
-    let c = uv - 0.5;
-    return vec2<f32>(
-        c.x * (1.0 + warp_x * c.y * c.y),
-        c.y * (1.0 + warp_y * c.x * c.x),
-    ) + 0.5;
+fn FIX_f(c: f32) -> f32 { return max(abs(c), 1e-5); }
+
+// --- Curvature geometry (same as crt-geom) ---
+
+fn intersect_crt(xy: vec2<f32>, sa: vec2<f32>, ca: vec2<f32>, d: f32, R: f32) -> f32 {
+    let A = dot(xy, xy) + d * d;
+    let B = 2.0 * (R * (dot(xy, sa) - d * ca.x * ca.y) - d * d);
+    let C = d * d + 2.0 * R * d * ca.x * ca.y;
+    return (-B - sqrt(B * B - 4.0 * A * C)) / (2.0 * A);
 }
 
-// Map emulator-local [0,1]² UV back to full-texture UV.
-fn emu_to_tex(emu: vec2<f32>, cr_left: f32, cr_top: f32, cr_right: f32, bar_y: f32) -> vec2<f32> {
-    return vec2<f32>(
-        cr_left + emu.x * (cr_right - cr_left),
-        cr_top  + emu.y * (bar_y   - cr_top),
-    );
+fn bkwtrans(xy: vec2<f32>, sa: vec2<f32>, ca: vec2<f32>, d: f32, R: f32) -> vec2<f32> {
+    let c = intersect_crt(xy, sa, ca, d, R);
+    var pt = vec2<f32>(c) * xy;
+    pt -= vec2<f32>(-R) * sa;
+    pt /= vec2<f32>(R);
+    let tang = sa / ca;
+    let poc = pt / ca;
+    let A = dot(tang, tang) + 1.0;
+    let B = -2.0 * dot(poc, tang);
+    let C = dot(poc, poc) - 1.0;
+    let a = (-B + sqrt(B * B - 4.0 * A * C)) / (2.0 * A);
+    let uv = (pt - a * sa) / ca;
+    let r = FIX_f(R * acos(a));
+    return uv * r / sin(r / R);
 }
 
-fn adjust_bcs(color: vec3<f32>) -> vec3<f32> {
-    var c = color * BRIGHTNESS;
-    c = (c - 0.5) * CONTRAST + 0.5;
-    let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-    return mix(vec3<f32>(luma), c, SATURATION);
+fn fwtrans(uv: vec2<f32>, sa: vec2<f32>, ca: vec2<f32>, d: f32, R: f32) -> vec2<f32> {
+    let r = FIX_f(sqrt(dot(uv, uv)));
+    let uv2 = uv * sin(r / R) / r;
+    let x = 1.0 - cos(r / R);
+    let D = d / R + x * ca.x * ca.y + dot(uv2, sa);
+    return d * (uv2 * ca - x * sa) / D;
 }
 
-fn vignette(uv: vec2<f32>) -> f32 {
-    let d = max(abs(uv.x - 0.5), abs(uv.y - 0.5)) * 2.0;
-    return 1.0 - VIGNETTE_STRENGTH * d * d;
+fn maxscale_crt(sa: vec2<f32>, ca: vec2<f32>, d: f32, R: f32) -> vec3<f32> {
+    let c = bkwtrans(-R * sa / (1.0 + R / d * ca.x * ca.y), sa, ca, d, R);
+    let a = vec2<f32>(0.5, 0.5) * ASPECT;
+    let lo = vec2<f32>(
+        fwtrans(vec2<f32>(-a.x, c.y), sa, ca, d, R).x,
+        fwtrans(vec2<f32>(c.x, -a.y), sa, ca, d, R).y
+    ) / ASPECT;
+    let hi = vec2<f32>(
+        fwtrans(vec2<f32>(a.x, c.y), sa, ca, d, R).x,
+        fwtrans(vec2<f32>(c.x, a.y), sa, ca, d, R).y
+    ) / ASPECT;
+    return vec3<f32>((hi + lo) * ASPECT * 0.5, max(hi.x - lo.x, hi.y - lo.y));
 }
 
-fn hash12(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
-    p3 += dot(p3, vec3<f32>(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
-    return fract((p3.x + p3.y) * p3.z);
+fn crt_transform(coord: vec2<f32>, sa: vec2<f32>, ca: vec2<f32>,
+                 stretch: vec3<f32>, d: f32, R: f32, ovs: vec2<f32>) -> vec2<f32> {
+    let c = (coord - vec2<f32>(0.5)) * ASPECT * stretch.z + stretch.xy;
+    return bkwtrans(c, sa, ca, d, R) / ovs / ASPECT + vec2<f32>(0.5);
 }
 
-fn scanline_jitter(line: f32, t: f32) -> f32 {
-    return hash12(vec2<f32>(line * 31.17, t * 7.23)) * 2.0 - 1.0;
+fn corner_mask(coord: vec2<f32>, ovs: vec2<f32>, csize: f32, csmooth: f32) -> f32 {
+    let c = (coord - vec2<f32>(0.5)) * ovs + vec2<f32>(0.5);
+    let cc = min(c, vec2<f32>(1.0) - c) * ASPECT;
+    let cdist = vec2<f32>(csize);
+    let dd = cdist - min(cc, cdist);
+    let dist = sqrt(dot(dd, dd));
+    return clamp((cdist.x - dist) * csmooth, 0.0, 1.0);
 }
 
-// Clamp a texture UV to stay half a texel inside the content rect.
-fn clamp_uv(uv: vec2<f32>, lo: vec2<f32>, hi: vec2<f32>, half_px: vec2<f32>) -> vec2<f32> {
-    return clamp(uv, lo + half_px, hi - half_px);
+// --- Scanline beam profile (non-gaussian, 3x oversampled) ---
+
+fn scanline_weights(dist: f32, color: vec4<f32>, sw: f32, lum: f32) -> vec4<f32> {
+    let wid = 2.0 + 2.0 * pow(color, vec4<f32>(4.0));
+    let w = vec4<f32>(dist / sw);
+    return (lum + 1.4) * exp(-pow(w * inverseSqrt(0.5 * wid), wid)) / (0.6 + 0.2 * wid);
 }
 
-// --- Fragment shader ---
+// --- Sample with CRT gamma ---
+
+fn tex2D_crt(uv: vec2<f32>, g: f32) -> vec4<f32> {
+    let underscan = step(vec2<f32>(0.0), uv) * step(vec2<f32>(0.0), vec2<f32>(1.0) - uv);
+    let raw = textureSampleLevel(r_texture, r_sampler, uv, 0.0) * vec4<f32>(underscan.x * underscan.y);
+    return pow(max(raw, vec4<f32>(0.0)), vec4<f32>(g));
+}
+
+// Convert emulator-space [0,1] coords to texture UV
+fn emu_to_tex(emu_xy: vec2<f32>, cr_l: f32, cr_t: f32, cs: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(cr_l + emu_xy.x * cs.x, cr_t + emu_xy.y * cs.y);
+}
+
+// --- Halation blur with gaussian edge taper ---
+// tex_uv: where to sample the blur texture (texture UV space)
+// emu_c: emulator-space [0,1] coordinate for edge taper calculation
+
+fn texblur(tex_uv: vec2<f32>, emu_c: vec2<f32>, CRTg: f32, bw: f32) -> vec3<f32> {
+    let col = pow(max(textureSampleLevel(r_blur, r_sampler, tex_uv, 0.0).rgb, vec3<f32>(0.0)), vec3<f32>(CRTg));
+    let w = bw / 320.0;
+    let c = min(emu_c, vec2<f32>(1.0) - emu_c) * ASPECT * vec2<f32>(1.0 / w);
+    let e2c = exp(-c * c);
+    let s = (step(vec2<f32>(0.0), c) - vec2<f32>(0.5)) * sqrt(vec2<f32>(1.0) - e2c) * (vec2<f32>(1.0) + vec2<f32>(0.1749) * e2c) + vec2<f32>(0.5);
+    return col * vec3<f32>(s.x * s.y);
+}
+
+// --- Procedural shadow masks ---
+
+// Aperture grille (vertical RGB stripes, period = 3 pixels)
+fn mask_aperture(frag_pos: vec2<f32>) -> vec3<f32> {
+    let phase = i32(frag_pos.x) % 3;
+    if phase == 0 { return vec3<f32>(1.0, 0.0, 0.0); }
+    if phase == 1 { return vec3<f32>(0.0, 1.0, 0.0); }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+// Slot mask (3-wide RGB with vertical 2-row offset pattern)
+fn mask_slot(frag_pos: vec2<f32>) -> vec3<f32> {
+    let row = i32(frag_pos.y) % 4;
+    var x_off = 0;
+    if row >= 2 { x_off = 1; }
+    let phase = (i32(frag_pos.x) + x_off) % 3;
+    if phase == 0 { return vec3<f32>(1.0, 0.0, 0.0); }
+    if phase == 1 { return vec3<f32>(0.0, 1.0, 0.0); }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+// Delta / shadow mask (triangular arrangement)
+fn mask_delta(frag_pos: vec2<f32>) -> vec3<f32> {
+    let row = i32(frag_pos.y) % 3;
+    let col = (i32(frag_pos.x) + row) % 3;
+    if col == 0 { return vec3<f32>(1.0, 0.0, 0.0); }
+    if col == 1 { return vec3<f32>(0.0, 1.0, 0.0); }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+fn get_mask(frag_pos: vec2<f32>, mask_type: f32) -> vec3<f32> {
+    let mt = i32(mask_type);
+    if mt == 2 { return mask_slot(frag_pos); }
+    if mt == 3 { return mask_delta(frag_pos); }
+    return mask_aperture(frag_pos);
+}
+
+// --- Main fragment shader ---
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = in.tex_coord;
-
-    // Unpack uniforms
     let cr_left  = uniforms.content_rect.x;
     let cr_top   = uniforms.content_rect.y;
     let cr_right = uniforms.content_rect.z;
     let cr_bot   = uniforms.content_rect.w;
-    let bar_y    = uniforms.params.x;
     let src_h    = uniforms.params.y;
-    let time     = uniforms.params.z;
     let src_w    = uniforms.params.w;
 
-    // Pass through letterbox / pillarbox
+    // Pass through outside content rect
     if uv.x < cr_left || uv.x > cr_right || uv.y < cr_top || uv.y > cr_bot {
-        return textureSample(r_texture, r_sampler, uv);
+        return textureSampleLevel(r_texture, r_sampler, uv, 0.0);
     }
 
-    // Pass through status bar
-    if uv.y > bar_y {
-        return textureSample(r_texture, r_sampler, uv);
-    }
+    // Unpack params
+    let CRTgamma  = params.group0.x;
+    let mgamma    = params.group0.y;
+    let d         = params.group0.z;
+    let R         = params.group0.w;
+    let csize     = params.group1.x;
+    let csmooth   = params.group1.y;
+    let ovs_x     = params.group1.z / 100.0;
+    let ovs_y     = params.group1.w / 100.0;
+    let ap_str_raw = params.group2.x;  // aperture_strength
+    let ap_boost  = params.group2.y;  // aperture_brightboost
+    // Disable shadow mask in monochrome mode (no phosphor triad on mono CRTs)
+    let is_mono   = uniforms.extra.x;
+    let ap_str    = select(ap_str_raw, 0.0, is_mono > 0.5);
+    let sw        = params.group2.z;  // scanline_weight
+    let lum       = params.group2.w;  // luminance / geom_lum
+    let curv_on   = params.group3.x;
+    let SATURATION = params.group3.y;
+    let halation_amt = params.group3.z;
+    let rbloom_amt = params.group3.w / 10.0;  // deluxe divides by 10
+    let blur_w    = params.group4.x;
+    let mask_type = params.group4.y;
 
-    // Remap to emulator-local [0,1]²
+    let ovs = vec2<f32>(ovs_x, ovs_y);
+    let input_size = vec2<f32>(src_w, src_h);
+    let content_span = vec2<f32>(cr_right - cr_left, cr_bot - cr_top);
+
+    // Emulator-local [0,1]
     let emu_uv = vec2<f32>(
-        (uv.x - cr_left) / (cr_right - cr_left),
-        (uv.y - cr_top)  / (bar_y    - cr_top),
+        (uv.x - cr_left) / content_span.x,
+        (uv.y - cr_top) / content_span.y,
     );
 
-    // 1. Barrel distortion
-    let curved = barrel_distort(emu_uv, CURVATURE_X, CURVATURE_Y);
+    // Curvature
+    let sa = vec2<f32>(0.001, 0.001);
+    let ca = vec2<f32>(1.001, 1.001);
+    let stretch = maxscale_crt(sa, ca, d, R);
 
-    // Soft edge fade (smoothstep to black over EDGE_WIDTH)
-    let edge = min(
-        min(curved.x, 1.0 - curved.x),
-        min(curved.y, 1.0 - curved.y),
-    );
-    if edge < -EDGE_WIDTH {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    var xy: vec2<f32>;
+    if curv_on > 0.5 {
+        xy = crt_transform(emu_uv, sa, ca, stretch, d, R, ovs);
+    } else {
+        xy = (emu_uv - vec2<f32>(0.5)) / ovs + vec2<f32>(0.5);
     }
-    let fade = smoothstep(0.0, EDGE_WIDTH, edge);
-    let emu = clamp(curved, vec2<f32>(0.0), vec2<f32>(1.0));
 
-    // 2. Horizontal jitter
-    let scan = floor(emu.y * src_h);
-    let jit  = scanline_jitter(scan, floor(time * 60.0)) * HJITTER_AMOUNT;
-    let emu_j = vec2<f32>(emu.x + jit, emu.y);
+    let cval = corner_mask(xy, ovs, csize, csmooth);
 
-    // Map to texture UV and compute clamping bounds
-    let tex_uv = emu_to_tex(emu_j, cr_left, cr_top, cr_right, bar_y);
-    let tex_sz = vec2<f32>(textureDimensions(r_texture));
-    let half_px = 0.5 / tex_sz;
-    let uv_lo = vec2<f32>(cr_left, cr_top);
-    let uv_hi = vec2<f32>(cr_right, bar_y);
-    let cuv = clamp_uv(tex_uv, uv_lo, uv_hi, half_px);
+    // --- Raster bloom: expand/contract based on average brightness ---
+    let avgbright = dot(textureSampleLevel(r_blur, r_sampler, vec2<f32>(0.5, 0.5), 9.0).rgb, vec3<f32>(1.0)) / 3.0;
+    let rbloom = 1.0 - rbloom_amt * (avgbright - 0.5);
+    let xy_bloomed = (xy - vec2<f32>(0.5)) * rbloom + vec2<f32>(0.5);
+    let xy0 = xy_bloomed;  // save for halation sampling
 
-    // 3. Base sample + chromatic aberration
-    var color = textureSample(r_texture, r_sampler, cuv).rgb;
-    let ca = CHROMA_SHIFT / tex_sz.x;
-    color.r = mix(color.r, textureSample(r_texture, r_sampler, clamp_uv(cuv + vec2(-ca, 0.0), uv_lo, uv_hi, half_px)).r, 0.3);
-    color.b = mix(color.b, textureSample(r_texture, r_sampler, clamp_uv(cuv + vec2( ca, 0.0), uv_lo, uv_hi, half_px)).b, 0.3);
+    // Apple II: non-interlaced
+    let ilfac = vec2<f32>(1.0, 1.0);
+    let one = ilfac / input_size;
 
-    // 4. Phosphor bloom — glow spreads from bright pixels into dark areas
-    //    Clamp bloom sample to emulator area so toolbar doesn't bleed glow
-    let bloom_uv = vec2<f32>(tex_uv.x, min(tex_uv.y, bar_y - half_px.y));
-    let bloom_sample = textureSample(r_bloom, r_sampler, bloom_uv).rgb;
-    // Overdrive: boost bright source pixels (phosphor self-glow)
-    let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    color *= mix(1.0, GLOW_OVERDRIVE, luma);
-    // Additive bloom — only visible where base is dark (transparent over bright pixels)
-    color += bloom_sample * GLOW_STRENGTH * (1.0 - color);
+    let ratio_scale = (xy_bloomed * input_size - vec2<f32>(0.5)) / ilfac;
 
-    // 5. Phosphor mask (RGB triads)
-    let col = i32(in.position.x) % 3;
-    var mask = vec3<f32>(1.0);
-    if col == 0      { mask = vec3(1.0, 1.0 - MASK_STRENGTH, 1.0 - MASK_STRENGTH); }
-    else if col == 1 { mask = vec3(1.0 - MASK_STRENGTH, 1.0, 1.0 - MASK_STRENGTH); }
-    else             { mask = vec3(1.0 - MASK_STRENGTH, 1.0 - MASK_STRENGTH, 1.0); }
-    color *= mask;
+    // Oversample filter width for 3x beam oversampling
+    // Approximate fwidth via content_span and output resolution
+    let output_size = vec2<f32>(textureDimensions(r_texture));
+    let dxy = 1.0 / (content_span.y * output_size.y);
+    let oversample_filter = dxy * input_size.y;
 
-    // 6. Brightness / contrast / saturation
-    color = adjust_bcs(color);
+    let uv_ratio = fract(ratio_scale);
 
-    // 7. Flicker
-    color *= 1.0 - FLICKER_AMOUNT * sin(time * 3.7)
-                 - FLICKER_AMOUNT * 0.6 * sin(time * 1.13 + 2.0);
+    // Snap to texel center
+    let snapped = (floor(ratio_scale) * ilfac + vec2<f32>(0.5)) / input_size;
 
-    // 8. Analog noise
-    let seed = vec2<f32>(in.position.x * 1.5 + time * 131.1,
-                         in.position.y * 1.7 + time * 97.3);
-    color += (hash12(seed) - 0.5) * NOISE_AMOUNT;
+    // Convert snapped emu-space coords to texture UV for sampling
 
-    // 9. Vignette + edge fade
-    color *= vignette(emu) * fade;
+    // --- Lanczos2 horizontal filtering (4-tap) ---
+    let coeffs_raw = vec4<f32>(
+        1.0 + uv_ratio.x,
+        uv_ratio.x,
+        1.0 - uv_ratio.x,
+        2.0 - uv_ratio.x,
+    ) * PI;
+    let coeffs_fix = max(abs(coeffs_raw), vec4<f32>(1e-5));
+    let lanczos = 2.0 * sin(coeffs_fix) * sin(coeffs_fix / 2.0) / (coeffs_fix * coeffs_fix);
+    let coeffs = lanczos / dot(lanczos, vec4<f32>(1.0));
 
-    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    // Sample 4 horizontal texels for current and next scanline
+    let s0 = emu_to_tex(snapped + vec2<f32>(-one.x, 0.0), cr_left, cr_top, content_span);
+    let s1 = emu_to_tex(snapped, cr_left, cr_top, content_span);
+    let s2 = emu_to_tex(snapped + vec2<f32>(one.x, 0.0), cr_left, cr_top, content_span);
+    let s3 = emu_to_tex(snapped + vec2<f32>(2.0 * one.x, 0.0), cr_left, cr_top, content_span);
+
+    let col = clamp(
+        tex2D_crt(s0, CRTgamma) * coeffs.x +
+        tex2D_crt(s1, CRTgamma) * coeffs.y +
+        tex2D_crt(s2, CRTgamma) * coeffs.z +
+        tex2D_crt(s3, CRTgamma) * coeffs.w,
+        vec4<f32>(0.0), vec4<f32>(1.0)
+    );
+
+    let s0b = emu_to_tex(snapped + vec2<f32>(-one.x, one.y), cr_left, cr_top, content_span);
+    let s1b = emu_to_tex(snapped + vec2<f32>(0.0, one.y), cr_left, cr_top, content_span);
+    let s2b = emu_to_tex(snapped + vec2<f32>(one.x, one.y), cr_left, cr_top, content_span);
+    let s3b = emu_to_tex(snapped + vec2<f32>(2.0 * one.x, one.y), cr_left, cr_top, content_span);
+
+    let col2 = clamp(
+        tex2D_crt(s0b, CRTgamma) * coeffs.x +
+        tex2D_crt(s1b, CRTgamma) * coeffs.y +
+        tex2D_crt(s2b, CRTgamma) * coeffs.z +
+        tex2D_crt(s3b, CRTgamma) * coeffs.w,
+        vec4<f32>(0.0), vec4<f32>(1.0)
+    );
+
+    // --- 3x oversampled beam profile ---
+    var uv_y = uv_ratio.y;
+    var w1 = scanline_weights(uv_y, col, sw, lum);
+    var w2 = scanline_weights(1.0 - uv_y, col2, sw, lum);
+
+    uv_y = uv_ratio.y + 1.0 / 3.0 * oversample_filter;
+    w1 = (w1 + scanline_weights(uv_y, col, sw, lum)) / 3.0;
+    w2 = (w2 + scanline_weights(abs(1.0 - uv_y), col2, sw, lum)) / 3.0;
+
+    uv_y = uv_ratio.y - 2.0 / 3.0 * oversample_filter;
+    w1 = w1 + scanline_weights(abs(uv_y), col, sw, lum) / 3.0;
+    w2 = w2 + scanline_weights(abs(1.0 - uv_y), col2, sw, lum) / 3.0;
+
+    var mul_res = (col * w1 + col2 * w2).rgb;
+
+    // --- Halation: mix blurred image ---
+    let blur_uv = emu_to_tex(xy0, cr_left, cr_top, content_span);
+    let blur = texblur(blur_uv, xy0, CRTgamma, blur_w);
+    mul_res = mix(mul_res, blur, halation_amt) * vec3<f32>(cval * rbloom);
+
+    // --- Energy-conserving shadow mask (from deluxe) ---
+    // Halve position for HiDPI/Retina (physical pixels are 2x logical)
+    let mask_pos = in.position.xy * 0.5;
+    let mask_rgb = get_mask(mask_pos, mask_type);
+
+    // Fraction of bright subpixels (1/3 for all our masks)
+    let fbright = 1.0 / 3.0;
+    // Average darkening factor
+    let aperture_average = mix(1.0 - ap_str * (1.0 - ap_boost), 1.0, fbright);
+    // Dark mask pixel color
+    let clow = (1.0 - ap_str) * mul_res + ap_str * ap_boost * mul_res * mul_res;
+    let ifbright = 1.0 / fbright;
+    // Bright mask pixel color (energy-conserving)
+    let chi = ifbright * aperture_average * mul_res - (ifbright - 1.0) * clow;
+    let cout_masked = mix(clow, chi, mask_rgb);
+
+    // Output gamma
+    var result = pow(max(cout_masked, vec3<f32>(0.0)), vec3<f32>(1.0 / mgamma));
+
+    // Saturation
+    let l = dot(result, vec3<f32>(0.2126, 0.7152, 0.0722));
+    result = mix(vec3<f32>(l), result, SATURATION);
+
+    return vec4<f32>(clamp(result, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }

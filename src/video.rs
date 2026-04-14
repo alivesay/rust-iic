@@ -180,7 +180,8 @@ impl Video {
         }
 
         // Apply scanline effect: black out every odd row (the 2nd row of each doubled pair)
-        if self.scanline_intensity < 1.0 {
+        // CRT-Geom shader handles scanlines itself via beam profile
+        if !self.crt_enabled && self.scanline_intensity < 1.0 {
             self.apply_scanlines();
         }
 

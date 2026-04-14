@@ -1,0 +1,8 @@
+[package]
+name = "shader_ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+egui = "0.33"
+bytemuck = { version = "1", features = ["derive"] }
