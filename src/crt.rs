@@ -19,19 +19,26 @@ pub struct CrtRenderer {
     bind_group: wgpu::BindGroup,
     tex_width: u32,
     tex_height: u32,
-    // Bloom pass
-    bloom_pipeline: wgpu::RenderPipeline,
-    bloom_bind_group_layout: wgpu::BindGroupLayout,
-    bloom_texture: wgpu::Texture,
-    bloom_view: wgpu::TextureView,
-    bloom_bind_group: wgpu::BindGroup,
-    bloom_vertex_buffer: wgpu::Buffer,
-    // Mipmap generation
+    // Separable Gaussian blur (replaces old single-pass bloom)
+    gauss_pipeline: wgpu::RenderPipeline,
+    gauss_bind_group_layout: wgpu::BindGroupLayout,
+    gauss_vertex_buffer: wgpu::Buffer,
+    gaussx_uniform_buffer: wgpu::Buffer,
+    gaussy_uniform_buffer: wgpu::Buffer,
+    // Gaussx intermediate texture (horizontal blur output)
+    gaussx_texture: wgpu::Texture,
+    gaussx_view: wgpu::TextureView,
+    gaussx_bind_group: wgpu::BindGroup,  // reads intermediate → gaussx
+    gaussy_bind_group: wgpu::BindGroup,  // reads gaussx → blur_texture
+    // Final blur texture (vertical blur output, fed to CRT shader)
+    blur_texture: wgpu::Texture,
+    blur_view: wgpu::TextureView,
+    // Mipmap generation (still needed for rasterbloom avgbright sampling)
     mipgen_pipeline: wgpu::RenderPipeline,
     mipgen_bind_group_layout: wgpu::BindGroupLayout,
     mipgen_vertex_buffer: wgpu::Buffer,
     mip_level_count: u32,
-    // Shader params (shared between CRT and bloom passes)
+    // Shader params
     shader_params_buffer: wgpu::Buffer,
 }
 
@@ -159,18 +166,18 @@ impl CrtRenderer {
             cache: None,
         });
 
-        // --- Bloom pass resources ---
-        let bloom_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/bloom.wgsl"));
+        // --- Separable Gaussian blur pipeline (shared by X and Y passes) ---
+        let gauss_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/gauss.wgsl"));
 
-        let bloom_vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
-        let bloom_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("bloom_vertex_buffer"),
-            contents: bytemuck::cast_slice(&bloom_vertex_data),
+        let gauss_vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
+        let gauss_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gauss_vertex_buffer"),
+            contents: bytemuck::cast_slice(&gauss_vertex_data),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let bloom_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bloom_bind_group_layout"),
+        let gauss_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("gauss_bind_group_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -201,17 +208,17 @@ impl CrtRenderer {
             ],
         });
 
-        let bloom_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("bloom_pipeline_layout"),
-            bind_group_layouts: &[&bloom_bind_group_layout],
+        let gauss_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("gauss_pipeline_layout"),
+            bind_group_layouts: &[&gauss_bind_group_layout],
             push_constant_ranges: &[],
         });
 
-        let bloom_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("bloom_pipeline"),
-            layout: Some(&bloom_pipeline_layout),
+        let gauss_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("gauss_pipeline"),
+            layout: Some(&gauss_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &bloom_shader,
+                module: &gauss_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: 8,
@@ -228,7 +235,7 @@ impl CrtRenderer {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
-                module: &bloom_shader,
+                module: &gauss_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
@@ -241,13 +248,32 @@ impl CrtRenderer {
             cache: None,
         });
 
-        // Bloom texture at 1/4 resolution (no mipmaps)
-        let (bloom_texture, bloom_view, _) = Self::create_intermediate(
-            device,
-            (surface_width / 4).max(1),
-            (surface_height / 4).max(1),
-            surface_format,
-            1,
+        // Gauss textures at 1/4 surface resolution for proper blur spread
+        let gauss_w = (surface_width / 4).max(1);
+        let gauss_h = (surface_height / 4).max(1);
+
+        // Gauss uniform buffers (direction + blur_width + source_size)
+        let default_blur_width = shader_ui::ShaderParams::default().blur_width;
+        let gaussx_uniforms: [f32; 4] = [1.0, 0.0, default_blur_width, gauss_w as f32];
+        let gaussx_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gaussx_uniform_buffer"),
+            contents: bytemuck::cast_slice(&gaussx_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let gaussy_uniforms: [f32; 4] = [0.0, 1.0, default_blur_width, gauss_h as f32];
+        let gaussy_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gaussy_uniform_buffer"),
+            contents: bytemuck::cast_slice(&gaussy_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Gaussx intermediate texture (1/4 resolution, no mipmaps)
+        let (gaussx_texture, gaussx_view, _) = Self::create_intermediate(
+            device, gauss_w, gauss_h, surface_format, 1,
+        );
+        // Final blur texture (gaussy output, 1/4 resolution, no mipmaps)
+        let (blur_texture, blur_view, _) = Self::create_intermediate(
+            device, gauss_w, gauss_h, surface_format, 1,
         );
 
         // --- CRT composite pass ---
@@ -348,7 +374,7 @@ impl CrtRenderer {
         let (intermediate_texture, intermediate_view, intermediate_render_view) =
             Self::create_intermediate(device, surface_width, surface_height, surface_format, mip_level_count);
 
-        // Shader params buffer (shared between CRT and bloom passes)
+        // Shader params buffer
         let default_params = shader_ui::ShaderParams::default().to_gpu();
         let shader_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("shader_params_buffer"),
@@ -356,8 +382,12 @@ impl CrtRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let bloom_bind_group = Self::create_bloom_bind_group(
-            device, &bloom_bind_group_layout, &intermediate_view, &sampler, &shader_params_buffer,
+        // Gauss bind groups: gaussx reads intermediate, gaussy reads gaussx
+        let gaussx_bind_group = Self::create_gauss_bind_group(
+            device, &gauss_bind_group_layout, &intermediate_view, &sampler, &gaussx_uniform_buffer,
+        );
+        let gaussy_bind_group = Self::create_gauss_bind_group(
+            device, &gauss_bind_group_layout, &gaussx_view, &sampler, &gaussy_uniform_buffer,
         );
 
         let bind_group = Self::create_bind_group(
@@ -366,7 +396,7 @@ impl CrtRenderer {
             &intermediate_view,
             &sampler,
             &uniform_buffer,
-            &bloom_view,
+            &blur_view,
             &shader_params_buffer,
         );
 
@@ -382,12 +412,17 @@ impl CrtRenderer {
             bind_group,
             tex_width: surface_width,
             tex_height: surface_height,
-            bloom_pipeline,
-            bloom_bind_group_layout,
-            bloom_texture,
-            bloom_view,
-            bloom_bind_group,
-            bloom_vertex_buffer,
+            gauss_pipeline,
+            gauss_bind_group_layout,
+            gauss_vertex_buffer,
+            gaussx_uniform_buffer,
+            gaussy_uniform_buffer,
+            gaussx_texture,
+            gaussx_view,
+            gaussx_bind_group,
+            gaussy_bind_group,
+            blur_texture,
+            blur_view,
             mipgen_pipeline,
             mipgen_bind_group_layout,
             mipgen_vertex_buffer,
@@ -469,20 +504,20 @@ impl CrtRenderer {
         })
     }
 
-    fn create_bloom_bind_group(
+    fn create_gauss_bind_group(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
-        intermediate_view: &wgpu::TextureView,
+        input_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
-        shader_params_buffer: &wgpu::Buffer,
+        uniform_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bloom_bind_group"),
+            label: Some("gauss_bind_group"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(intermediate_view),
+                    resource: wgpu::BindingResource::TextureView(input_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -490,7 +525,7 @@ impl CrtRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: shader_params_buffer.as_entire_binding(),
+                    resource: uniform_buffer.as_entire_binding(),
                 },
             ],
         })
@@ -499,7 +534,7 @@ impl CrtRenderer {
     /// Call when the surface is resized to recreate the intermediate texture.
     /// Uniforms (content_rect) are now updated per-frame via update_content_rect.
     pub fn resize(
-        &mut self, device: &wgpu::Device, _queue: &wgpu::Queue,
+        &mut self, device: &wgpu::Device, queue: &wgpu::Queue,
         width: u32, height: u32,
     ) {
         if width == self.tex_width && height == self.tex_height {
@@ -516,30 +551,44 @@ impl CrtRenderer {
         self.intermediate_view = view;
         self.intermediate_render_view = render_view;
 
-        // Recreate bloom texture at 1/4 resolution (no mipmaps needed)
-        let (bloom_tex, bloom_v, _) = Self::create_intermediate(
-            device,
-            (width / 4).max(1),
-            (height / 4).max(1),
-            format,
-            1,
+        // Recreate gaussx intermediate texture (1/4 resolution, no mipmaps)
+        let gauss_w = (width / 4).max(1);
+        let gauss_h = (height / 4).max(1);
+        let (gaussx_tex, gaussx_v, _) = Self::create_intermediate(
+            device, gauss_w, gauss_h, format, 1,
         );
-        self.bloom_texture = bloom_tex;
-        self.bloom_view = bloom_v;
+        self.gaussx_texture = gaussx_tex;
+        self.gaussx_view = gaussx_v;
 
-        // Recreate bloom bind group (reads from intermediate)
-        self.bloom_bind_group = Self::create_bloom_bind_group(
-            device, &self.bloom_bind_group_layout, &self.intermediate_view, &self.sampler, &self.shader_params_buffer,
+        // Recreate blur texture (gaussy output, 1/4 resolution, no mipmaps)
+        let (blur_tex, blur_v, _) = Self::create_intermediate(
+            device, gauss_w, gauss_h, format, 1,
+        );
+        self.blur_texture = blur_tex;
+        self.blur_view = blur_v;
+
+        // Recreate gauss bind groups
+        self.gaussx_bind_group = Self::create_gauss_bind_group(
+            device, &self.gauss_bind_group_layout, &self.intermediate_view, &self.sampler, &self.gaussx_uniform_buffer,
+        );
+        self.gaussy_bind_group = Self::create_gauss_bind_group(
+            device, &self.gauss_bind_group_layout, &self.gaussx_view, &self.sampler, &self.gaussy_uniform_buffer,
         );
 
-        // Recreate CRT bind group (reads from intermediate + bloom)
+        // Update source_size in gauss uniforms to match reduced texture dimensions
+        let gw_f32 = gauss_w as f32;
+        let gh_f32 = gauss_h as f32;
+        queue.write_buffer(&self.gaussx_uniform_buffer, 12, bytemuck::bytes_of(&gw_f32));
+        queue.write_buffer(&self.gaussy_uniform_buffer, 12, bytemuck::bytes_of(&gh_f32));
+
+        // Recreate CRT bind group (reads from intermediate + blur)
         self.bind_group = Self::create_bind_group(
             device,
             &self.bind_group_layout,
             &self.intermediate_view,
             &self.sampler,
             &self.uniform_buffer,
-            &self.bloom_view,
+            &self.blur_view,
             &self.shader_params_buffer,
         );
     }
@@ -554,6 +603,9 @@ impl CrtRenderer {
     pub fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams) {
         let gpu = params.to_gpu();
         queue.write_buffer(&self.shader_params_buffer, 0, bytemuck::bytes_of(&gpu));
+        // Update blur_width in gauss uniform buffers (offset 8 = third float)
+        queue.write_buffer(&self.gaussx_uniform_buffer, 8, bytemuck::bytes_of(&params.blur_width));
+        queue.write_buffer(&self.gaussy_uniform_buffer, 8, bytemuck::bytes_of(&params.blur_width));
     }
 
     /// Update the content rect and source dimensions based on actual blit geometry.
@@ -700,12 +752,12 @@ impl CrtRenderer {
             }
         }
 
-        // Pass 1: Bloom/halation blur (intermediate → bloom_texture)
+        // Pass 1: Gaussian horizontal blur (intermediate → gaussx_texture)
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("bloom_render_pass"),
+                label: Some("gaussx_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.bloom_view,
+                    view: &self.gaussx_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -717,13 +769,36 @@ impl CrtRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            rpass.set_pipeline(&self.bloom_pipeline);
-            rpass.set_bind_group(0, &self.bloom_bind_group, &[]);
-            rpass.set_vertex_buffer(0, self.bloom_vertex_buffer.slice(..));
+            rpass.set_pipeline(&self.gauss_pipeline);
+            rpass.set_bind_group(0, &self.gaussx_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
             rpass.draw(0..3, 0..1);
         }
 
-        // Pass 2: CRT-Geom-Deluxe composite (intermediate + blur → screen)
+        // Pass 2: Gaussian vertical blur (gaussx_texture → blur_texture)
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("gaussy_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.blur_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.gauss_pipeline);
+            rpass.set_bind_group(0, &self.gaussy_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+            rpass.draw(0..3, 0..1);
+        }
+
+        // Pass 3: CRT-Geom-Deluxe composite (intermediate + blur → screen)
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("crt_render_pass"),
