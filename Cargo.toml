@@ -30,5 +30,5 @@ regex = "1.11.1"
 rfd = "0.15"
 ringbuf = "0.4.8"
 shader_ui = { path = "shader_ui" }
-wgpu = "27"
-winit = "0.30.8"
+wgpu = "27.0.1"
+winit = "0.30.13"

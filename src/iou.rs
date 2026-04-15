@@ -42,7 +42,7 @@ pub struct IOU {
   // extra_flags: Cell<u8>,
 
   pub last_key: Cell<u8>,
-  pub key_ready: Cell<bool>, 
+  pub key_ready: Cell<bool>,
   pub scc: Scc,      // Zilog 8530 SCC — Ch A: Modem, Ch B: Printer
   pub iwm: Iwm,
   pub mouse: Mouse,

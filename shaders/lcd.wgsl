@@ -3,8 +3,8 @@
 // with Apple IIc-specific adaptations for the passive-matrix STN display.
 //
 // The Apple IIc flat panel display was a 9" diagonal passive-matrix LCD
-// with green-tinted background and dark pixels. It featured visible pixel
-// grid structure and relatively slow response time typical of 1980s LCDs.
+// with classic green monochrome colors. It featured visible pixel grid
+// structure and the characteristic "25 lines squashed into 16 lines" aspect.
 //
 // Bindings mirror CRT shader for compatibility:
 //   0: intermediate texture  1: sampler  2: uniforms  3: blur_texture (unused)  4: ShaderParams (unused)
@@ -85,27 +85,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     
     // Apple IIc LCD parameters (hardcoded for authentic look)
-    let grid_intensity: f32 = 16.0;     // Grid visibility (higher = less visible)
+    let grid_intensity: f32 = 12.0;     // Grid visibility (higher = less visible)
     let brightness: f32 = 1.0;          // Overall brightness
-    let contrast: f32 = 1.1;            // Slight contrast boost
-    let pixel_softness: f32 = 0.3;      // Slightly soft pixel edges
+    let contrast: f32 = 1.2;            // Contrast boost for crisp text
+    let pixel_softness: f32 = 0.2;      // Sharp pixel edges
     
-    // Apple IIc flat panel colors
-    // Background: greenish-gray (typical of passive STN LCD)
-    let bg_color = vec3<f32>(0.71, 0.75, 0.65);
-    // Foreground (dark pixels): very dark green/gray
-    let fg_color = vec3<f32>(0.12, 0.14, 0.10);
+    // Classic green monochrome LCD colors (like Game Boy / Apple IIc flat panel)
+    // Background (light/off): bright lime green
+    let bg_color = vec3<f32>(0.61, 0.74, 0.06);  // #9CBC0F-ish
+    // Foreground (dark/on pixels): very dark green  
+    let fg_color = vec3<f32>(0.06, 0.22, 0.06);  // #0F380F-ish
     
     // Convert screen UV to emulator coordinates [0,1]
-    // Note: Window size already applies aspect correction, so no vertical adjustment needed here
     let content_size = vec2<f32>(cr_right - cr_left, cr_bot - cr_top);
     let emu_coord = (uv - vec2<f32>(cr_left, cr_top)) / content_size;
     
     // Calculate pixel coordinates in source resolution
     let pixel_coord = emu_coord * vec2<f32>(src_w, src_h);
     
-    // Sample the source texture
-    let source_color = textureSampleLevel(r_texture, r_sampler, uv, 0.0);
+    // Snap to nearest source pixel center for sharp sampling
+    let snapped_pixel = floor(pixel_coord) + 0.5;
+    let snapped_emu = snapped_pixel / vec2<f32>(src_w, src_h);
+    let snapped_uv = vec2<f32>(cr_left, cr_top) + snapped_emu * content_size;
+    
+    // Sample the source texture at snapped coordinates (nearest-neighbor effect)
+    let source_color = textureSampleLevel(r_texture, r_sampler, snapped_uv, 0.0);
     
     // Convert to grayscale luminance (Apple IIc LCD was monochrome)
     let lum = dot(source_color.rgb, vec3<f32>(0.299, 0.587, 0.114));
@@ -116,19 +120,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Apply brightness
     let adjusted_lum = clamp(contrasted_lum * brightness, 0.0, 1.0);
     
-    // Invert for LCD effect: bright source = dark LCD pixel
-    // (LCD pixels block backlight/reflection)
+    // LCD effect: bright source = dark LCD pixel (LCD blocks light)
     let lcd_darkness = adjusted_lum;
     
-    // Mix between background (light) and foreground (dark) based on pixel value
+    // Mix between background (light green) and foreground (dark green) based on pixel value
     var lcd_color = mix(bg_color, fg_color, lcd_darkness);
     
     // Apply LCD pixel grid effect
     let grid_factor = lcd_grid_factor(pixel_coord, grid_intensity, pixel_softness);
     
     // The grid darkens the spaces between pixels
-    // We reduce the background contribution in grid gaps
-    lcd_color = mix(fg_color * 0.8, lcd_color, grid_factor);
+    lcd_color = mix(fg_color * 0.7, lcd_color, grid_factor);
     
     return vec4<f32>(lcd_color, 1.0);
 }
