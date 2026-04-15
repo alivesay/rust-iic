@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use crate::{device::{iwm::Iwm, mouse::Mouse, speaker::Speaker}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
+use crate::{device::{iwm::Iwm, mouse::Mouse, scc::Scc, speaker::Speaker}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
 
 macro_rules! set_lcram_mode {
   ($mem_state:expr, $mode:expr) => {{
@@ -43,11 +43,13 @@ pub struct IOU {
 
   pub last_key: Cell<u8>,
   pub key_ready: Cell<bool>, 
+  pub scc: Scc,      // Zilog 8530 SCC — Ch A: Modem, Ch B: Printer
   pub iwm: Iwm,
   pub mouse: Mouse,
   pub speaker: Speaker,
   pub cycles: u64,
   pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
+  pub floating_bus: u8,  // Last byte video hardware would read from RAM at current scan position
   pub col80_switch: bool, // Physical 80/40 column slide switch (true = 80 col)
   pub debug: bool,
   pub self_test: bool,
@@ -66,11 +68,13 @@ impl IOU {
 
           last_key: Cell::new(0),
           key_ready: Cell::new(false),
+          scc: Scc::new(),
           iwm: Iwm::new(),
           mouse: Mouse::new(),
           speaker: Speaker::new(),
           cycles: 0,
           scan_cycle: 0,
+          floating_bus: 0,
           col80_switch: true, // Default: 80-column switch ON (typical IIc position)
           debug: false,
           self_test,
@@ -94,6 +98,7 @@ impl IOU {
         // expecting RDC3ROM). Also prevents spurious IRQs during boot.
         self.mouse.reset();
 
+        self.scc.reset();
         self.iwm.reset();
     }
 
@@ -160,6 +165,10 @@ impl IOU {
             0xC028 => { toggle_bits_cell!(self.mem_state, MemStateMask::ALTROM); 0x00 }, // ROMBANK
 
             0xC030 => { self.speaker.toggle(self.cycles); 0x00 }, // C030 48200 SPKR         OECG  R   Toggle Speaker
+
+            // Zilog 8530 SCC — $C038: ChB Cmd, $C039: ChA Cmd, $C03A: ChB Data, $C03B: ChA Data
+            0xC038..=0xC03B => self.scc.read(addr),
+
             0xC040 => (self.mouse.xy_mask.get() as u8) << 7, // RDXYMSK        C   R7  Read X0/Y0 Interrupt
             0xC041 => (self.mouse.vbl_mask.get() as u8) << 7, // C041 49217 RDVBLMSK       C   R7  Read VBL Interrupt
             0xC042 => (self.mouse.x0_edge.get() as u8) << 7, // C042 49218 RDX0EDGE       C   R7  Read X0 Edge Selector
@@ -275,9 +284,15 @@ impl IOU {
 
             0xC0E0..=0xC0EF => self.iwm.access(addr, 0, false),
 
-            // Slot I/O (Unused/Stubbed slots return 0x00)
-            // Slot 1 (Serial), Slot 2 (Serial), Slot 3 (80Col), Slot 4 (Mouse), Slot 5 (Unused), Slot 7 (Mouse/Ext)
-            0xC090..=0xC0DF | 0xC0F0..=0xC0FF => 0x00,
+            // Slot 1 — SCC Channel A / Modem ($C098–$C09F)
+            // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
+            0xC098..=0xC09F | 0xC0A8..=0xC0AF => self.scc.slot_read(addr),
+
+            // Slot 4 — no hardware; floating bus ($C0C0–$C0CF)
+            0xC0C0..=0xC0CF => self.floating_bus,
+
+            // Other slot I/O (stubbed — floating bus)
+            0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0D0..=0xC0DF | 0xC0F0..=0xC0FF => self.floating_bus,
             _ => {
               if self.debug { println!("IOU: Unhandled read at address {:04X}", addr); }
               0x00
@@ -322,6 +337,9 @@ impl IOU {
             0xC011..=0xC01F => 0x00,
 
           0xC030 => { self.speaker.toggle(self.cycles); 0x00 }, // Speaker toggles on any access
+
+          // Zilog 8530 SCC
+          0xC038..=0xC03B => { self.scc.write(addr, val); 0x00 },
 
           0xC048 => { self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00 }, // RSTXY
 
@@ -454,9 +472,15 @@ impl IOU {
 
           0xC0E0..=0xC0EF => self.iwm.access(addr, val, true),
 
-          // Slot I/O (Unused/Stubbed slots ignore writes)
-          // Slot 1 (Serial), Slot 2 (Serial), Slot 3 (80Col), Slot 4 (Mouse), Slot 5 (Unused), Slot 7 (Mouse/Ext)
-          0xC090..=0xC0DF | 0xC0F0..=0xC0FF => 0x00,
+          // Slot 1 — SCC Channel A / Modem ($C098–$C09F)
+          // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
+          0xC098..=0xC09F | 0xC0A8..=0xC0AF => { self.scc.slot_write(addr, val); 0x00 },
+
+          // Slot 4 — no hardware ($C0C0–$C0CF)
+          0xC0C0..=0xC0CF => 0x00,
+
+          // Other slot I/O (stubbed)
+          0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0D0..=0xC0DF | 0xC0F0..=0xC0FF => 0x00,
 
             // // **Annunciator 3 Controls DHiRes Mode**
             // 0xC05E => {
@@ -490,6 +514,9 @@ impl IOU {
                         (self.mouse.y_int.get() && !self.mouse.xy_mask.get()) ||
                         (self.mouse.vbl_int.get() && !self.mouse.vbl_mask.get());
         
-        mouse_irq
+        // Check SCC interrupts
+        let scc_irq = self.scc.irq_pending();
+
+        mouse_irq || scc_irq
     }
 }
