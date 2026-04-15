@@ -42,6 +42,9 @@ use winit::{
     window::{Window, WindowId},
 };
 
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowExtMacOS;
+
 const O_O: &str = r#"*
      ██▀███   █    ██   ██████ ▄▄▄█████▓ ██▓ ██▓ ▄████▄  
 *    ▓██ ▒ ██▒ ██  ▓██▒▒██    ▒ ▓  ██▒ ▓▒▓██▒▓██▒▒██▀ ▀█  
@@ -462,10 +465,11 @@ impl winit::application::ApplicationHandler for App {
         self.surface_height = window_size.height;
         self.buffer_width = window_size.width;
         self.buffer_height = window_size.height;
+        
         let surface_texture =
             SurfaceTexture::new(window_size.width, window_size.height, window.clone());
 
-        // Create pixels buffer at initial window size; GPU handles scaling on resize
+        // Create pixels buffer at window size
         self.pixels = match Pixels::new(window_size.width, window_size.height, surface_texture) {
             Ok(mut pixels) => {
                 // Use Fill scaling so fractional scaling works at any resolution
@@ -570,14 +574,38 @@ impl winit::application::ApplicationHandler for App {
 
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
-                    self.surface_width = size.width;
-                    self.surface_height = size.height;
-                    if let Some(pixels) = self.pixels.as_mut() {
-                        if let Err(err) = pixels.resize_surface(size.width, size.height) {
-                            error!("pixels.resize_surface failed: {}", err);
-                            event_loop.exit();
+                    // Only update if actually changed
+                    if size.width != self.surface_width || size.height != self.surface_height {
+                        self.surface_width = size.width;
+                        self.surface_height = size.height;
+                        
+                        if let Some(pixels) = self.pixels.as_mut() {
+                            // Resize everything synchronously to avoid surface/buffer mismatch
+                            // that causes wgpu scissor rect validation failures
+                            let _ = pixels.resize_surface(size.width, size.height);
+                            
+                            self.buffer_width = size.width;
+                            self.buffer_height = size.height;
+                            let _ = pixels.resize_buffer(size.width, size.height);
+                            
+                            if let Some(pp) = self.post_processor.as_mut() {
+                                pp.resize(pixels.device(), pixels.queue(), size.width, size.height);
+                            }
+                        }
+                        
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
                         }
                     }
+                }
+            }
+
+            WindowEvent::ScaleFactorChanged { .. } => {
+                // Scale factor changes during fullscreen transitions on macOS.
+                // The inner_size is delivered via the Resized event that follows,
+                // so we just request a redraw here to trigger buffer reconfiguration.
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
 
@@ -605,18 +633,12 @@ impl winit::application::ApplicationHandler for App {
                 }
 
                 if let Some(pixels) = self.pixels.as_mut() {
-                    // Lazily resize buffer to match surface (deferred from Resized
-                    // to avoid blocking the event loop during fullscreen transitions)
-                    if self.surface_width != self.buffer_width || self.surface_height != self.buffer_height {
-                        self.buffer_width = self.surface_width;
-                        self.buffer_height = self.surface_height;
-                        let _ = pixels.resize_buffer(self.surface_width, self.surface_height);
-                        if let Some(pp) = self.post_processor.as_mut() {
-                            pp.resize(
-                                pixels.device(), pixels.queue(),
-                                self.surface_width, self.surface_height,
-                            );
+                    // Skip rendering if surface dimensions are invalid
+                    if self.surface_width == 0 || self.surface_height == 0 {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
                         }
+                        return;
                     }
 
                     let render_start = Instant::now();
@@ -820,8 +842,12 @@ impl winit::application::ApplicationHandler for App {
                         pixels.render()
                     };
                     if let Err(err) = render_result {
-                        error!("pixels.render() failed: {}", err);
-                        event_loop.exit();
+                        // During fullscreen transitions, render failures are expected.
+                        // The surface may be temporarily invalid. Request redraw to retry.
+                        eprintln!("pixels.render() warning: {} (will retry)", err);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
                     }
                 }
             }
@@ -945,6 +971,18 @@ impl winit::application::ApplicationHandler for App {
                     return;
                 }
 
+                // Map Shift to Open Apple (button0) and Alt/Option to Closed Apple (button1)
+                // These work even when egui has focus to avoid dropped inputs in games
+                match event.logical_key {
+                    Key::Named(NamedKey::Shift) => {
+                        self.cpu.bus.iou.mouse.set_button(0, event.state.is_pressed());
+                    }
+                    Key::Named(NamedKey::Alt) => {
+                        self.cpu.bus.iou.mouse.set_button(1, event.state.is_pressed());
+                    }
+                    _ => {}
+                }
+
                 if egui_consumed { return; }
 
                 if event.state.is_pressed() {
@@ -987,7 +1025,6 @@ impl winit::application::ApplicationHandler for App {
                     if let Some(code) = key_code {
                         self.cpu.bus.iou.last_key.set(code);
                         self.cpu.bus.iou.key_ready.set(true);
-                        println!("Key Pressed: 0x{:X}", code);
                     }
                 }
 
@@ -1017,6 +1054,21 @@ impl winit::application::ApplicationHandler for App {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
+                }
+
+                // Cmd+Enter: Toggle simple fullscreen (pre-Lion style, no Spaces animation)
+                #[cfg(target_os = "macos")]
+                if event.logical_key == Key::Named(NamedKey::Enter) && event.state.is_pressed() && self.modifiers.super_key() {
+                    if let Some(window) = &self.window {
+                        let current = window.simple_fullscreen();
+                        let success = window.set_simple_fullscreen(!current);
+                        if success {
+                            println!("Fullscreen: {}", if !current { "ON" } else { "OFF" });
+                        } else {
+                            eprintln!("Failed to toggle fullscreen");
+                        }
+                    }
+                    return; // Don't send Enter to emulator
                 }
             }
 
