@@ -69,7 +69,7 @@ pub struct MMU {
 
 impl MMU {
     pub fn new() -> Self {
-        let mut mmu = Self {
+        let mmu = Self {
             rom: [
                 Memory::new(ROM_SIZE, "ROM1".into()),
                 Memory::new(ROM_SIZE, "ROM2".into()),

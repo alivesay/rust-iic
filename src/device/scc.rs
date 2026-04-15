@@ -61,6 +61,13 @@ pub struct SccChannel {
     stream: Option<TcpStream>,
     connected: bool,
 
+    // Loopback mode (for diagnostic testing)
+    pub loopback: bool,
+
+    // ACIA emulation registers (for slot I/O compatibility)
+    acia_command: u8,  // ACIA command register (offset 2)
+    acia_control: u8,  // ACIA control register (offset 3)
+
     // Throttle polling
     poll_countdown: u64,
     poll_interval: u64,
@@ -92,6 +99,9 @@ impl SccChannel {
             ext_ip: false,
             stream: None,
             connected: false,
+            loopback: false,
+            acia_command: 0,
+            acia_control: 0,
             poll_countdown: 0,
             poll_interval: 1023,
             modem_enabled: false,
@@ -113,10 +123,48 @@ impl SccChannel {
         self.rx_ip = false;
         self.tx_ip = false;
         self.ext_ip = false;
+        self.acia_command = 0;
+        self.acia_control = 0;
         // Preserve TCP connection and modem state across reset
     }
 
     // ─── Register Access ───────────────────────────────────────────
+
+    /// Return ACIA-compatible status register (6551 format)
+    /// Apple IIc firmware presents ACIA interface at slot I/O addresses
+    /// even though actual hardware is SCC
+    fn acia_status(&self) -> u8 {
+        let mut status = 0u8;
+        
+        // Bit 3: RDRF (Receive Data Register Full) - 1 = data available
+        if !self.rx_buffer.is_empty() {
+            status |= 0x08;
+        }
+        
+        // Bit 4: TDRE (Transmit Data Register Empty) - 1 = ready to transmit
+        if self.tx_empty {
+            status |= 0x10;
+        }
+        
+        // Bit 5: DCD (Data Carrier Detect) - ACTIVE LOW (0 = carrier present)
+        // In loopback mode, report carrier present
+        if !self.dcd && !self.loopback {
+            status |= 0x20;  // No carrier = bit set
+        }
+        
+        // Bit 6: DSR (Data Set Ready) - ACTIVE LOW (0 = ready)
+        // Report ready when connected, modem enabled, or loopback mode
+        if !self.connected && !self.modem_enabled && !self.loopback {
+            status |= 0x40;  // Not ready
+        }
+        
+        // Bit 7: IRQ - set if interrupt pending
+        if self.irq_pending() {
+            status |= 0x80;
+        }
+        
+        status
+    }
 
     /// Read the command/status port
     fn read_command(&mut self) -> u8 {
@@ -130,13 +178,11 @@ impl SccChannel {
                 if !self.rx_buffer.is_empty() { rr0 |= 0x01; } // Rx Char Available
                                                                   // bit 1: Zero Count (unused)
                 if self.tx_empty                { rr0 |= 0x04; } // Tx Buffer Empty
-                if self.dcd                     { rr0 |= 0x08; } // DCD
+                if self.dcd || self.loopback    { rr0 |= 0x08; } // DCD (or loopback fakes it)
                                                                   // bit 4: Sync/Hunt (unused)
-                if self.cts                     { rr0 |= 0x20; } // CTS
+                if self.cts || self.loopback    { rr0 |= 0x20; } // CTS (or loopback fakes it)
                                                                   // bit 6: Tx Underrun (unused)
-                if self.rx_buffer.is_empty()    { rr0 |= 0x80; } // Break/Abort (repurposed: no data)
-                // Actually bit 7 is Break/Abort, leave 0 normally
-                rr0 &= 0x7F; // Clear bit 7
+                // bit 7: Break/Abort - leave 0
                 rr0
             }
 
@@ -288,7 +334,7 @@ impl SccChannel {
             7 => { self.wr[7] = value; }
 
             // WR8: Transmit Data (same as data port)
-            8 => { self.write_data(value); }
+            8 => { let _ = self.write_data(value); }
 
             // WR9: Master Interrupt Control (handled at SCC level)
             9 => {
@@ -364,17 +410,27 @@ impl SccChannel {
     }
 
     /// Write the data port (transmit)
-    fn write_data(&mut self, value: u8) {
+    /// Returns the byte if it should be forwarded for cross-channel loopback
+    fn write_data(&mut self, value: u8) -> Option<u8> {
         if self.debug {
             println!("SCC[{}]: write data {:#04X} '{}'", self.id, value,
                 if value.is_ascii_graphic() || value == b' ' { value as char } else { '.' });
         }
 
-        if self.modem_enabled {
+        let forward_for_crossloop = if self.loopback {
+            // Internal loopback: echo to own receive buffer (simulates loopback plug)
+            self.receive_byte(value);
+            false
+        } else if self.modem_enabled {
             self.modem_transmit(value);
+            false
         } else if let Some(stream) = self.stream.as_mut() {
             let _ = stream.write_all(&[value]);
-        }
+            false
+        } else {
+            // No active destination - data available for cross-loopback
+            true
+        };
 
         // Tx buffer is always immediately empty (instant transmit)
         self.tx_empty = true;
@@ -382,16 +438,16 @@ impl SccChannel {
         if self.wr[1] & 0x02 != 0 {
             self.tx_ip = true;
         }
+        
+        if forward_for_crossloop { Some(value) } else { None }
     }
 
     // ─── TCP ───────────────────────────────────────────────────────
 
     pub fn tcp_connect(&mut self, addr: &str) -> Result<(), std::io::Error> {
-        println!("SCC[{}]: connecting to {}...", self.id, addr);
         let stream = TcpStream::connect(addr)?;
         stream.set_nonblocking(true)?;
         stream.set_nodelay(true)?;
-        println!("SCC[{}]: connected to {}", self.id, addr);
         self.stream = Some(stream);
         self.connected = true;
         self.dcd = true;
@@ -471,7 +527,7 @@ impl SccChannel {
     }
 
     /// Push a byte into the receive buffer
-    fn receive_byte(&mut self, byte: u8) {
+    pub fn receive_byte(&mut self, byte: u8) {
         if self.rx_buffer.len() >= 3 {
             // Real SCC has 3-byte FIFO
             self.rx_overrun = true;
@@ -555,6 +611,14 @@ impl SccChannel {
         let mut chars = args.chars().peekable();
         while let Some(c) = chars.next() {
             match c {
+                'I' => {
+                    // ATI - modem identification
+                    if let Some(&next) = chars.peek() {
+                        if next.is_ascii_digit() { chars.next(); }
+                    }
+                    self.send_response("rust-iic Virtual Hayes Modem v1.0");
+                    return;
+                }
                 'D' => {
                     if let Some(&next) = chars.peek() {
                         if next == 'T' || next == 'P' { chars.next(); }
@@ -628,6 +692,7 @@ impl SccChannel {
     }
 
     fn modem_dial(&mut self, addr: &str) {
+        let addr = addr.trim();
         if addr.is_empty() {
             self.send_response("ERROR");
             return;
@@ -635,21 +700,19 @@ impl SccChannel {
         if self.connected { self.tcp_disconnect(); }
 
         let addr = if addr.contains(':') {
-            addr.to_string()
+            addr.to_lowercase()
         } else {
-            format!("{}:23", addr)
+            format!("{}:23", addr.to_lowercase())
         };
 
-        println!("SCC[{}]: modem dialing {}", self.id, addr);
         match self.tcp_connect(&addr) {
             Ok(()) => {
                 self.modem_state = ModemState::Online;
                 self.plus_count = 0;
                 self.send_response("CONNECT 2400");
             }
-            Err(e) => {
+            Err(_) => {
                 self.modem_state = ModemState::Command;
-                println!("SCC[{}]: dial failed: {}", self.id, e);
                 self.send_response("NO CARRIER");
             }
         }
@@ -683,6 +746,7 @@ impl SccChannel {
 pub struct Scc {
     pub ch_a: SccChannel,  // Channel A = Modem port
     pub ch_b: SccChannel,  // Channel B = Printer port
+    pub crossloop: bool,   // Cross-channel loopback (slot1 TX -> slot2 RX, vice versa)
 }
 
 impl Scc {
@@ -690,6 +754,7 @@ impl Scc {
         Self {
             ch_a: SccChannel::new("ChA/Modem"),
             ch_b: SccChannel::new("ChB/Printer"),
+            crossloop: false,
         }
     }
 
@@ -756,24 +821,51 @@ impl Scc {
                     self.ch_a.write_command(value);
                 }
             }
-            0x02 => self.ch_b.write_data(value),    // $C03A
-            0x03 => self.ch_a.write_data(value),    // $C03B
+            0x02 => {  // $C03A - Channel B Data
+                if let Some(byte) = self.ch_b.write_data(value) {
+                    if self.crossloop { self.ch_a.receive_byte(byte); }
+                }
+            }
+            0x03 => {  // $C03B - Channel A Data
+                if let Some(byte) = self.ch_a.write_data(value) {
+                    if self.crossloop { self.ch_b.receive_byte(byte); }
+                }
+            }
             _ => unreachable!(),
         }
     }
 
     /// Access via slot I/O addresses
-    /// Slot 1 ($C098–$C09F) = Channel A, Slot 2 ($C0A8–$C0AF) = Channel B
+    /// Slot 1 ($C098–$C09F) = Channel B (printer port)
+    /// Slot 2 ($C0A8–$C0AF) = Channel A (modem port)
+    /// Apple IIc presents ACIA-compatible interface at these addresses:
+    ///   offset 0 ($C098/$C0A8) = Data register (read/write)
+    ///   offset 1 ($C099/$C0A9) = Status register (read-only)
+    ///   offset 2 ($C09A/$C0AA) = Command register (read/write)
+    ///   offset 3 ($C09B/$C0AB) = Control register (read/write)
     pub fn slot_read(&mut self, addr: u16) -> u8 {
-        // Even offsets = command, odd offsets = data
         match addr {
+            // Slot 1 = Channel B (printer port)
             0xC098..=0xC09F => {
-                if addr & 0x01 == 0 { self.ch_a.read_command() }
-                else { self.ch_a.read_data() }
+                let offset = addr & 0x07;
+                match offset {
+                    0 => self.ch_b.read_data(),         // Data register
+                    1 => self.ch_b.acia_status(),       // Status register
+                    2 => self.ch_b.acia_command,        // Command register
+                    3 => self.ch_b.acia_control,        // Control register
+                    _ => self.ch_b.acia_status(),       // Mirror status for other offsets
+                }
             }
+            // Slot 2 = Channel A (modem port)
             0xC0A8..=0xC0AF => {
-                if addr & 0x01 == 0 { self.ch_b.read_command() }
-                else { self.ch_b.read_data() }
+                let offset = addr & 0x07;
+                match offset {
+                    0 => self.ch_a.read_data(),         // Data register
+                    1 => self.ch_a.acia_status(),       // Status register
+                    2 => self.ch_a.acia_command,        // Command register
+                    3 => self.ch_a.acia_control,        // Control register
+                    _ => self.ch_a.acia_status(),       // Mirror status for other offsets
+                }
             }
             _ => 0x00,
         }
@@ -781,13 +873,35 @@ impl Scc {
 
     pub fn slot_write(&mut self, addr: u16, value: u8) {
         match addr {
+            // Slot 1 = Channel B (printer port)
             0xC098..=0xC09F => {
-                if addr & 0x01 == 0 { self.ch_a.write_command(value); }
-                else { self.ch_a.write_data(value); }
+                let offset = addr & 0x07;
+                match offset {
+                    0 => {  // Data register
+                        if let Some(byte) = self.ch_b.write_data(value) {
+                            if self.crossloop { self.ch_a.receive_byte(byte); }
+                        }
+                    }
+                    1 => { }  // Status register - writes ignored (or programmed reset)
+                    2 => { self.ch_b.acia_command = value; }  // Command register
+                    3 => { self.ch_b.acia_control = value; }  // Control register
+                    _ => { }
+                }
             }
+            // Slot 2 = Channel A (modem port)
             0xC0A8..=0xC0AF => {
-                if addr & 0x01 == 0 { self.ch_b.write_command(value); }
-                else { self.ch_b.write_data(value); }
+                let offset = addr & 0x07;
+                match offset {
+                    0 => {  // Data register
+                        if let Some(byte) = self.ch_a.write_data(value) {
+                            if self.crossloop { self.ch_b.receive_byte(byte); }
+                        }
+                    }
+                    1 => { }  // Status register - writes ignored (or programmed reset)
+                    2 => { self.ch_a.acia_command = value; }  // Command register
+                    3 => { self.ch_a.acia_control = value; }  // Control register
+                    _ => { }
+                }
             }
             _ => {}
         }

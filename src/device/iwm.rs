@@ -30,8 +30,12 @@ struct DriveState {
     write_protect: bool,
 
     // Pre-decoded latch state at each bit position for O(1) reads
+    // (Currently unused - prepared for future optimization)
+    #[allow(dead_code)]
     nibble_latch: Vec<u8>,
+    #[allow(dead_code)]
     nibble_epoch: Vec<u16>,
+    #[allow(dead_code)]
     next_epoch_bit: Vec<u32>,
     nibbles_valid: bool,
     consumed_epoch: u16,
@@ -839,6 +843,7 @@ impl Iwm {
     /// (bit 7 set) when the epoch at the current position exceeds the last consumed
     /// epoch. The next_epoch_bit table enables fast-disk mode by allowing O(1) skip
     /// to the next complete byte.
+    #[allow(dead_code)]
     fn ensure_nibbles(&mut self) {
         let d = self.di();
         if self.drives[d].nibbles_valid { return; }
