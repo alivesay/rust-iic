@@ -1,10 +1,13 @@
 use wgpu::util::DeviceExt;
 
+use crate::screen::PostProcessor;
+
 /// Post-processing CRT shader renderer with multi-pass bloom.
 ///
-/// Pass 1: scaling renderer → intermediate texture (full resolution)
-/// Pass 2: intermediate → bloom texture (1/4 resolution, blurred)
-/// Pass 3: CRT shader composites both → final surface
+/// CRT mode uses multi-pass bloom:
+///   Pass 1: scaling renderer → intermediate texture (full resolution)
+///   Pass 2: intermediate → bloom texture (1/4 resolution, blurred)
+///   Pass 3: CRT shader composites both → final surface
 pub struct CrtRenderer {
     // CRT composite pass
     pipeline: wgpu::RenderPipeline,
@@ -19,7 +22,7 @@ pub struct CrtRenderer {
     bind_group: wgpu::BindGroup,
     tex_width: u32,
     tex_height: u32,
-    // Separable Gaussian blur (replaces old single-pass bloom)
+    // Separable Gaussian blur
     gauss_pipeline: wgpu::RenderPipeline,
     gauss_bind_group_layout: wgpu::BindGroupLayout,
     gauss_vertex_buffer: wgpu::Buffer,
@@ -33,13 +36,16 @@ pub struct CrtRenderer {
     // Final blur texture (vertical blur output, fed to CRT shader)
     blur_texture: wgpu::Texture,
     blur_view: wgpu::TextureView,
-    // Mipmap generation (still needed for rasterbloom avgbright sampling)
+    // Mipmap generation (for rasterbloom avgbright sampling)
     mipgen_pipeline: wgpu::RenderPipeline,
     mipgen_bind_group_layout: wgpu::BindGroupLayout,
     mipgen_vertex_buffer: wgpu::Buffer,
     mip_level_count: u32,
     // Shader params
     shader_params_buffer: wgpu::Buffer,
+    // Surface format for resize (currently using texture.format() instead)
+    #[allow(dead_code)]
+    surface_format: wgpu::TextureFormat,
 }
 
 #[repr(C)]
@@ -428,6 +434,7 @@ impl CrtRenderer {
             mipgen_vertex_buffer,
             mip_level_count,
             shader_params_buffer,
+            surface_format,
         }
     }
 
@@ -739,64 +746,64 @@ impl CrtRenderer {
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    rpass.set_pipeline(&self.mipgen_pipeline);
+                    rpass.set_bind_group(0, &bind_group, &[]);
+                    rpass.set_vertex_buffer(0, self.mipgen_vertex_buffer.slice(..));
+                    rpass.draw(0..3, 0..1);
+                }
+            }
+
+            // Pass 1: Gaussian horizontal blur (intermediate → gaussx_texture)
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("gaussx_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.gaussx_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
                         },
                     })],
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                rpass.set_pipeline(&self.mipgen_pipeline);
-                rpass.set_bind_group(0, &bind_group, &[]);
-                rpass.set_vertex_buffer(0, self.mipgen_vertex_buffer.slice(..));
+                rpass.set_pipeline(&self.gauss_pipeline);
+                rpass.set_bind_group(0, &self.gaussx_bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
                 rpass.draw(0..3, 0..1);
             }
-        }
 
-        // Pass 1: Gaussian horizontal blur (intermediate → gaussx_texture)
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("gaussx_render_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.gaussx_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            rpass.set_pipeline(&self.gauss_pipeline);
-            rpass.set_bind_group(0, &self.gaussx_bind_group, &[]);
-            rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
-            rpass.draw(0..3, 0..1);
-        }
-
-        // Pass 2: Gaussian vertical blur (gaussx_texture → blur_texture)
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("gaussy_render_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.blur_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            rpass.set_pipeline(&self.gauss_pipeline);
-            rpass.set_bind_group(0, &self.gaussy_bind_group, &[]);
-            rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
-            rpass.draw(0..3, 0..1);
-        }
+            // Pass 2: Gaussian vertical blur (gaussx_texture → blur_texture)
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("gaussy_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.blur_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rpass.set_pipeline(&self.gauss_pipeline);
+                rpass.set_bind_group(0, &self.gaussy_bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+                rpass.draw(0..3, 0..1);
+            }
 
         // Pass 3: CRT-Geom-Deluxe composite (intermediate + blur → screen)
         {
@@ -820,5 +827,62 @@ impl CrtRenderer {
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             rpass.draw(0..3, 0..1);
         }
+    }
+}
+
+impl PostProcessor for CrtRenderer {
+    fn intermediate_view(&self) -> &wgpu::TextureView {
+        CrtRenderer::intermediate_view(self)
+    }
+
+    fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) {
+        CrtRenderer::resize(self, device, queue, width, height)
+    }
+
+    fn update_content_rect(
+        &self,
+        queue: &wgpu::Queue,
+        surface_w: u32,
+        surface_h: u32,
+        offset_x: u32,
+        offset_y: u32,
+        dst_w: u32,
+        dst_h: u32,
+        bar_h: u32,
+        source_width: f32,
+        source_height: f32,
+    ) {
+        CrtRenderer::update_content_rect(
+            self, queue, surface_w, surface_h,
+            offset_x, offset_y, dst_w, dst_h,
+            bar_h, source_width, source_height,
+        )
+    }
+
+    fn update_time(&self, queue: &wgpu::Queue, time: f32) {
+        CrtRenderer::update_time(self, queue, time)
+    }
+
+    fn update_monochrome(&self, queue: &wgpu::Queue, monochrome: bool) {
+        CrtRenderer::update_monochrome(self, queue, monochrome)
+    }
+
+    fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams) {
+        CrtRenderer::update_shader_params(self, queue, params)
+    }
+
+    fn render(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        render_target: &wgpu::TextureView,
+        device: &wgpu::Device,
+    ) {
+        CrtRenderer::render(self, encoder, render_target, device)
     }
 }

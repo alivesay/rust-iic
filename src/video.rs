@@ -60,7 +60,7 @@ pub struct Video {
     extra: Cell<u8>,
     frame_count: usize,
     pub monochrome: bool,
-    pub crt_enabled: bool,
+    pub shader_enabled: bool,  // True if using CRT/LCD shader (disables software scanlines)
     pub scanline_intensity: f32, // 0.0 = full black gap, 1.0 = no scanlines
     pub border_size: usize,     // Black border in pixels around active area
 }
@@ -82,7 +82,7 @@ impl Video {
             extra: Cell::new(0),
             frame_count: 0,
             monochrome: false,
-            crt_enabled: false,
+            shader_enabled: false,
             scanline_intensity: 0.15,
             border_size: border,
         }
@@ -180,8 +180,8 @@ impl Video {
         }
 
         // Apply scanline effect: black out every odd row (the 2nd row of each doubled pair)
-        // CRT-Geom shader handles scanlines itself via beam profile
-        if !self.crt_enabled && self.scanline_intensity < 1.0 {
+        // Shaders (CRT/LCD) handle scanlines themselves via beam profile or pixel grid
+        if !self.shader_enabled && self.scanline_intensity < 1.0 {
             self.apply_scanlines();
         }
 

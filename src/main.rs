@@ -12,6 +12,7 @@ mod mmu;
 mod monitor;
 mod gui;
 mod crt;
+mod screen;
 mod rom;
 mod util;
 mod video;
@@ -19,9 +20,10 @@ mod video;
 
 use crate::cpu::CPU;
 use crate::crt::CrtRenderer;
+use crate::screen::{PostProcessor, LcdRenderer};
 use crate::gui::{DriveStatusInfo, STATUS_BAR_HEIGHT, blit_scaled, render_status_bar, hit_test_reset_button, hit_test_power_button, hit_test_col_button, hit_test_drive_icon, hit_test_write_toggle};
 use crate::monitor::Monitor;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use cpu::{CpuType, SystemType};
 use log::error;
 use pixels::{Error, Pixels, ScalingMode, SurfaceTexture};
@@ -54,6 +56,18 @@ const O_O: &str = r#"*
 
 *
 "#;
+
+/// Display shader type
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum ShaderType {
+    /// No post-processing shader (raw pixels)
+    #[default]
+    None,
+    /// CRT monitor effect (scanlines, curvature, bloom)
+    Crt,
+    /// Apple IIc LCD flat panel effect
+    Lcd,
+}
 
 #[derive(Parser)]
 #[command(version, about = "Apple //c Emulator")]
@@ -104,9 +118,9 @@ struct Args {
     #[arg(long)]
     fast_disk: bool,
 
-    /// Enable CRT post-processing shader
-    #[arg(long)]
-    crt: bool,
+    /// Display shader: none, crt, lcd
+    #[arg(long, value_enum, default_value_t = ShaderType::None)]
+    shader: ShaderType,
 
     /// Connect modem port (SCC Ch A) to a TCP host, e.g. --serial bbs.example.com:23
     #[arg(long)]
@@ -131,9 +145,9 @@ pub struct App {
     surface_height: u32,
     buffer_width: u32,
     buffer_height: u32,
-    crt_renderer: Option<CrtRenderer>,
-    crt_enabled: bool,
-    crt_start_time: Instant,
+    post_processor: Option<Box<dyn PostProcessor>>,
+    shader_type: ShaderType,
+    shader_start_time: Instant,
     modifiers: ModifiersState,
     last_cursor_pos: Option<(f64, f64)>,
     show_toolbar: bool,
@@ -165,7 +179,7 @@ fn main() -> Result<(), Error> {
     cpu.bus.iou.iwm.debug = args.debug;
     cpu.bus.iou.iwm.fast_disk = args.fast_disk;
     cpu.bus.video.set_monochrome(args.monochrome);
-    cpu.bus.video.crt_enabled = args.crt;
+    cpu.bus.video.shader_enabled = args.shader != ShaderType::None;
     cpu.bus.video.scanline_intensity = args.scanline_intensity;
 
     // Connect modem port SCC Channel A to TCP if specified
@@ -230,7 +244,7 @@ fn main() -> Result<(), Error> {
 
     let mut event_loop = EventLoop::new().unwrap();
     let (width, height) = cpu.bus.video.get_dimensions();
-    let crt_enabled = args.crt;
+    let shader_type = args.shader;
     let mut app = App {
         pixels: None,
         window: None,
@@ -239,9 +253,9 @@ fn main() -> Result<(), Error> {
         surface_height: height * 2,
         buffer_width: width * 2,
         buffer_height: height * 2,
-        crt_renderer: None,
-        crt_enabled,
-        crt_start_time: Instant::now(),
+        post_processor: None,
+        shader_type,
+        shader_start_time: Instant::now(),
         modifiers: ModifiersState::default(),
         last_cursor_pos: None,
         show_toolbar: true,
@@ -421,7 +435,15 @@ impl winit::application::ApplicationHandler for App {
         // STATUS_BAR_HEIGHT is in physical pixels; convert to logical by dividing
         // by the expected scale factor (2.0 on Retina).
         let win_w = emu_w as f64;
-        let win_h = emu_h as f64 * 2.0 + (STATUS_BAR_HEIGHT as f64 / 2.0);
+        
+        // Apply LCD aspect correction if in LCD mode
+        // The Apple IIc flat panel was vertically compressed (~85% of CRT height)
+        let height_scale = if self.shader_type == ShaderType::Lcd {
+            2.0 * LcdRenderer::LCD_ASPECT_CORRECTION as f64
+        } else {
+            2.0
+        };
+        let win_h = emu_h as f64 * height_scale + (STATUS_BAR_HEIGHT as f64 / 2.0);
 
         let window = Arc::new(
             event_loop
@@ -448,21 +470,36 @@ impl winit::application::ApplicationHandler for App {
             Ok(mut pixels) => {
                 // Use Fill scaling so fractional scaling works at any resolution
                 pixels.set_scaling_mode(ScalingMode::Fill);
-                // Create CRT renderer if enabled
-                if self.crt_enabled {
+                // Create post-processor shader if enabled
+                if self.shader_type != ShaderType::None {
                     let surface_format = pixels.render_texture_format();
                     let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
-                    self.crt_renderer = Some(CrtRenderer::new(
-                        pixels.device(),
-                        window_size.width,
-                        window_size.height,
-                        self.buffer_width,
-                        self.buffer_height,
-                        STATUS_BAR_HEIGHT,
-                        src_w as f32,
-                        src_h as f32,
-                        surface_format,
-                    ));
+                    // Create appropriate renderer based on shader type
+                    self.post_processor = match self.shader_type {
+                        ShaderType::Crt => Some(Box::new(CrtRenderer::new(
+                            pixels.device(),
+                            window_size.width,
+                            window_size.height,
+                            self.buffer_width,
+                            self.buffer_height,
+                            STATUS_BAR_HEIGHT,
+                            src_w as f32,
+                            src_h as f32,
+                            surface_format,
+                        )) as Box<dyn PostProcessor>),
+                        ShaderType::Lcd => Some(Box::new(LcdRenderer::new(
+                            pixels.device(),
+                            window_size.width,
+                            window_size.height,
+                            self.buffer_width,
+                            self.buffer_height,
+                            STATUS_BAR_HEIGHT,
+                            src_w as f32,
+                            src_h as f32,
+                            surface_format,
+                        )) as Box<dyn PostProcessor>),
+                        ShaderType::None => None,
+                    };
 
                     // Initialize egui for shader parameter UI
                     let egui_state = egui_winit::State::new(
@@ -574,8 +611,8 @@ impl winit::application::ApplicationHandler for App {
                         self.buffer_width = self.surface_width;
                         self.buffer_height = self.surface_height;
                         let _ = pixels.resize_buffer(self.surface_width, self.surface_height);
-                        if let Some(crt) = self.crt_renderer.as_mut() {
-                            crt.resize(
+                        if let Some(pp) = self.post_processor.as_mut() {
+                            pp.resize(
                                 pixels.device(), pixels.queue(),
                                 self.surface_width, self.surface_height,
                             );
@@ -612,14 +649,31 @@ impl winit::application::ApplicationHandler for App {
                     let mut blit_offset_x = 0u32;
                     let mut blit_offset_y = 0u32;
                     let mut blit_dst_w = 0u32;
-                    let blit_dst_h;
+                    let mut blit_dst_h = 0u32;
                     if display_region_h > 0 && surf_w > 0 {
-                        let scale_x = surf_w as f64 / src_w as f64;
-                        let scale_y = display_region_h as f64 / src_h as f64;
-                        let scale = scale_x.min(scale_y).floor().max(1.0);
-
+                        // For LCD mode, we display at a squashed aspect ratio
+                        // (the real LCD showed 25 lines in a 16-line vertical space)
+                        let virtual_src_h = if self.shader_type == ShaderType::Lcd {
+                            src_h as f64 * LcdRenderer::LCD_ASPECT_CORRECTION as f64
+                        } else {
+                            src_h as f64
+                        };
+                        
+                        // Target aspect ratio (width / virtual_height)
+                        let target_aspect = src_w as f64 / virtual_src_h;
+                        let window_aspect = surf_w as f64 / display_region_h as f64;
+                        
+                        // Find integer scale that fits in window while preserving aspect
+                        let scale = if window_aspect > target_aspect {
+                            // Window wider than content - fit by height
+                            (display_region_h as f64 / virtual_src_h).floor().max(1.0)
+                        } else {
+                            // Window taller than content - fit by width
+                            (surf_w as f64 / src_w as f64).floor().max(1.0)
+                        };
+                        
                         blit_dst_w = (src_w as f64 * scale) as u32;
-                        blit_dst_h = (src_h as f64 * scale) as u32;
+                        blit_dst_h = (virtual_src_h * scale) as u32;
                         blit_offset_x = (surf_w - blit_dst_w) / 2;
                         blit_offset_y = (display_region_h - blit_dst_h) / 2;
 
@@ -647,16 +701,20 @@ impl winit::application::ApplicationHandler for App {
                         render_status_bar(frame, surf_w, surf_h, bar_h, &drive_status, col80);
                     }
 
-                    let render_result = if let Some(crt) = &self.crt_renderer {
+                    let render_result = if let Some(crt) = &self.post_processor {
                         // Compute active area within blit (excluding video border)
                         let border = self.cpu.bus.video.border_size as u32;
-                        let blit_scale = if src_w > 0 { blit_dst_w / src_w } else { 1 };
-                        let active_offset_x = blit_offset_x + border * blit_scale;
-                        let active_offset_y = blit_offset_y + border * blit_scale;
+                        
+                        // For LCD mode, height is scaled differently than width
+                        let scale_x = if src_w > 0 { blit_dst_w as f64 / src_w as f64 } else { 1.0 };
+                        let scale_y = if src_h > 0 { blit_dst_h as f64 / src_h as f64 } else { 1.0 };
+                        
+                        let active_offset_x = blit_offset_x + (border as f64 * scale_x) as u32;
+                        let active_offset_y = blit_offset_y + (border as f64 * scale_y) as u32;
                         let active_w = src_w - border * 2;
                         let active_h = src_h - border * 2;
-                        let active_dst_w = active_w * blit_scale;
-                        let active_dst_h = active_h * blit_scale;
+                        let active_dst_w = (active_w as f64 * scale_x) as u32;
+                        let active_dst_h = (active_h as f64 * scale_y) as u32;
 
                         // Update CRT uniforms with active area geometry
                         // Video doubles each scanline to 2 rows (384 pixels for 192 scanlines),
@@ -671,7 +729,7 @@ impl winit::application::ApplicationHandler for App {
                         );
 
                         // Update time uniform for flicker effect
-                        let elapsed = self.crt_start_time.elapsed().as_secs_f32();
+                        let elapsed = self.shader_start_time.elapsed().as_secs_f32();
                         crt.update_time(pixels.queue(), elapsed);
                         crt.update_monochrome(pixels.queue(), self.cpu.bus.video.monochrome);
                         crt.update_shader_params(pixels.queue(), &self.shader_params);
@@ -880,7 +938,7 @@ impl winit::application::ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 // F7 always toggles shader UI, even when egui has focus
                 if event.logical_key == Key::Named(NamedKey::F7) && event.state.is_pressed() {
-                    if self.crt_enabled {
+                    if self.shader_type != ShaderType::None {
                         self.show_shader_ui = !self.show_shader_ui;
                         println!("Shader UI: {}", if self.show_shader_ui { "ON" } else { "OFF" });
                     }
