@@ -69,7 +69,7 @@ pub struct MMU {
 
 impl MMU {
     pub fn new() -> Self {
-        Self {
+        let mut mmu = Self {
             rom: [
                 Memory::new(ROM_SIZE, "ROM1".into()),
                 Memory::new(ROM_SIZE, "ROM2".into()),
@@ -84,7 +84,17 @@ impl MMU {
                 Memory::new(LCRAM_SIZE, "LCAUX1".into()),
                 Memory::new(LCRAM_SIZE, "LCAUX2".into()),
             ],
-        }
+        };
+        // OLD: Simulate realistic power-on RAM contents
+        // NEW: Start with zeroed RAM like old version for compatibility
+        // TODO: Re-enable once ROM test regression is fixed
+        // for bank in &mut mmu.ram {
+        //     bank.randomize_power_on();
+        // }
+        // for bank in &mut mmu.lcram {
+        //     bank.randomize_power_on();
+        // }
+        mmu
     }
 
     // pub fn init_mem_state(&self) {
@@ -98,6 +108,15 @@ impl MMU {
         }
         for bank in &mut self.lcram {
             bank.clear();
+        }
+    }
+
+    pub fn randomize_ram(&mut self) {
+        for bank in &mut self.ram {
+            bank.randomize_power_on();
+        }
+        for bank in &mut self.lcram {
+            bank.randomize_power_on();
         }
     }
 

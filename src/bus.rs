@@ -76,6 +76,10 @@ impl Bus {
         self.mmu.clear_ram();
     }
 
+    pub fn randomize_ram(&mut self) {
+        self.mmu.randomize_ram();
+    }
+
     pub fn mmu_mem_state_to_string(&self) -> String {
         mem_state_to_string(self.iou.mem_state.get())
     }
@@ -249,6 +253,26 @@ impl Bus {
         if self.iou.scan_cycle >= 17030 {
             self.iou.scan_cycle -= 17030;
         }
+
+        // Update floating bus: read the byte from text page 1 RAM
+        // at the address the video hardware would currently be fetching.
+        // Apple II NTSC: 65 cycles/scanline, 262 scanlines/frame.
+        // During active display the video reads from text/graphics RAM.
+        // Text page 1 address = base + col, where base depends on scanline.
+        let scan = self.iou.scan_cycle;
+        let scanline = (scan / 65) as u16;
+        let col = (scan % 65) as u16;
+        if scanline < 192 && col < 40 {
+            // Apple II text page base address for a given row:
+            // row = scanline / 8, group = row / 8, offset = row % 8
+            // base = $0400 + group * 0x80 + offset * 0x28
+            let row = scanline / 8;
+            let group = row / 8;
+            let offset = row % 8;
+            let addr = 0x0400 + group * 0x80 + offset * 0x28 + col;
+            self.iou.floating_bus = self.mmu.read_main_byte(addr);
+        }
+
         // Set VBL interrupt when entering VBL region (scanline 192+)
         if old_scan < 12480 && self.iou.scan_cycle >= 12480 {
             self.iou.mouse.vbl_int.set(true);
@@ -256,6 +280,7 @@ impl Bus {
 
         self.iou.mouse.tick(cycles);
         self.iou.iwm.tick(cycles);
+        self.iou.scc.tick(cycles);
         if self.iou.check_interrupts() {
             self.interrupts.request_irq();
         }

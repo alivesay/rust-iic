@@ -209,8 +209,8 @@ impl CPU {
     pub fn power_cycle(&mut self) {
         println!("CPU POWER CYCLE: Full cold reboot...");
 
-        // RAM is NOT cleared — real Apple IIc preserves whatever was in memory.
-        // The ROM checks $03F4 for warm-start magic to decide cold vs warm boot.
+        // Simulate fresh power-on RAM contents (indeterminate state)
+        self.bus.randomize_ram();
 
         // Full re-init: registers, flags, soft switches
         self.initialize_registers();
@@ -367,10 +367,10 @@ impl CPU {
 
         let addr = base_addr.wrapping_add(self.regs.y as u16);
 
-        // handle page-crossing penalty...
-        // if check_page_crossing && (base_addr & 0xFF00) != (addr & 0xFF00) {
-        //     self.cycle_count += 1;
-        // }
+        // +1 cycle if page crossed
+        if (base_addr & 0xFF00) != (addr & 0xFF00) {
+            self.extra_cycles += 1;
+        }
 
         addr
     }
@@ -773,7 +773,12 @@ impl CPU {
             }
 
             0x3C => {
-                let addr = self.fetch_word().wrapping_add(self.regs.x as u16);
+                // BIT abs,X - +1 cycle if page crossed (65C02)
+                let base_addr = self.fetch_word();
+                let addr = base_addr.wrapping_add(self.regs.x as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.execute_bit(value);
             }
@@ -1118,7 +1123,12 @@ impl CPU {
             }
 
             0xBC => {
-                let addr = self.fetch_word().wrapping_add(self.regs.x as u16);
+                // LDY abs,X - +1 cycle if page crossed
+                let base_addr = self.fetch_word();
+                let addr = base_addr.wrapping_add(self.regs.x as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 self.regs.y = self.bus.read_byte(addr);
                 self.update_zero_and_negative_flags(self.regs.y);
             }
@@ -1246,9 +1256,12 @@ impl CPU {
             }
 
             0xBD => {
+                // LDA abs,X - +1 cycle if page crossed
                 let base_addr = self.fetch_word();
                 let addr = base_addr.wrapping_add(self.regs.x as u16);
-
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.regs.a = value;
                 self.update_zero_and_negative_flags(self.regs.a);
@@ -1285,15 +1298,23 @@ impl CPU {
             }
 
             0xD9 => {
+                // CMP abs,Y - +1 cycle if page crossed
                 let base_addr = self.fetch_word();
                 let addr = base_addr.wrapping_add(self.regs.y as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.compare(self.regs.a, value);
             }
 
             0xBE => {
+                // LDX abs,Y - +1 cycle if page crossed
                 let base_addr = self.fetch_word();
                 let addr = base_addr.wrapping_add(self.regs.y as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.regs.x = value;
                 self.update_zero_and_negative_flags(self.regs.x);
@@ -1307,8 +1328,12 @@ impl CPU {
             }
 
             0xB9 => {
+                // LDA abs,Y - +1 cycle if page crossed
                 let base_addr = self.fetch_word();
                 let addr = base_addr.wrapping_add(self.regs.y as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.regs.a = value;
                 self.update_zero_and_negative_flags(self.regs.a);
@@ -1330,8 +1355,12 @@ impl CPU {
             }
 
             0xDD => {
+                // CMP abs,X - +1 cycle if page crossed
                 let base_addr = self.fetch_word();
                 let addr = base_addr.wrapping_add(self.regs.x as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
 
                 self.compare(self.regs.a, value);
@@ -1617,7 +1646,12 @@ impl CPU {
             }
 
             0x3D => {
-                let addr = self.fetch_word().wrapping_add(self.regs.x as u16);
+                // AND abs,X - +1 cycle if page crossed
+                let base_addr = self.fetch_word();
+                let addr = base_addr.wrapping_add(self.regs.x as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.regs.a &= value;
 
@@ -1625,7 +1659,12 @@ impl CPU {
             }
 
             0x39 => {
-                let addr = self.fetch_word().wrapping_add(self.regs.y as u16);
+                // AND abs,Y - +1 cycle if page crossed
+                let base_addr = self.fetch_word();
+                let addr = base_addr.wrapping_add(self.regs.y as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.regs.a &= value;
 
@@ -1660,8 +1699,12 @@ impl CPU {
             }
 
             0x5D => {
+                // EOR abs,X - +1 cycle if page crossed
                 let base_addr = self.fetch_word();
                 let addr = base_addr.wrapping_add(self.regs.x as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.regs.a ^= value;
 
@@ -1669,8 +1712,12 @@ impl CPU {
             }
 
             0x59 => {
+                // EOR abs,Y - +1 cycle if page crossed
                 let base_addr = self.fetch_word();
                 let addr = base_addr.wrapping_add(self.regs.y as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.regs.a ^= value;
 
@@ -1705,7 +1752,12 @@ impl CPU {
             }
 
             0x1D => {
-                let addr = self.fetch_word().wrapping_add(self.regs.x as u16);
+                // ORA abs,X - +1 cycle if page crossed
+                let base_addr = self.fetch_word();
+                let addr = base_addr.wrapping_add(self.regs.x as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.regs.a |= value;
 
@@ -1713,7 +1765,12 @@ impl CPU {
             }
 
             0x19 => {
-                let addr = self.fetch_word().wrapping_add(self.regs.y as u16);
+                // ORA abs,Y - +1 cycle if page crossed
+                let base_addr = self.fetch_word();
+                let addr = base_addr.wrapping_add(self.regs.y as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.regs.a |= value;
 
@@ -1751,27 +1808,45 @@ impl CPU {
             }
 
             0x7D => {
+                // ADC abs,X - +1 cycle if page crossed
                 let base_addr = self.fetch_word();
                 let addr = base_addr.wrapping_add(self.regs.x as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.adc(value);
             }
 
             0xFD => {
+                // SBC abs,X - +1 cycle if page crossed
                 let base_addr = self.fetch_word();
                 let addr = base_addr.wrapping_add(self.regs.x as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.sbc(value);
             }
 
             0x79 => {
-                let addr = self.fetch_word().wrapping_add(self.regs.y as u16);
+                // ADC abs,Y - +1 cycle if page crossed
+                let base_addr = self.fetch_word();
+                let addr = base_addr.wrapping_add(self.regs.y as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.adc(value);
             }
 
             0xF9 => {
-                let addr = self.fetch_word().wrapping_add(self.regs.y as u16);
+                // SBC abs,Y - +1 cycle if page crossed
+                let base_addr = self.fetch_word();
+                let addr = base_addr.wrapping_add(self.regs.y as u16);
+                if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    self.extra_cycles += 1;
+                }
                 let value = self.bus.read_byte(addr);
                 self.sbc(value);
             }

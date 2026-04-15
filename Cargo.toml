@@ -14,7 +14,9 @@ anyhow = "1.0.100"
 bitflags = "2.8.0"
 bytemuck = { version = "1", features = ["derive"] }
 clap = { version = "4.5.27", features = ["derive"] }
+crc32fast = "1"
 cpal = "0.16.0"
+ctrlc = "3.4"
 egui = "0.33"
 egui-wgpu = "0.33"
 egui-winit = "0.33"

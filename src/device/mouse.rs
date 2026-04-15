@@ -47,6 +47,7 @@ pub struct Mouse {
     pub x_int: Cell<bool>,
     pub y_int: Cell<bool>,
     pub vbl_int: Cell<bool>,
+
 }
 
 impl Mouse {
@@ -70,6 +71,7 @@ impl Mouse {
             x_int: Cell::new(false),
             y_int: Cell::new(false),
             vbl_int: Cell::new(false),
+
         }
     }
 
@@ -168,4 +170,5 @@ impl Mouse {
             _ => {}
         }
     }
+
 }

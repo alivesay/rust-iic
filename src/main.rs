@@ -28,6 +28,7 @@ use pixels::{Error, Pixels, ScalingMode, SurfaceTexture};
 use shader_ui::ShaderParams;
 use std::{
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use winit::{
@@ -103,9 +104,21 @@ struct Args {
     #[arg(long)]
     fast_disk: bool,
 
+    /// Enable disk writes (disabled by default to prevent corruption during debugging)
+    #[arg(long)]
+    enable_writes: bool,
+
     /// Enable CRT post-processing shader
     #[arg(long)]
     crt: bool,
+
+    /// Connect modem port (SCC Ch A) to a TCP host, e.g. --serial bbs.example.com:23
+    #[arg(long)]
+    serial: Option<String>,
+
+    /// Enable virtual Hayes modem on slot 1 (use ATDT from terminal software to connect)
+    #[arg(long)]
+    modem: bool,
 }
 
 
@@ -151,9 +164,26 @@ fn main() -> Result<(), Error> {
     cpu.bus.iou.debug = args.debug;
     cpu.bus.iou.iwm.debug = args.debug;
     cpu.bus.iou.iwm.fast_disk = args.fast_disk;
+    cpu.bus.iou.iwm.writes_enabled = args.enable_writes;
     cpu.bus.video.set_monochrome(args.monochrome);
     cpu.bus.video.crt_enabled = args.crt;
     cpu.bus.video.scanline_intensity = args.scanline_intensity;
+
+    // Connect modem port SCC Channel A to TCP if specified
+    if let Some(ref addr) = args.serial {
+        cpu.bus.iou.scc.ch_a.debug = args.debug;
+        if let Err(e) = cpu.bus.iou.scc.ch_a.tcp_connect(addr) {
+            eprintln!("Failed to connect serial to {}: {}", addr, e);
+        }
+    }
+
+    // Enable virtual Hayes modem on SCC Channel A
+    if args.modem {
+        cpu.bus.iou.scc.ch_a.modem_enabled = true;
+        cpu.bus.iou.scc.ch_a.debug = args.debug;
+        println!("Virtual Hayes modem enabled on SCC Channel A (Modem port)");
+        println!("Use ATDT host:port from terminal software to connect");
+    }
 
     let iic_rom_file = include_bytes!("../iic3.bin");
     let iic_rom = rom::ROM::load_from_bytes(iic_rom_file, cpu.system_type).unwrap();
@@ -239,7 +269,21 @@ fn main() -> Result<(), Error> {
     let mut perf_frames = 0;
     let mut perf_cycles_start = app.cpu.cycles;
 
+    // Signal handler for clean shutdown on Ctrl-C
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        println!("\nCtrl-C received, shutting down...");
+        r.store(false, Ordering::SeqCst);
+    }).expect("Error setting Ctrl-C handler");
+
     loop {
+        // Check for Ctrl-C
+        if !running.load(Ordering::SeqCst) {
+            app.flush_disks();
+            std::process::exit(0);
+        }
+
         let frame_start = Instant::now();
         let mut cpu_time = Duration::ZERO;
 
@@ -281,6 +325,7 @@ fn main() -> Result<(), Error> {
         let status = event_loop.pump_app_events(timeout, &mut app);
 
         if let PumpStatus::Exit(exit_code) = status {
+            app.flush_disks();
             std::process::exit(exit_code as i32);
         }
 
@@ -348,6 +393,14 @@ fn run_cpu_console_mode(mut cpu: CPU) {
             println!("*");
             break;
         }
+    }
+}
+
+impl App {
+    fn flush_disks(&mut self) {
+        println!("Flushing disks before exit...");
+        self.cpu.bus.iou.iwm.eject_disk(0);
+        self.cpu.bus.iou.iwm.eject_disk(1);
     }
 }
 
@@ -431,11 +484,15 @@ impl winit::application::ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // Forward events to egui — if consumed, skip emulator input handling
-        let egui_consumed = if let Some(egui_state) = self.egui_state.as_mut() {
-            if let Some(window) = self.window.as_ref() {
-                let response = egui_state.on_window_event(window.as_ref(), &event);
-                response.consumed
+        // Only forward events to egui when shader UI is visible
+        let egui_consumed = if self.show_shader_ui {
+            if let Some(egui_state) = self.egui_state.as_mut() {
+                if let Some(window) = self.window.as_ref() {
+                    let response = egui_state.on_window_event(window.as_ref(), &event);
+                    response.consumed
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -449,7 +506,20 @@ impl winit::application::ApplicationHandler for App {
             }
 
             WindowEvent::CloseRequested => {
+                self.flush_disks();
                 event_loop.exit();
+            }
+
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    // macOS fullscreen transition loses focus; re-assert it
+                    // and clear stale modifier state
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                // Always reset modifiers on focus change to avoid stuck keys
+                self.modifiers = ModifiersState::empty();
             }
 
             WindowEvent::Resized(size) => {
@@ -461,22 +531,12 @@ impl winit::application::ApplicationHandler for App {
                             error!("pixels.resize_surface failed: {}", err);
                             event_loop.exit();
                         }
-                        if let Some(crt) = self.crt_renderer.as_mut() {
-                            crt.resize(
-                                pixels.device(), pixels.queue(),
-                                size.width, size.height,
-                            );
-                        }
-                    }
-                    // Re-assert focus after fullscreen transition on macOS
-                    if let Some(window) = &self.window {
-                        window.focus_window();
                     }
                 }
             }
 
             WindowEvent::RedrawRequested => {
-                // Pending single-click on drive icon: open file dialog after double-click window expires
+                // Pending single-click on drive icon: open file dialog (blocking)
                 if let Some((drive, click_time)) = self.last_drive_click {
                     if click_time.elapsed() >= Duration::from_millis(400) {
                         self.last_drive_click = None;
@@ -543,7 +603,7 @@ impl winit::application::ApplicationHandler for App {
                     let mut blit_offset_x = 0u32;
                     let mut blit_offset_y = 0u32;
                     let mut blit_dst_w = 0u32;
-                    let mut blit_dst_h = 0u32;
+                    let blit_dst_h;
                     if display_region_h > 0 && surf_w > 0 {
                         let scale_x = surf_w as f64 / src_w as f64;
                         let scale_y = display_region_h as f64 / src_h as f64;
@@ -859,7 +919,7 @@ impl winit::application::ApplicationHandler for App {
                     if let Some(code) = key_code {
                         self.cpu.bus.iou.last_key.set(code);
                         self.cpu.bus.iou.key_ready.set(true);
-                        // println!("Key Pressed: 0x{:X}", code);
+                        println!("Key Pressed: 0x{:X}", code);
                     }
                 }
 
