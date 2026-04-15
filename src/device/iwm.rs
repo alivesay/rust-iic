@@ -100,7 +100,7 @@ pub struct Iwm {
     pub mode: u8,
     pub drive_select: bool, // false = Drive 1, true = Drive 2
     pub fast_disk: bool,
-    pub writes_enabled: bool, // Set to false to prevent disk corruption during debugging
+    pub writes_enabled: bool,
     cycles_since_last_read: u64,
     motor_off_pending: bool,       // True when motor-off timer is counting down
     motor_off_timer: u64,          // Cycles remaining before motor actually turns off
@@ -129,7 +129,7 @@ impl Iwm {
             mode: 0,
             drive_select: false,
             fast_disk: true,
-            writes_enabled: false, // Disabled by default to prevent corruption
+            writes_enabled: true,
             cycles_since_last_read: 0,
             motor_off_pending: false,
             motor_off_timer: 0,

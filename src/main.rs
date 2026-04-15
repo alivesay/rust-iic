@@ -104,10 +104,6 @@ struct Args {
     #[arg(long)]
     fast_disk: bool,
 
-    /// Enable disk writes (disabled by default to prevent corruption during debugging)
-    #[arg(long)]
-    enable_writes: bool,
-
     /// Enable CRT post-processing shader
     #[arg(long)]
     crt: bool,
@@ -164,7 +160,6 @@ fn main() -> Result<(), Error> {
     cpu.bus.iou.debug = args.debug;
     cpu.bus.iou.iwm.debug = args.debug;
     cpu.bus.iou.iwm.fast_disk = args.fast_disk;
-    cpu.bus.iou.iwm.writes_enabled = args.enable_writes;
     cpu.bus.video.set_monochrome(args.monochrome);
     cpu.bus.video.crt_enabled = args.crt;
     cpu.bus.video.scanline_intensity = args.scanline_intensity;
