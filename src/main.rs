@@ -115,6 +115,10 @@ struct Args {
     /// Enable virtual Hayes modem on slot 1 (use ATDT from terminal software to connect)
     #[arg(long)]
     modem: bool,
+
+    /// Enable serial loopback mode (for diagnostic testing with loopback cable)
+    #[arg(long, conflicts_with = "modem")]
+    serial_loopback: bool,
 }
 
 
@@ -172,12 +176,22 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    // Enable virtual Hayes modem on SCC Channel A
+    // Enable virtual Hayes modem on Channel A (modem port, slot 2)
+    // Apple IIc has dedicated ports: Channel A = modem, Channel B = printer
     if args.modem {
         cpu.bus.iou.scc.ch_a.modem_enabled = true;
         cpu.bus.iou.scc.ch_a.debug = args.debug;
-        println!("Virtual Hayes modem enabled on SCC Channel A (Modem port)");
+        println!("Virtual Hayes modem enabled on modem port (slot 2)");
         println!("Use ATDT host:port from terminal software to connect");
+    }
+
+    // Enable serial loopback mode
+    // This simulates loopback plugs on each port (TX→RX on same port)
+    // Compatible with ACIA/6551 loopback tests (e.g., a2ediag external serial test)
+    if args.serial_loopback {
+        cpu.bus.iou.scc.ch_a.loopback = true;
+        cpu.bus.iou.scc.ch_b.loopback = true;
+        println!("Serial loopback mode enabled on both ports");
     }
 
     let iic_rom_file = include_bytes!("../iic3.bin");
@@ -897,7 +911,8 @@ impl winit::application::ApplicationHandler for App {
                         Key::Named(NamedKey::ArrowUp) => key_code = Some(0x0B),
                         Key::Named(NamedKey::ArrowDown) => key_code = Some(0x0A),
                         Key::Named(NamedKey::Enter) => key_code = Some(0x0D),
-                        Key::Named(NamedKey::Backspace) => key_code = Some(0x7F), // Delete
+                        Key::Named(NamedKey::Backspace) => key_code = Some(0x08), // Backspace = Left arrow (destructive backspace)
+                        Key::Named(NamedKey::Delete) => key_code = Some(0x7F),    // Forward delete = DEL
                         Key::Named(NamedKey::Escape) => {
                              // TODO: escape should be sent to emulator...
                              key_code = Some(0x1B);
