@@ -32,3 +32,4 @@ ringbuf = "0.4.8"
 shader_ui = { path = "src/render/shader_ui" }
 wgpu = "27.0.1"
 winit = "0.30.13"
+json = "0.12.4"

@@ -16,13 +16,9 @@ impl Memory {
         }
     }
 
-    /// Fill RAM with a realistic Apple IIc power-on pattern:
-    /// 128 bytes of $00 alternating with 128 bytes of $FF,
-    /// plus random bit noise (~3% flip rate).
     pub fn randomize_power_on(&mut self) {
         for (i, byte) in self.data.iter_mut().enumerate() {
             let base = if (i / 128) & 1 == 0 { 0x00u8 } else { 0xFFu8 };
-            // ~3% chance of flipping each bit for noise
             let noise = fastrand::u8(..) & fastrand::u8(..) & fastrand::u8(..);
             *byte = base ^ noise;
         }

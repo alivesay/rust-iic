@@ -370,27 +370,32 @@ impl Iwm {
         };
 
         if let Some(target) = target_angle {
-            let d = self.di();
-            let current_angle = (self.drives[d].head_pos % 8) as i32;
-            let mut delta = target - current_angle;
+            // On real Apple IIc hardware, phase signals are connected to BOTH drives.
+            // Both heads move in response to phase changes, not just the selected drive.
+            // This is critical for proper disk I/O: when ProDOS seeks drive 1 to track N,
+            // then switches to drive 2, it expects drive 2 to also be at track N.
+            for d in 0..2 {
+                let current_angle = (self.drives[d].head_pos % 8) as i32;
+                let mut delta = target - current_angle;
 
-            if delta > 4 { delta -= 8; }
-            else if delta <= -4 { delta += 8; }
+                if delta > 4 { delta -= 8; }
+                else if delta <= -4 { delta += 8; }
 
-            if delta != 0 {
-                let new_pos = self.drives[d].head_pos as i32 + delta;
-                if new_pos >= 0 && new_pos <= 160 {
-                    if self.drives[d].head_pos != new_pos as u8 {
-                        // Flush dirty track before changing tracks
-                        if self.drives[d].dirty {
-                            self.flush_track(d);
-                            self.save_disk(d);
-                            self.drives[d].was_writing = false;
-                        }
-                        self.drives[d].head_pos = new_pos as u8;
-                        self.current_track_revolutions = 0;
-                        if self.debug {
-                            println!("IWM: Drive {} head moved to {} (Delta: {})", d + 1, self.drives[d].head_pos, delta);
+                if delta != 0 {
+                    let new_pos = self.drives[d].head_pos as i32 + delta;
+                    if new_pos >= 0 && new_pos <= 160 {
+                        if self.drives[d].head_pos != new_pos as u8 {
+                            // Flush dirty track before changing tracks
+                            if self.drives[d].dirty {
+                                self.flush_track(d);
+                                self.save_disk(d);
+                                self.drives[d].was_writing = false;
+                            }
+                            self.drives[d].head_pos = new_pos as u8;
+                            self.current_track_revolutions = 0;
+                            if self.debug {
+                                println!("IWM: Drive {} head moved to {} (Delta: {})", d + 1, self.drives[d].head_pos, delta);
+                            }
                         }
                     }
                 }
@@ -441,7 +446,7 @@ impl Iwm {
                     self.save_disk(d);
                 }
 
-                // Load track directly from woz_raw (bypasses a2kit's stale cache)
+                // Load track directly from woz_raw
                 if let Some(data) = self.load_track_from_raw(d, track_num) {
                     let bit_count = {
                         let woz_bc = self.drives[d].woz_bit_counts[track_num as usize] as usize;
