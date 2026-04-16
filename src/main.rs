@@ -205,8 +205,9 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
         let frame_start = Instant::now();
         let mut cpu_time = Duration::ZERO;
 
-        // Fast disk mode: run extra cycles when motor spinning
-        let iwm_fast = app.cpu.bus.iou.iwm.fast_disk && app.cpu.bus.iou.iwm.motor_on;
+        // Fast disk mode: run extra cycles when motor spinning AND not writing
+        let iwm = &app.cpu.bus.iou.iwm;
+        let iwm_fast = iwm.fast_disk && iwm.motor_on && !iwm.write_mode;
         let effective_cpf = if iwm_fast {
             cycles_per_frame * 8
         } else {

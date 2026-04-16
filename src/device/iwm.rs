@@ -95,7 +95,7 @@ pub struct Iwm {
     pub motor_on: bool,
     q6: bool,
     q7: bool,
-    write_mode: bool,  // Set by Q7H access, cleared by Q7L access
+    pub write_mode: bool,  // Set by Q7H access, cleared by Q7L access
     latch: u8,         // Data latch loaded by STA to odd Q6H address
     pub debug: bool,
 
