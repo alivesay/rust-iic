@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
+use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, memexp::MemoryExpansion, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
 
 macro_rules! set_lcram_mode {
   ($mem_state:expr, $mode:expr) => {{
@@ -46,6 +46,7 @@ pub struct IOU {
   pub iwm: Iwm,
   pub mouse: Mouse,
   pub speaker: Speaker,
+  pub memexp: MemoryExpansion, // Apple IIc Memory Expansion Card (Slot 4)
   pub cycles: u64,
   pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
   pub floating_bus: u8,  // Last byte video hardware would read from RAM at current scan position
@@ -70,6 +71,7 @@ impl IOU {
           iwm: Iwm::new(),
           mouse: Mouse::new(),
           speaker: Speaker::new(audio_producer, sample_rate),
+          memexp: MemoryExpansion::new(),
           cycles: 0,
           scan_cycle: 0,
           floating_bus: 0,
@@ -89,10 +91,6 @@ impl IOU {
         self.video_mode.set(VideoMode::TEXT);
         self.keyboard.reset();
 
-        // Full mouse reset — stale pending movement or interrupt state from
-        // previous session would cause $C017 (RSTYINT) to return 0x80,
-        // which breaks Infocom interpreter 80-column detection (reads $C017
-        // expecting RDC3ROM). Also prevents spurious IRQs during boot.
         self.mouse.reset();
 
         self.scc.reset();
@@ -282,8 +280,8 @@ impl IOU {
             // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
             0xC098..=0xC09F | 0xC0A8..=0xC0AF => self.scc.slot_read(addr),
 
-            // Slot 4 — no hardware; floating bus ($C0C0–$C0CF)
-            0xC0C0..=0xC0CF => self.floating_bus,
+            // Slot 4 — Memory Expansion Card ($C0C0–$C0CF)
+            0xC0C0..=0xC0CF => self.memexp.read((addr & 0x0F) as u8),
 
             // Other slot I/O (stubbed — floating bus)
             0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0D0..=0xC0DF | 0xC0F0..=0xC0FF => self.floating_bus,
@@ -476,25 +474,11 @@ impl IOU {
           // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
           0xC098..=0xC09F | 0xC0A8..=0xC0AF => { self.scc.slot_write(addr, val); 0x00 },
 
-          // Slot 4 — no hardware ($C0C0–$C0CF)
-          0xC0C0..=0xC0CF => 0x00,
+          // Slot 4 — Memory Expansion Card ($C0C0–$C0CF)
+          0xC0C0..=0xC0CF => { self.memexp.write((addr & 0x0F) as u8, val); 0x00 },
 
           // Other slot I/O (stubbed)
           0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0D0..=0xC0DF | 0xC0F0..=0xC0FF => 0x00,
-
-            // // **Annunciator 3 Controls DHiRes Mode**
-            // 0xC05E => {
-            //     clear_bits_cell!(self.annunciators, 0b1000); // Annunciator 3 OFF
-            //     if self.is_ioudis() {
-            //         clear_bits_cell!(self.video_mode, VideoModeMask::DHIRES); // Disable DHiRes
-            //     }
-            // }
-            // 0xC05F => {
-            //     set_bits_cell!(self.annunciators, 0b1000); // Annunciator 3 ON
-            //     if self.is_ioudis() {
-            //         set_bits_cell!(self.video_mode, VideoModeMask::DHIRES); // Enable DHiRes
-            //     }
-            // }
 
             _ => {
               println!("IOU: Unhandled write at address {:04X}", addr);

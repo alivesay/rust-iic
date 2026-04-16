@@ -716,15 +716,60 @@ impl App {
             Key::Named(NamedKey::ArrowUp) => Some(0x0B),
             Key::Named(NamedKey::ArrowDown) => Some(0x0A),
             Key::Named(NamedKey::Enter) => Some(0x0D),
-            Key::Named(NamedKey::Backspace) => Some(0x08),
+            Key::Named(NamedKey::Tab) => Some(0x09),
+            Key::Named(NamedKey::Backspace) => Some(0x7F), // Apple IIc Delete key
             Key::Named(NamedKey::Delete) => Some(0x7F),
             Key::Named(NamedKey::Escape) => Some(0x1B),
             _ => {
-                if let Some(virtual_key) = event.logical_key.to_text() {
-                    let key_char = virtual_key.chars().next().unwrap_or('\0');
-                    Some(key_char.to_ascii_uppercase() as u8)
+                // Handle Control key combinations
+                if self.modifiers.control_key() {
+                    // Get the base key from physical key for control combinations
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        let ctrl_code = match code {
+                            KeyCode::KeyA => Some(0x01),
+                            KeyCode::KeyB => Some(0x02),
+                            KeyCode::KeyC => Some(0x03),
+                            KeyCode::KeyD => Some(0x04),
+                            KeyCode::KeyE => Some(0x05),
+                            KeyCode::KeyF => Some(0x06),
+                            KeyCode::KeyG => Some(0x07),
+                            KeyCode::KeyH => Some(0x08),
+                            KeyCode::KeyI => Some(0x09),
+                            KeyCode::KeyJ => Some(0x0A),
+                            KeyCode::KeyK => Some(0x0B),
+                            KeyCode::KeyL => Some(0x0C),
+                            KeyCode::KeyM => Some(0x0D),
+                            KeyCode::KeyN => Some(0x0E),
+                            KeyCode::KeyO => Some(0x0F),
+                            KeyCode::KeyP => Some(0x10),
+                            KeyCode::KeyQ => Some(0x11),
+                            KeyCode::KeyR => Some(0x12),
+                            KeyCode::KeyS => Some(0x13),
+                            KeyCode::KeyT => Some(0x14),
+                            KeyCode::KeyU => Some(0x15),
+                            KeyCode::KeyV => Some(0x16),
+                            KeyCode::KeyW => Some(0x17),
+                            KeyCode::KeyX => Some(0x18),
+                            KeyCode::KeyY => Some(0x19),
+                            KeyCode::KeyZ => Some(0x1A),
+                            _ => None,
+                        };
+                        if ctrl_code.is_some() {
+                            ctrl_code
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 } else {
-                    None
+                    // Normal key handling
+                    if let Some(virtual_key) = event.logical_key.to_text() {
+                        let key_char = virtual_key.chars().next().unwrap_or('\0');
+                        Some(key_char.to_ascii_uppercase() as u8)
+                    } else {
+                        None
+                    }
                 }
             }
         };
@@ -770,7 +815,6 @@ impl App {
                 Key::Named(NamedKey::F3) => {
                     let current = self.cpu.bus.video.monochrome;
                     self.cpu.bus.video.set_monochrome(!current);
-                    println!("Monochrome Mode: {}", if !current { "ON" } else { "OFF" });
                 }
                 Key::Named(NamedKey::F6) => {
                     self.show_toolbar = !self.show_toolbar;
@@ -814,7 +858,6 @@ impl App {
                             window.set_decorations(true);
                             window.set_has_shadow(true);
                         }
-                        println!("Fullscreen: {}", if entering { "ON" } else { "OFF" });
                     } else {
                         // Restore state on failure
                         if entering {
