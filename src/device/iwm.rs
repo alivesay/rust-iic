@@ -215,9 +215,15 @@ impl Iwm {
         self.drives[drive].disk = None;
         self.drives[drive].disk_path = None;
         self.drives[drive].track_data.clear();
+        self.drives[drive].track_bit_count = 0;
         self.drives[drive].loaded_track = None;
         self.drives[drive].nibbles_valid = false;
         self.drives[drive].dirty = false;
+        self.drives[drive].head_pos = 0;
+        self.drives[drive].bit_index = 0;
+        self.drives[drive].shift_register = 0;
+        self.drives[drive].data_latch = 0;
+        self.drives[drive].data_ready = false;
     }
 
 
