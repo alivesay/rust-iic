@@ -1,6 +1,6 @@
 use wgpu::util::DeviceExt;
 
-use crate::screen::PostProcessor;
+use super::screen::PostProcessor;
 
 /// Post-processing CRT shader renderer with multi-pass bloom.
 ///
@@ -71,7 +71,7 @@ impl CrtRenderer {
         source_height: f32,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/crt.wgsl"));
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/crt.wgsl"));
 
         // Full-screen triangle
         let vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
@@ -101,7 +101,7 @@ impl CrtRenderer {
         });
 
         // --- Mipmap generation pipeline ---
-        let mipgen_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/mipgen.wgsl"));
+        let mipgen_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/mipgen.wgsl"));
 
         let mipgen_vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
         let mipgen_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -173,7 +173,7 @@ impl CrtRenderer {
         });
 
         // --- Separable Gaussian blur pipeline (shared by X and Y passes) ---
-        let gauss_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/gauss.wgsl"));
+        let gauss_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/gauss.wgsl"));
 
         let gauss_vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
         let gauss_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

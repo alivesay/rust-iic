@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use crate::{device::{iwm::Iwm, mouse::Mouse, scc::Scc, speaker::Speaker}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
+use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
 
 macro_rules! set_lcram_mode {
   ($mem_state:expr, $mode:expr) => {{
@@ -39,10 +39,9 @@ pub struct IOU {
   pub ioudis: Cell<bool>,
 
   pub video_mode: Cell<u8>,
-  // extra_flags: Cell<u8>,
 
-  pub last_key: Cell<u8>,
-  pub key_ready: Cell<bool>,
+  pub keyboard: Keyboard,
+  pub joystick: Joystick,
   pub scc: Scc,      // Zilog 8530 SCC — Ch A: Modem, Ch B: Printer
   pub iwm: Iwm,
   pub mouse: Mouse,
@@ -56,7 +55,7 @@ pub struct IOU {
 }
 
 impl IOU {
-    pub fn new(self_test: bool) -> Self {
+    pub fn new(self_test: bool, audio_producer: AudioProducer, sample_rate: u32) -> Self {
       Self {
           mem_state: Cell::new(MemStateMask::INIT),
           last_read_addr: Cell::new(0x0000),
@@ -64,14 +63,13 @@ impl IOU {
           ioudis: Cell::new(true), // Firmware sets IOUDis ON at reset (enables DHIRES access)
         
           video_mode: Cell::new(VideoMode::TEXT),
-          // extra_flags: Cell::new(0),
 
-          last_key: Cell::new(0),
-          key_ready: Cell::new(false),
+          keyboard: Keyboard::new(),
+          joystick: Joystick::new(),
           scc: Scc::new(),
           iwm: Iwm::new(),
           mouse: Mouse::new(),
-          speaker: Speaker::new(),
+          speaker: Speaker::new(audio_producer, sample_rate),
           cycles: 0,
           scan_cycle: 0,
           floating_bus: 0,
@@ -89,8 +87,7 @@ impl IOU {
         self.is_80store.set(false);
         self.ioudis.set(true);
         self.video_mode.set(VideoMode::TEXT);
-        self.last_key.set(0);
-        self.key_ready.set(false);
+        self.keyboard.reset();
 
         // Full mouse reset — stale pending movement or interrupt state from
         // previous session would cause $C017 (RSTYINT) to return 0x80,
@@ -108,18 +105,10 @@ impl IOU {
       let is_80store = self.is_80store.get();
 
         let result = match addr {
-            0xC000 => {
-                let mut key = self.last_key.get();
-                if self.key_ready.get() {
-                    key |= 0x80;
-                } else {
-                    key &= 0x7F;
-                }
-                key
-            },
+            0xC000 => self.keyboard.read_data(self.cycles),
 
             0xC001..=0xC00F => 0x00, 
-            0xC010 => { self.key_ready.set(false); 0x00 }, // KBDSTRB - clear keyboard strobe on read too
+            0xC010 => self.keyboard.read_strobe(self.cycles),
             
             // Status Reads (MMU & Video)
             0xC011 => (check_bits_cell!(self.mem_state, MemStateMask::RDBNK) as u8) << 7,
@@ -176,7 +165,10 @@ impl IOU {
             0xC048 => { self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00 }, // C048 49224 RSTXY          C  WR   Reset X and Y Interrupts
         
             0xC070..=0xC07F => {
-                // Trigger Paddle Timer (Not implemented)
+                // Trigger Paddle Timer - starts the RC timing circuit for analog inputs
+                // Any access to $C070-$C07F triggers the paddle timers
+                self.joystick.trigger(self.cycles);
+                
                 if addr == 0xC070 {
                     self.mouse.vbl_int.set(false); // Reset VBLInt
                 }
@@ -266,18 +258,20 @@ impl IOU {
           },
             0xC060 => (self.col80_switch as u8) << 7, //   C   R7  Physical 80/40 Column Switch (1=80col, 0=40col)
             0xC061 => {
-                // simulate holding the button for the first 2 seconds (2M cycles) if self_test is enabled
+                // PB0 - Open Apple key / Joystick Button 0
+                // Also wired to mouse button for mouse-aware apps
                 let pressed = self.mouse.button0.get() || (self.self_test && self.cycles < 2_000_000);
                 (pressed as u8) << 7
             }, // C061 49249 RDBTN0        ECG  R7  Switch Input 0 / Solid Apple
             0xC062 => {
-                // simulate holding the button for the first 2 seconds (2M cycles) if self_test is enabled
+                // PB1 - Solid Apple key / Joystick Button 1
                 let pressed = self.mouse.button1.get() || (self.self_test && self.cycles < 2_000_000);
                 (pressed as u8) << 7
             }, // C062 49250 RDBTN1        ECG  R7  Switch Input 1 / Open Apple
             0xC063 => (!self.mouse.button0.get() as u8) << 7, //                           C   R7  Bit 7 = Mouse Button Not Pressed
-            0xC064 => 0x80, // C064 49252 PADDL0       OECG  R7  Analog Input 0 (no joystick: timer never expires)
-            0xC065 => 0x80, // C065 49253 PADDL1       OECG  R7  Analog Input 1 (no joystick: timer never expires)
+            // Paddle/Joystick analog inputs - delegated to Joystick module
+            0xC064 => self.joystick.read(0, self.cycles),
+            0xC065 => self.joystick.read(1, self.cycles),
             0xC066 => (self.mouse.x_dir.get() as u8) << 7, //           RDMOUX1        C   R7  Mouse X1 Direction (1 = right)
             0xC067 => (self.mouse.y_dir.get() as u8) << 7, //           RDMOUY1        C   R7  Mouse Y1 Direction (1 = down)
             0xC068 => 0x00, // STATEREG (IIGS) - Ignore on IIc
@@ -332,7 +326,11 @@ impl IOU {
               if self.debug { println!("IOU: ALTCHAR ON"); }
               set_bits_cell!(self.video_mode, VideoModeMask::ALTCHAR)
           },
-            0xC010 => { self.key_ready.set(false); 0x00 }, // C010 49168 KBDSTRB      OECG WR   Keyboard Strobe
+            0xC010 => {
+                // KBDSTRB - writing also clears the strobe
+                self.keyboard.write_strobe();
+                0x00
+            },
             
             0xC011..=0xC01F => 0x00,
 
@@ -344,7 +342,9 @@ impl IOU {
           0xC048 => { self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00 }, // RSTXY
 
           0xC070..=0xC07F => {
-              // Trigger Paddle Timer (Not implemented)
+              // Trigger Paddle Timer - starts the RC timing circuit for analog inputs
+              self.joystick.trigger(self.cycles);
+              
               if addr == 0xC070 {
                   self.mouse.vbl_int.set(false); // Reset VBLInt
               }

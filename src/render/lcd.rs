@@ -1,70 +1,18 @@
-//! Post-processing screen renderer abstraction.
+//! Apple IIc Flat Panel LCD Renderer
 //!
-//! Provides a common trait for CRT and LCD shader renderers with display-specific
-//! implementations that handle different visual characteristics and aspect ratios.
+//! The Apple IIc LCD was a 9" passive-matrix STN display with:
+//! - Vertically compressed aspect ratio (shorter than CRT equivalent)
+//! - Visible pixel grid structure
+//! - Green-tinted background with dark pixels
+//! - Relatively slow response time (ghosting)
+//!
+//! This renderer is simpler than CRT as it doesn't need bloom/halation passes.
 
 use wgpu::util::DeviceExt;
 
-/// Common interface for post-processing screen shaders.
-pub trait PostProcessor {
-    /// Returns the intermediate texture view to render emulator output into.
-    fn intermediate_view(&self) -> &wgpu::TextureView;
-
-    /// Handle window/surface resize.
-    fn resize(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
-    );
-
-    /// Update the content rect and source dimensions based on actual blit geometry.
-    fn update_content_rect(
-        &self,
-        queue: &wgpu::Queue,
-        surface_w: u32,
-        surface_h: u32,
-        offset_x: u32,
-        offset_y: u32,
-        dst_w: u32,
-        dst_h: u32,
-        bar_h: u32,
-        source_width: f32,
-        source_height: f32,
-    );
-
-    /// Update the time uniform for animation effects.
-    fn update_time(&self, queue: &wgpu::Queue, time: f32);
-
-    /// Update the monochrome flag.
-    fn update_monochrome(&self, queue: &wgpu::Queue, monochrome: bool);
-
-    /// Update shader-specific parameters.
-    fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams);
-
-    /// Execute the post-processing render passes.
-    fn render(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        render_target: &wgpu::TextureView,
-        device: &wgpu::Device,
-    );
-}
-
-// ============================================================================
-// LCD Renderer - Apple IIc Flat Panel Display
-// ============================================================================
+use super::screen::PostProcessor;
 
 /// Apple IIc flat panel LCD renderer.
-///
-/// The Apple IIc LCD was a 9" passive-matrix STN display with:
-/// - Vertically compressed aspect ratio (shorter than CRT equivalent)
-/// - Visible pixel grid structure
-/// - Green-tinted background with dark pixels
-/// - Relatively slow response time (ghosting)
-///
-/// This renderer is simpler than CRT as it doesn't need bloom/halation passes.
 pub struct LcdRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -115,7 +63,7 @@ impl LcdRenderer {
         source_height: f32,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/lcd.wgsl"));
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/lcd.wgsl"));
 
         // Full-screen triangle
         let vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
