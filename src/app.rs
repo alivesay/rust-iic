@@ -45,6 +45,7 @@ pub struct App {
     pub modifiers: ModifiersState,
     pub last_cursor_pos: Option<(f64, f64)>,
     pub show_toolbar: bool,
+    pub is_fullscreen: bool,
     pub last_drive_click: Option<(usize, Instant)>,
     // egui state for shader parameter UI
     pub egui_ctx: egui::Context,
@@ -71,7 +72,8 @@ impl App {
             shader_start_time: Instant::now(),
             modifiers: ModifiersState::default(),
             last_cursor_pos: None,
-            show_toolbar: true,
+            show_toolbar: false,
+            is_fullscreen: false,
             last_drive_click: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
@@ -133,6 +135,8 @@ impl winit::application::ApplicationHandler for App {
             Ok(mut pixels) => {
                 // Use Fill scaling so fractional scaling works at any resolution
                 pixels.set_scaling_mode(ScalingMode::Fill);
+                // Ensure clear color is black (avoids grey border in fullscreen)
+                pixels.clear_color(wgpu::Color::BLACK);
                 // Create post-processor shader if enabled
                 if self.shader_type != ShaderType::None {
                     let surface_format = pixels.render_texture_format();
@@ -793,10 +797,30 @@ impl App {
             if event.logical_key == Key::Named(NamedKey::Enter) && self.modifiers.super_key() {
                 if let Some(window) = &self.window {
                     let current = window.simple_fullscreen();
-                    let success = window.set_simple_fullscreen(!current);
+                    let entering = !current;
+                    
+                    if entering {
+                        // Disable decorations/shadow BEFORE entering fullscreen
+                        window.set_decorations(false);
+                        window.set_has_shadow(false);
+                    }
+                    
+                    let success = window.set_simple_fullscreen(entering);
+                    
                     if success {
-                        println!("Fullscreen: {}", if !current { "ON" } else { "OFF" });
+                        self.is_fullscreen = entering;
+                        if !entering {
+                            // Restore decorations/shadow AFTER exiting fullscreen
+                            window.set_decorations(true);
+                            window.set_has_shadow(true);
+                        }
+                        println!("Fullscreen: {}", if entering { "ON" } else { "OFF" });
                     } else {
+                        // Restore state on failure
+                        if entering {
+                            window.set_decorations(true);
+                            window.set_has_shadow(true);
+                        }
                         eprintln!("Failed to toggle fullscreen");
                     }
                 }

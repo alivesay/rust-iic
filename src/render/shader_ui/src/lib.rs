@@ -42,7 +42,7 @@ impl Default for ShaderParams {
             crt_gamma: 2.4,
             monitor_gamma: 2.2,
             distance: 1.37,
-            radius: 2.0,
+            radius: 1.3,
             corner_size: 0.001,
             corner_smooth: 2000.0,
             overscan_x: 100.0,
