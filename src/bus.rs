@@ -1,4 +1,5 @@
 use crate::cpu::{CpuType, SystemType};
+use crate::device::speaker::AudioProducer;
 use crate::interrupts::InterruptController;
 use crate::iou::IOU;
 use crate::memory::Memory;
@@ -36,7 +37,7 @@ pub struct Bus {
 }
 
 impl Bus {
-    pub fn new(system_type: SystemType, _cpu_type: CpuType, self_test: bool) -> Self {
+    pub fn new(system_type: SystemType, _cpu_type: CpuType, self_test: bool, audio_producer: AudioProducer, sample_rate: u32) -> Self {
         let memory_size = match system_type {
             SystemType::Generic => MEMORY_SIZE,
             SystemType::AppleIIc => RAM_BANK_SIZE * 2,
@@ -44,7 +45,7 @@ impl Bus {
 
         Self {
             system_type,
-            iou: IOU::new(self_test),
+            iou: IOU::new(self_test, audio_producer, sample_rate),
             mmu: MMU::new(),
             interrupts: InterruptController::default(),
 

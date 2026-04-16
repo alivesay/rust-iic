@@ -8,7 +8,7 @@ pub struct DriveStatusInfo {
 }
 
 /// Apple II character ROM
-const CHAR_ROM: &[u8; 1024] = include_bytes!("../assets/font.bin");
+const CHAR_ROM: &[u8; 1024] = include_bytes!("../../assets/font.bin");
 
 /// Decode a PNG (white-on-black) into a 32×32 luminance mask at first use.
 fn decode_icon_mask(png_bytes: &[u8]) -> [u8; 1024] {
@@ -21,9 +21,9 @@ fn decode_icon_mask(png_bytes: &[u8]) -> [u8; 1024] {
 }
 
 static DISK1_MASK: LazyLock<[u8; 1024]> =
-    LazyLock::new(|| decode_icon_mask(include_bytes!("../assets/disk1.png")));
+    LazyLock::new(|| decode_icon_mask(include_bytes!("../../assets/disk1.png")));
 static DISK2_MASK: LazyLock<[u8; 1024]> =
-    LazyLock::new(|| decode_icon_mask(include_bytes!("../assets/disk2.png")));
+    LazyLock::new(|| decode_icon_mask(include_bytes!("../../assets/disk2.png")));
 
 /// Height of the native-resolution status bar at the bottom of the window.
 pub const STATUS_BAR_HEIGHT: u32 = 96;

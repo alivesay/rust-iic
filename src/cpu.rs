@@ -1,4 +1,5 @@
 use crate::bus::Bus;
+use crate::device::speaker::AudioProducer;
 use crate::disassembler::{Disassembler, SymbolTable};
 use crate::interrupts::InterruptType;
 use crate::rom::ROM;
@@ -106,11 +107,11 @@ pub struct CPU {
 }
 
 impl CPU {
-    pub fn new(system_type: SystemType, cpu_type: CpuType, _target_hz: u32, self_test: bool) -> Self {
+    pub fn new(system_type: SystemType, cpu_type: CpuType, _target_hz: u32, self_test: bool, audio_producer: AudioProducer, sample_rate: u32) -> Self {
         Self {
             system_type,
             cpu_type,
-            bus: Bus::new(system_type, cpu_type, self_test),
+            bus: Bus::new(system_type, cpu_type, self_test, audio_producer, sample_rate),
             pc: 0,
             cycles: 0,
             // target_hz,
