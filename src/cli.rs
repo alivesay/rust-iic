@@ -93,4 +93,8 @@ pub struct Args {
     /// Enable serial loopback mode (for diagnostic testing with loopback cable)
     #[arg(long, conflicts_with = "modem")]
     pub serial_loopback: bool,
+
+    /// Enable ZIP CHIP II-8 accelerator (8MHz, toggle with Ctrl+Z)
+    #[arg(long)]
+    pub zip: bool,
 }

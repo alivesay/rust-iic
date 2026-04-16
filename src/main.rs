@@ -101,6 +101,12 @@ fn main() -> Result<(), Error> {
         println!("Serial loopback mode enabled on both ports");
     }
 
+    // ZIP CHIP II-8 (Model 8000) accelerator
+    if args.zip {
+        cpu.bus.iou.set_zip_enabled(true);
+        println!("ZIP CHIP II-8 enabled (8MHz) - Press ESC during boot to disable, Ctrl+Z to toggle");
+    }
+
     // Load ROM
     let iic_rom_file = include_bytes!("../iic3.bin");
     let iic_rom = rom::ROM::load_from_bytes(iic_rom_file, cpu.system_type).unwrap();
@@ -208,10 +214,14 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
         // Fast disk mode: run extra cycles when motor spinning AND not writing
         let iwm = &app.cpu.bus.iou.iwm;
         let iwm_fast = iwm.fast_disk && iwm.motor_on && !iwm.write_mode;
+        
+        // ZIP CHIP: multiply effective cycles when accelerated
+        let zip_multiplier = app.cpu.bus.iou.zip.speed_multiplier() as u64;
+        
         let effective_cpf = if iwm_fast {
             cycles_per_frame * 8
         } else {
-            cycles_per_frame
+            cycles_per_frame * zip_multiplier
         };
 
         if app.window.is_some() {

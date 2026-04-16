@@ -4,14 +4,15 @@
 //           halation via blur texture, raster bloom, energy-conserving shadow mask.
 //
 // Bindings:
-//   0: intermediate texture  1: sampler  2: uniforms  3: blur_texture  4: ShaderParams
+//   0: intermediate texture  1: sampler  2: uniforms  3: blur_texture  4: ShaderParams  5: glow_texture
 
 struct ShaderParams {
     group0: vec4<f32>,  // CRTgamma, monitorgamma, d, R
     group1: vec4<f32>,  // cornersize, cornersmooth, overscan_x, overscan_y
     group2: vec4<f32>,  // aperture_strength, aperture_brightboost, scanline_weight, lum
     group3: vec4<f32>,  // curvature_on, saturation, halation, rasterbloom
-    group4: vec4<f32>,  // blur_width, mask_type, reserved, reserved
+    group4: vec4<f32>,  // blur_width, mask_type, vignette, phosphor
+    group5: vec4<f32>,  // glow, _pad1, _pad2, _pad3
 };
 
 struct VertexOutput {
@@ -30,6 +31,7 @@ struct Uniforms {
 @group(0) @binding(2) var<uniform> uniforms: Uniforms;
 @group(0) @binding(3) var r_blur: texture_2d<f32>;
 @group(0) @binding(4) var<uniform> params: ShaderParams;
+@group(0) @binding(5) var r_glow: texture_2d<f32>;
 
 @vertex
 fn vs_main(@location(0) position: vec2<f32>) -> VertexOutput {
@@ -206,6 +208,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let rbloom_amt = params.group3.w / 10.0;  // deluxe divides by 10
     let blur_w    = params.group4.x;
     let mask_type = params.group4.y;
+    let vignette_amt = params.group4.z;
+    let glow_amt  = params.group5.x;
 
     let ovs = vec2<f32>(ovs_x, ovs_y);
     let input_size = vec2<f32>(src_w, src_h);
@@ -310,11 +314,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var mul_res = (col * w1 + col2 * w2).rgb;
 
-    // --- Halation: mix in pre-blurred image from Gaussian blur passes ---
+    // --- Halation: ADDITIVE blend of pre-blurred glow ---
     let blur_uv = emu_to_tex(xy0, cr_left, cr_top, content_span);
     let blur_raw = textureSampleLevel(r_blur, r_sampler, blur_uv, 0.0).rgb;
     let blur = pow(max(blur_raw, vec3<f32>(0.0)), vec3<f32>(CRTgamma));
-    mul_res = mix(mul_res, blur, halation_amt) * vec3<f32>(cval * rbloom);
+
+    // --- Fullscreen CRT glow: larger, softer bloom ---
+    // Glow is already gamma-correct from gauss.wgsl, convert to linear for additive blend
+    let glow_raw = textureSampleLevel(r_glow, r_sampler, blur_uv, 0.0).rgb;
+    var glow = pow(max(glow_raw, vec3<f32>(0.0)), vec3<f32>(2.2));
+    
+    // Boost glow saturation to preserve color when averaging blurs out hue
+    // This makes the glow tinted by the dominant colors rather than grey/white
+    let glow_lum = dot(glow, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let glow_sat_boost = 2.0;  // Boost saturation 2x to counteract blur desaturation
+    glow = mix(vec3<f32>(glow_lum), glow, glow_sat_boost);
+    glow = max(glow, vec3<f32>(0.0));  // Clamp negative values from over-saturation
+
+    // Add halation to base image (halation goes through shadow mask)
+    // Glow is added AFTER shadow mask to avoid mask pattern in the soft bloom
+    mul_res = (mul_res + blur * halation_amt) * vec3<f32>(cval * rbloom);
 
     // --- Energy-conserving shadow mask (from deluxe) ---
     // Halve position for HiDPI/Retina (physical pixels are 2x logical)
@@ -330,7 +349,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ifbright = 1.0 / fbright;
     // Bright mask pixel color (energy-conserving)
     let chi = ifbright * aperture_average * mul_res - (ifbright - 1.0) * clow;
-    let cout_masked = mix(clow, chi, mask_rgb);
+    var cout_masked = mix(clow, chi, mask_rgb);
+
+    // Add fullscreen glow AFTER shadow mask (glow bypasses mask for smooth bloom)
+    cout_masked = cout_masked + glow * glow_amt * 0.1 * cval * rbloom;
 
     // Output gamma
     var result = pow(max(cout_masked, vec3<f32>(0.0)), vec3<f32>(1.0 / mgamma));
@@ -338,6 +360,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Saturation
     let l = dot(result, vec3<f32>(0.2126, 0.7152, 0.0722));
     result = mix(vec3<f32>(l), result, SATURATION);
+
+    // Vignette effect (soft darkening towards edges, never full black)
+    if vignette_amt > 0.0 {
+        // Distance from center in emulator UV space
+        let vig_uv = emu_uv - vec2<f32>(0.5);
+        // Squared distance (0 at center, 0.5 at corners)
+        let vig_dist = dot(vig_uv, vig_uv);
+        // Smooth falloff - starts early (0.05) for larger coverage
+        // vignette_amt controls both intensity and spread
+        let falloff = smoothstep(0.0, 0.3, vig_dist);
+        // Allow up to 85% darkening at max slider, min brightness 15%
+        let max_darken = min(vignette_amt * 0.425, 0.85);
+        let vig = 1.0 - max_darken * falloff;
+        result = result * vig;
+    }
 
     return vec4<f32>(clamp(result, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }

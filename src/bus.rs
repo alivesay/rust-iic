@@ -218,14 +218,20 @@ impl Bus {
 
     pub fn handle_iic_read(&mut self, addr: u16) -> u8 {
         match addr {
-            0xC000..=0xC0FF => self.iou.ss_read(addr),
+            0xC000..=0xC0FF => {
+                self.iou.zip.io_access();  // ZIP Chip: slow down for I/O
+                self.iou.ss_read(addr)
+            },
             _ => self.mmu.read_byte(&self.iou, addr),
         }
     }
 
     pub fn handle_iic_write(&mut self, addr: u16, value: u8) -> u8 {
         match addr {
-            0xC000..=0xC0FF => self.iou.ss_write(addr, value),
+            0xC000..=0xC0FF => {
+                self.iou.zip.io_access();  // ZIP Chip: slow down for I/O
+                self.iou.ss_write(addr, value)
+            },
             _ => {
                 let video_mode = self.iou.video_mode.get();
                 let is_page2 = (video_mode & VideoModeMask::PAGE2) != 0;
@@ -282,6 +288,7 @@ impl Bus {
         self.iou.mouse.tick(cycles);
         self.iou.iwm.tick(cycles);
         self.iou.scc.tick(cycles);
+        self.iou.zip.tick();  // ZIP Chip slowdown counter
         if self.iou.check_interrupts() {
             self.interrupts.request_irq();
         }
