@@ -1,12 +1,13 @@
 use bytemuck::{Pod, Zeroable};
 
 /// CRT-Geom-Deluxe shader parameters.
-/// GPU layout: 5 × vec4<f32> = 20 floats.
+/// GPU layout: 6 × vec4<f32> = 24 floats.
 ///   group0: crt_gamma, monitor_gamma, distance, radius
 ///   group1: corner_size, corner_smooth, overscan_x, overscan_y
 ///   group2: aperture_strength, aperture_brightboost, scanline_weight, luminance
 ///   group3: curvature_on, saturation, halation, rasterbloom
-///   group4: blur_width, mask_type, reserved, reserved
+///   group4: blur_width, mask_type, vignette, phosphor
+///   group5: glow, _pad1, _pad2, _pad3
 #[derive(Clone, Debug)]
 pub struct ShaderParams {
     // group0
@@ -32,8 +33,11 @@ pub struct ShaderParams {
     // group4
     pub blur_width: f32,
     pub mask_type: f32,
-    pub _reserved0: f32,
-    pub _reserved1: f32,
+    pub vignette: f32,
+    pub phosphor: f32,
+    // group5
+    pub glow: f32,
+    pub glow_width: f32,
 }
 
 impl Default for ShaderParams {
@@ -41,7 +45,7 @@ impl Default for ShaderParams {
         Self {
             crt_gamma: 2.4,
             monitor_gamma: 2.2,
-            distance: 1.37,
+            distance: 3.00,
             radius: 1.3,
             corner_size: 0.001,
             corner_smooth: 2000.0,
@@ -52,13 +56,16 @@ impl Default for ShaderParams {
             scanline_weight: 0.245,
             luminance: 0.0,
             curvature: 1.0,
+
             saturation: 1.0,
-            halation: 0.01,
+            halation: 0.75,
             rasterbloom: 0.01,
-            blur_width: 0.7,
+            blur_width: 0.35,
             mask_type: 3.0,
-            _reserved0: 0.0,
-            _reserved1: 0.0,
+            vignette: 1.0,
+            phosphor: 0.68,
+            glow: 0.0065,
+            glow_width: 9.5,
         }
     }
 }
@@ -66,7 +73,7 @@ impl Default for ShaderParams {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ShaderParamsGpu {
-    pub data: [f32; 20],
+    pub data: [f32; 24],
 }
 
 impl ShaderParams {
@@ -77,7 +84,8 @@ impl ShaderParams {
                 self.corner_size, self.corner_smooth, self.overscan_x, self.overscan_y,
                 self.aperture_strength, self.aperture_brightboost, self.scanline_weight, self.luminance,
                 self.curvature, self.saturation, self.halation, self.rasterbloom,
-                self.blur_width, self.mask_type, self._reserved0, self._reserved1,
+                self.blur_width, self.mask_type, self.vignette, self.phosphor,
+                self.glow, self.glow_width, 0.0, 0.0,  // group5 with padding
             ],
         }
     }
@@ -114,15 +122,22 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
 
                 ui.separator();
                 ui.heading("Halation & Bloom");
-                changed |= ui.add(egui::Slider::new(&mut params.halation, 0.0..=0.3).text("Halation")).changed();
+                changed |= ui.add(egui::Slider::new(&mut params.halation, 0.0..=2.0).text("Halation")).changed();
+                changed |= ui.add(egui::Slider::new(&mut params.blur_width, 0.2..=3.0).text("Halation Width")).changed();
+                changed |= ui.add(egui::Slider::new(&mut params.glow, 0.0..=0.25).text("Glow")).changed();
+                changed |= ui.add(egui::Slider::new(&mut params.glow_width, 0.5..=10.0).text("Glow Width")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.rasterbloom, 0.0..=1.0).text("Raster Bloom")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.blur_width, 0.1..=4.0).text("Blur Width")).changed();
 
                 ui.separator();
                 ui.heading("Color");
                 changed |= ui.add(egui::Slider::new(&mut params.crt_gamma, 0.7..=4.0).text("CRT Gamma")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.monitor_gamma, 0.7..=4.0).text("Monitor Gamma")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.saturation, 0.0..=2.0).text("Saturation")).changed();
+
+                ui.separator();
+                ui.heading("Effects");
+                changed |= ui.add(egui::Slider::new(&mut params.vignette, 0.0..=3.0).text("Vignette Strength")).changed();
+                changed |= ui.add(egui::Slider::new(&mut params.phosphor, 0.0..=0.95).text("Phosphor Persistence")).changed();
 
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -150,6 +165,10 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
                         println!("rasterbloom        = {:.2}", params.rasterbloom);
                         println!("blur_width         = {:.1}", params.blur_width);
                         println!("mask_type          = {:.0}", params.mask_type);
+                        println!("vignette           = {:.2}", params.vignette);
+                        println!("phosphor           = {:.2}", params.phosphor);
+                        println!("glow               = {:.2} (effective {:.3})", params.glow, params.glow * 0.1);
+                        println!("glow_width         = {:.2}", params.glow_width);
                         println!("------------------------------");
                     }
                 });

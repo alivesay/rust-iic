@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, memexp::MemoryExpansion, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
+use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, memexp::MemoryExpansion, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
 
 macro_rules! set_lcram_mode {
   ($mem_state:expr, $mode:expr) => {{
@@ -47,6 +47,7 @@ pub struct IOU {
   pub mouse: Mouse,
   pub speaker: Speaker,
   pub memexp: MemoryExpansion, // Apple IIc Memory Expansion Card (Slot 4)
+  pub zip: ZipChip,  // ZIP Chip accelerator (optional)
   pub cycles: u64,
   pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
   pub floating_bus: u8,  // Last byte video hardware would read from RAM at current scan position
@@ -72,6 +73,7 @@ impl IOU {
           mouse: Mouse::new(),
           speaker: Speaker::new(audio_producer, sample_rate),
           memexp: MemoryExpansion::new(),
+          zip: ZipChip::new(false),  // Disabled by default, enabled via --zip
           cycles: 0,
           scan_cycle: 0,
           floating_bus: 0,
@@ -79,6 +81,11 @@ impl IOU {
           debug: false,
           self_test,
       }
+    }
+
+    /// Enable or disable the ZIP Chip accelerator.
+    pub fn set_zip_enabled(&mut self, present: bool) {
+        self.zip = ZipChip::new(present);
     }
 
     /// Reset IOU state as if the hardware reset line was asserted.
@@ -95,6 +102,7 @@ impl IOU {
 
         self.scc.reset();
         self.iwm.reset();
+        self.zip.reset();
     }
 
     #[rustfmt::skip]
@@ -274,7 +282,7 @@ impl IOU {
             0xC067 => (self.mouse.y_dir.get() as u8) << 7, //           RDMOUY1        C   R7  Mouse Y1 Direction (1 = down)
             0xC068 => 0x00, // STATEREG (IIGS) - Ignore on IIc
 
-            0xC0E0..=0xC0EF => self.iwm.access(addr, 0, false),
+            0xC0E0..=0xC0EF => self.iwm.access(addr, 0, false, self.floating_bus),
 
             // Slot 1 — SCC Channel A / Modem ($C098–$C09F)
             // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
@@ -468,7 +476,7 @@ impl IOU {
           },
 
 
-          0xC0E0..=0xC0EF => self.iwm.access(addr, val, true),
+          0xC0E0..=0xC0EF => self.iwm.access(addr, val, true, self.floating_bus),
 
           // Slot 1 — SCC Channel A / Modem ($C098–$C09F)
           // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)

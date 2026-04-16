@@ -788,6 +788,19 @@ impl App {
                 return;
             }
 
+            // ZIP CHIP: Ctrl+Z toggles acceleration
+            if self.modifiers.control_key() {
+                if let PhysicalKey::Code(KeyCode::KeyZ) = event.physical_key {
+                    self.cpu.bus.iou.zip.toggle();
+                    return;
+                }
+            }
+
+            // ZIP CHIP: ESC during boot window disables acceleration
+            if event.logical_key == Key::Named(NamedKey::Escape) {
+                self.cpu.bus.iou.zip.check_boot_escape();
+            }
+
             if let (Some(phys), Some(code)) = (physical_key_id, key_code) {
                 self.cpu
                     .bus

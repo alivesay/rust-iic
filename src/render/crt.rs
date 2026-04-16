@@ -22,7 +22,7 @@ pub struct CrtRenderer {
     bind_group: wgpu::BindGroup,
     tex_width: u32,
     tex_height: u32,
-    // Separable Gaussian blur
+    // Separable Gaussian blur (halation - 1/2 res)
     gauss_pipeline: wgpu::RenderPipeline,
     gauss_bind_group_layout: wgpu::BindGroupLayout,
     gauss_vertex_buffer: wgpu::Buffer,
@@ -36,6 +36,15 @@ pub struct CrtRenderer {
     // Final blur texture (vertical blur output, fed to CRT shader)
     blur_texture: wgpu::Texture,
     blur_view: wgpu::TextureView,
+    // Large glow (1/8 res for fullscreen CRT glow)
+    glowx_uniform_buffer: wgpu::Buffer,
+    glowy_uniform_buffer: wgpu::Buffer,
+    glowx_texture: wgpu::Texture,
+    glowx_view: wgpu::TextureView,
+    glowx_bind_group: wgpu::BindGroup,
+    glowy_bind_group: wgpu::BindGroup,
+    glow_texture: wgpu::Texture,
+    glow_view: wgpu::TextureView,
     // Mipmap generation (for rasterbloom avgbright sampling)
     mipgen_pipeline: wgpu::RenderPipeline,
     mipgen_bind_group_layout: wgpu::BindGroupLayout,
@@ -46,6 +55,18 @@ pub struct CrtRenderer {
     // Surface format for resize (currently using texture.format() instead)
     #[allow(dead_code)]
     surface_format: wgpu::TextureFormat,
+    // Phosphor persistence (ping-pong history buffers)
+    phosphor_pipeline: wgpu::RenderPipeline,
+    phosphor_bind_group_layout: wgpu::BindGroupLayout,
+    phosphor_vertex_buffer: wgpu::Buffer,
+    phosphor_uniform_buffer: wgpu::Buffer,
+    phosphor_history_a: wgpu::Texture,
+    phosphor_history_a_view: wgpu::TextureView,
+    phosphor_history_b: wgpu::Texture,
+    phosphor_history_b_view: wgpu::TextureView,
+    phosphor_bind_group_a: wgpu::BindGroup,  // reads A, writes B
+    phosphor_bind_group_b: wgpu::BindGroup,  // reads B, writes A
+    phosphor_frame_idx: std::cell::Cell<u32>,  // toggles 0/1 for ping-pong
 }
 
 #[repr(C)]
@@ -254,9 +275,9 @@ impl CrtRenderer {
             cache: None,
         });
 
-        // Gauss textures at 1/4 surface resolution for proper blur spread
-        let gauss_w = (surface_width / 4).max(1);
-        let gauss_h = (surface_height / 4).max(1);
+        // Gauss textures at 1/2 surface resolution for smoother blur
+        let gauss_w = (surface_width / 2).max(1);
+        let gauss_h = (surface_height / 2).max(1);
 
         // Gauss uniform buffers (direction + blur_width + source_size)
         let default_blur_width = shader_ui::ShaderParams::default().blur_width;
@@ -280,6 +301,34 @@ impl CrtRenderer {
         // Final blur texture (gaussy output, 1/4 resolution, no mipmaps)
         let (blur_texture, blur_view, _) = Self::create_intermediate(
             device, gauss_w, gauss_h, surface_format, 1,
+        );
+
+        // Glow textures at 1/8 surface resolution for larger fullscreen glow
+        let glow_w = (surface_width / 8).max(1);
+        let glow_h = (surface_height / 8).max(1);
+
+        // Glow uniform buffers (direction + blur_width + source_size)
+        let default_glow_width = shader_ui::ShaderParams::default().glow_width;
+        let glowx_uniforms: [f32; 4] = [1.0, 0.0, default_glow_width, glow_w as f32];
+        let glowx_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("glowx_uniform_buffer"),
+            contents: bytemuck::cast_slice(&glowx_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let glowy_uniforms: [f32; 4] = [0.0, 1.0, default_glow_width, glow_h as f32];
+        let glowy_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("glowy_uniform_buffer"),
+            contents: bytemuck::cast_slice(&glowy_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Glowx intermediate texture (1/8 resolution, no mipmaps)
+        let (glowx_texture, glowx_view, _) = Self::create_intermediate(
+            device, glow_w, glow_h, surface_format, 1,
+        );
+        // Final glow texture (glowy output, 1/8 resolution, no mipmaps)
+        let (glow_texture, glow_view, _) = Self::create_intermediate(
+            device, glow_w, glow_h, surface_format, 1,
         );
 
         // --- CRT composite pass ---
@@ -329,6 +378,16 @@ impl CrtRenderer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
                     },
                     count: None,
                 },
@@ -396,6 +455,14 @@ impl CrtRenderer {
             device, &gauss_bind_group_layout, &gaussx_view, &sampler, &gaussy_uniform_buffer,
         );
 
+        // Glow bind groups: glowx reads blur_texture, glowy reads glowx
+        let glowx_bind_group = Self::create_gauss_bind_group(
+            device, &gauss_bind_group_layout, &blur_view, &sampler, &glowx_uniform_buffer,
+        );
+        let glowy_bind_group = Self::create_gauss_bind_group(
+            device, &gauss_bind_group_layout, &glowx_view, &sampler, &glowy_uniform_buffer,
+        );
+
         let bind_group = Self::create_bind_group(
             device,
             &bind_group_layout,
@@ -404,6 +471,125 @@ impl CrtRenderer {
             &uniform_buffer,
             &blur_view,
             &shader_params_buffer,
+            &glow_view,
+        );
+
+        // --- Phosphor persistence pipeline ---
+        let phosphor_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/phosphor.wgsl"));
+
+        let phosphor_vertex_data: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
+        let phosphor_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("phosphor_vertex_buffer"),
+            contents: bytemuck::cast_slice(&phosphor_vertex_data),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        // Phosphor uniforms: decay factor
+        let phosphor_uniforms: [f32; 4] = [0.0, 0.0, 0.0, 0.0];  // decay=0 means disabled by default
+        let phosphor_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("phosphor_uniform_buffer"),
+            contents: bytemuck::cast_slice(&phosphor_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let phosphor_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("phosphor_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let phosphor_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("phosphor_pipeline_layout"),
+            bind_group_layouts: &[&phosphor_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let phosphor_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("phosphor_pipeline"),
+            layout: Some(&phosphor_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &phosphor_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &phosphor_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        // Phosphor history textures (same size as intermediate, no mipmaps)
+        let (phosphor_history_a, phosphor_history_a_view, _) =
+            Self::create_intermediate(device, surface_width, surface_height, surface_format, 1);
+        let (phosphor_history_b, phosphor_history_b_view, _) =
+            Self::create_intermediate(device, surface_width, surface_height, surface_format, 1);
+
+        // Phosphor bind groups for ping-pong
+        // A: reads intermediate + history_a, writes to history_b
+        let phosphor_bind_group_a = Self::create_phosphor_bind_group(
+            device, &phosphor_bind_group_layout, &intermediate_view, &phosphor_history_a_view,
+            &sampler, &phosphor_uniform_buffer,
+        );
+        // B: reads intermediate + history_b, writes to history_a
+        let phosphor_bind_group_b = Self::create_phosphor_bind_group(
+            device, &phosphor_bind_group_layout, &intermediate_view, &phosphor_history_b_view,
+            &sampler, &phosphor_uniform_buffer,
         );
 
         Self {
@@ -429,12 +615,31 @@ impl CrtRenderer {
             gaussy_bind_group,
             blur_texture,
             blur_view,
+            glowx_uniform_buffer,
+            glowy_uniform_buffer,
+            glowx_texture,
+            glowx_view,
+            glowx_bind_group,
+            glowy_bind_group,
+            glow_texture,
+            glow_view,
             mipgen_pipeline,
             mipgen_bind_group_layout,
             mipgen_vertex_buffer,
             mip_level_count,
             shader_params_buffer,
             surface_format,
+            phosphor_pipeline,
+            phosphor_bind_group_layout,
+            phosphor_vertex_buffer,
+            phosphor_uniform_buffer,
+            phosphor_history_a,
+            phosphor_history_a_view,
+            phosphor_history_b,
+            phosphor_history_b_view,
+            phosphor_bind_group_a,
+            phosphor_bind_group_b,
+            phosphor_frame_idx: std::cell::Cell::new(0),
         }
     }
 
@@ -462,7 +667,8 @@ impl CrtRenderer {
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT 
                  | wgpu::TextureUsages::TEXTURE_BINDING
-                 | wgpu::TextureUsages::COPY_DST,
+                 | wgpu::TextureUsages::COPY_DST
+                 | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         // Full view (all mip levels) for sampling
@@ -484,6 +690,7 @@ impl CrtRenderer {
         uniform_buffer: &wgpu::Buffer,
         bloom_view: &wgpu::TextureView,
         shader_params_buffer: &wgpu::Buffer,
+        glow_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("crt_bind_group"),
@@ -508,6 +715,10 @@ impl CrtRenderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: shader_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(glow_view),
                 },
             ],
         })
@@ -540,6 +751,38 @@ impl CrtRenderer {
         })
     }
 
+    fn create_phosphor_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        current_view: &wgpu::TextureView,
+        history_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("phosphor_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(current_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(history_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
     /// Call when the surface is resized to recreate the intermediate texture.
     /// Uniforms (content_rect) are now updated per-frame via update_content_rect.
     pub fn resize(
@@ -560,16 +803,16 @@ impl CrtRenderer {
         self.intermediate_view = view;
         self.intermediate_render_view = render_view;
 
-        // Recreate gaussx intermediate texture (1/4 resolution, no mipmaps)
-        let gauss_w = (width / 4).max(1);
-        let gauss_h = (height / 4).max(1);
+        // Recreate gaussx intermediate texture (1/2 resolution, no mipmaps)
+        let gauss_w = (width / 2).max(1);
+        let gauss_h = (height / 2).max(1);
         let (gaussx_tex, gaussx_v, _) = Self::create_intermediate(
             device, gauss_w, gauss_h, format, 1,
         );
         self.gaussx_texture = gaussx_tex;
         self.gaussx_view = gaussx_v;
 
-        // Recreate blur texture (gaussy output, 1/4 resolution, no mipmaps)
+        // Recreate blur texture (gaussy output, 1/2 resolution, no mipmaps)
         let (blur_tex, blur_v, _) = Self::create_intermediate(
             device, gauss_w, gauss_h, format, 1,
         );
@@ -590,7 +833,36 @@ impl CrtRenderer {
         queue.write_buffer(&self.gaussx_uniform_buffer, 12, bytemuck::bytes_of(&gw_f32));
         queue.write_buffer(&self.gaussy_uniform_buffer, 12, bytemuck::bytes_of(&gh_f32));
 
-        // Recreate CRT bind group (reads from intermediate + blur)
+        // Recreate glow textures (1/8 resolution for fullscreen glow)
+        let glow_w = (width / 8).max(1);
+        let glow_h = (height / 8).max(1);
+        let (glowx_tex, glowx_v, _) = Self::create_intermediate(
+            device, glow_w, glow_h, format, 1,
+        );
+        self.glowx_texture = glowx_tex;
+        self.glowx_view = glowx_v;
+
+        let (glow_tex, glow_v, _) = Self::create_intermediate(
+            device, glow_w, glow_h, format, 1,
+        );
+        self.glow_texture = glow_tex;
+        self.glow_view = glow_v;
+
+        // Recreate glow bind groups
+        self.glowx_bind_group = Self::create_gauss_bind_group(
+            device, &self.gauss_bind_group_layout, &self.blur_view, &self.sampler, &self.glowx_uniform_buffer,
+        );
+        self.glowy_bind_group = Self::create_gauss_bind_group(
+            device, &self.gauss_bind_group_layout, &self.glowx_view, &self.sampler, &self.glowy_uniform_buffer,
+        );
+
+        // Update source_size in glow uniforms
+        let glow_w_f32 = glow_w as f32;
+        let glow_h_f32 = glow_h as f32;
+        queue.write_buffer(&self.glowx_uniform_buffer, 12, bytemuck::bytes_of(&glow_w_f32));
+        queue.write_buffer(&self.glowy_uniform_buffer, 12, bytemuck::bytes_of(&glow_h_f32));
+
+        // Recreate CRT bind group (reads from intermediate + blur + glow)
         self.bind_group = Self::create_bind_group(
             device,
             &self.bind_group_layout,
@@ -599,7 +871,29 @@ impl CrtRenderer {
             &self.uniform_buffer,
             &self.blur_view,
             &self.shader_params_buffer,
+            &self.glow_view,
         );
+
+        // Recreate phosphor history textures at new resolution
+        let (hist_a, hist_a_view, _) = Self::create_intermediate(device, width, height, format, 1);
+        let (hist_b, hist_b_view, _) = Self::create_intermediate(device, width, height, format, 1);
+        self.phosphor_history_a = hist_a;
+        self.phosphor_history_a_view = hist_a_view;
+        self.phosphor_history_b = hist_b;
+        self.phosphor_history_b_view = hist_b_view;
+
+        // Recreate phosphor bind groups
+        self.phosphor_bind_group_a = Self::create_phosphor_bind_group(
+            device, &self.phosphor_bind_group_layout,
+            &self.intermediate_view, &self.phosphor_history_a_view,
+            &self.sampler, &self.phosphor_uniform_buffer,
+        );
+        self.phosphor_bind_group_b = Self::create_phosphor_bind_group(
+            device, &self.phosphor_bind_group_layout,
+            &self.intermediate_view, &self.phosphor_history_b_view,
+            &self.sampler, &self.phosphor_uniform_buffer,
+        );
+        self.phosphor_frame_idx.set(0);
     }
 
     /// Update the time uniform for flicker effects. Call once per frame.
@@ -615,6 +909,11 @@ impl CrtRenderer {
         // Update blur_width in gauss uniform buffers (offset 8 = third float)
         queue.write_buffer(&self.gaussx_uniform_buffer, 8, bytemuck::bytes_of(&params.blur_width));
         queue.write_buffer(&self.gaussy_uniform_buffer, 8, bytemuck::bytes_of(&params.blur_width));
+        // Update glow blur width (separate control from halation)
+        queue.write_buffer(&self.glowx_uniform_buffer, 8, bytemuck::bytes_of(&params.glow_width));
+        queue.write_buffer(&self.glowy_uniform_buffer, 8, bytemuck::bytes_of(&params.glow_width));
+        // Update phosphor decay (offset 0 = first float)
+        queue.write_buffer(&self.phosphor_uniform_buffer, 0, bytemuck::bytes_of(&params.phosphor));
     }
 
     /// Update the content rect and source dimensions based on actual blit geometry.
@@ -761,6 +1060,63 @@ impl CrtRenderer {
                 }
             }
 
+            // Pass 0.5: Phosphor persistence (blend current frame with decayed history)
+            // This runs after mip generation so we have the current frame ready.
+            // Result is copied back to intermediate for subsequent passes.
+            {
+                let frame_idx = self.phosphor_frame_idx.get();
+                let (bind_group, dst_view, dst_texture) = if frame_idx == 0 {
+                    (&self.phosphor_bind_group_a, &self.phosphor_history_b_view, &self.phosphor_history_b)
+                } else {
+                    (&self.phosphor_bind_group_b, &self.phosphor_history_a_view, &self.phosphor_history_a)
+                };
+                self.phosphor_frame_idx.set(1 - frame_idx);
+
+                // Phosphor blend pass
+                {
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("phosphor_render_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: dst_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    rpass.set_pipeline(&self.phosphor_pipeline);
+                    rpass.set_bind_group(0, bind_group, &[]);
+                    rpass.set_vertex_buffer(0, self.phosphor_vertex_buffer.slice(..));
+                    rpass.draw(0..3, 0..1);
+                }
+
+                // Copy phosphor result back to intermediate (level 0 only)
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: dst_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.intermediate_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: self.tex_width,
+                        height: self.tex_height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+
             // Pass 1: Gaussian horizontal blur (intermediate → gaussx_texture)
             {
                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -807,7 +1163,53 @@ impl CrtRenderer {
                 rpass.draw(0..3, 0..1);
             }
 
-        // Pass 3: CRT-Geom-Deluxe composite (intermediate + blur → screen)
+            // Pass 2.5: Glow horizontal blur (blur_texture → glowx_texture)
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("glowx_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.glowx_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rpass.set_pipeline(&self.gauss_pipeline);
+                rpass.set_bind_group(0, &self.glowx_bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+                rpass.draw(0..3, 0..1);
+            }
+
+            // Pass 2.6: Glow vertical blur (glowx_texture → glow_texture)
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("glowy_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.glow_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rpass.set_pipeline(&self.gauss_pipeline);
+                rpass.set_bind_group(0, &self.glowy_bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+                rpass.draw(0..3, 0..1);
+            }
+
+        // Pass 3: CRT-Geom-Deluxe composite (intermediate + blur + glow → screen)
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("crt_render_pass"),

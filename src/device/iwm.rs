@@ -989,12 +989,14 @@ impl Iwm {
         }
     }
 
-    pub fn read_data(&mut self) -> u8 {
+    pub fn read_data(&mut self, floating_bus: u8) -> u8 {
         let d = self.di();
         if !self.drives[d].has_disk() {
-            // No disk: OLD behavior returned 0
-            if self.debug { println!("IWM: read_data() NO DISK on drive {}", d + 1); }
-            return 0;
+            // No disk: return floating bus value (video RAM data at current scan position).
+            // Real hardware: read head picks up noise; floating bus is a reasonable approximation.
+            // Bit 7 will randomly be set, allowing BPL loops to eventually exit.
+            if self.debug { println!("IWM: read_data() NO DISK on drive {} -> floating_bus {:02X}", d + 1, floating_bus); }
+            return floating_bus;
         }
 
         if self.motor_on {
@@ -1049,7 +1051,7 @@ impl Iwm {
         0
     }
 
-    pub fn access(&mut self, addr: u16, val: u8, write: bool) -> u8 {
+    pub fn access(&mut self, addr: u16, val: u8, write: bool, floating_bus: u8) -> u8 {
         self.cycles_since_last_read = 0;
 
         match addr & 0xF {
@@ -1185,11 +1187,11 @@ impl Iwm {
              0
         } else if (addr & 0xF) < 0xC {
              // Addresses 0x0-0xB (phases, motor, drive select) don't return IWM data
-             // Return floating bus / last value
-             0xFF
+             // Return floating bus value
+             floating_bus
         } else {
              // Read register based on current L7, L6, Motor-On per IWM spec page 7:
-             //   L7=0, L6=0, Motor=0  →  all ones
+             //   L7=0, L6=0, Motor=0  →  floating bus
              //   L7=0, L6=0, Motor=1  →  data register (Read)
              //   L7=0, L6=1, x        →  status register (Write-Protect Sense)
              //   L7=1, L6=0, x        →  write-handshake register (Write)
@@ -1198,12 +1200,12 @@ impl Iwm {
              match (self.q7, self.q6) {
                  (false, false) => {
                      if self.motor_on {
-                         let result = self.read_data();
+                         let result = self.read_data(floating_bus);
                          if self.debug { println!("IWM DATA READ: q6=0 q7=0 motor=1 drive={} result={:02X} has_disk={}", d+1, result, self.drives[d].has_disk()); }
                          result
                      } else {
-                         if self.debug { println!("IWM DATA READ: q6=0 q7=0 motor=0 -> 0"); }
-                         0  // OLD behavior: motor off returns 0
+                         if self.debug { println!("IWM DATA READ: q6=0 q7=0 motor=0 -> floating_bus {:02X}", floating_bus); }
+                         floating_bus  // Motor off returns floating bus
                      }
                  },
                  (false, true) => {

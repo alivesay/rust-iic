@@ -5,3 +5,4 @@ pub mod memexp;
 pub mod mouse;
 pub mod scc;
 pub mod speaker;
+pub mod zip;

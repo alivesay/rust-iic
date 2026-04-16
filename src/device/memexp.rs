@@ -107,21 +107,25 @@ impl MemoryExpansion {
     }
     
     /// Enable or disable the card
+    #[allow(dead_code)]
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
     
     /// Check if card is enabled
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
     
     /// Get installed RAM size in bytes
+    #[allow(dead_code)]
     pub fn ram_size(&self) -> usize {
         self.ram.len()
     }
     
     /// Reset the card state (address registers only, RAM preserved)
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.addr_lo = 0;
         self.addr_mid = 0;
