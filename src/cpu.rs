@@ -547,18 +547,6 @@ impl CPU {
             println!("==> Mockingboard slot 5 activated");
         }
         
-        // Check for ProDOS MLI calls at $BF00 and log them
-        if self.pc == 0xBF00 {
-            if let Some(mli_info) = check_mli_calls(&mut self.bus, self.pc, self.regs.sp) {
-                // Check for custom commands first (RUSTIIC, DEBUG, etc.)
-                if !check_custom_command_mli(&mut self.bus, &mli_info) {
-                    // Not a custom command - log normal MLI call
-                    let details = mli_info.read_details(&mut self.bus);
-                    println!("==> MLI ${:02X} {}", mli_info.call_num, details);
-                }
-            }
-        }
-        
         // Legacy custom command check - now uses MLI hooking instead
         // (pending_custom_command_check is no longer used)
 

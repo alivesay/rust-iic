@@ -43,6 +43,7 @@ pub struct ShaderParams {
     pub flicker: f32,
     // group6
     pub chromatic_aberration: f32,
+    pub ntsc_filter: f32,
 }
 
 impl Default for ShaderParams {
@@ -62,7 +63,7 @@ impl Default for ShaderParams {
             luminance: 0.0,
             curvature: 1.0,
 
-            saturation: 1.0,
+            saturation: 1.1,
             halation: 0.75,
             rasterbloom: 0.32,
             blur_width: 0.35,
@@ -74,6 +75,7 @@ impl Default for ShaderParams {
             vignette_opacity: 0.25,
             flicker: 0.4,
             chromatic_aberration: 0.75,
+            ntsc_filter: 0.5,  // NTSC notch filter strength (0=off, 1=full)
         }
     }
 }
@@ -94,7 +96,7 @@ impl ShaderParams {
                 self.curvature, self.saturation, self.halation, self.rasterbloom,
                 self.blur_width, self.mask_type, self.vignette, self.phosphor,
                 self.glow, self.glow_width, self.vignette_opacity, self.flicker,  // group5
-                self.chromatic_aberration, 0.0, 0.0, 0.0,  // group6
+                self.chromatic_aberration, self.ntsc_filter, 0.0, 0.0,  // group6
             ],
         }
     }
@@ -150,6 +152,7 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
                 changed |= ui.add(egui::Slider::new(&mut params.phosphor, 0.0..=0.95).text("Phosphor Persistence")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.flicker, 0.0..=1.0).text("CRT Flicker")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.chromatic_aberration, 0.0..=1.0).text("Chromatic Aberration")).changed();
+                changed |= ui.add(egui::Slider::new(&mut params.ntsc_filter, 0.0..=1.0).text("NTSC Filter")).changed();
 
                 ui.separator();
                 ui.horizontal(|ui| {
