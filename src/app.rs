@@ -23,6 +23,7 @@ use winit::platform::macos::WindowExtMacOS;
 
 use crate::cli::ShaderType;
 use crate::cpu::CPU;
+use crate::cpu_monitor::{CpuMonitor, CpuState};
 use crate::monitor::Monitor;
 use crate::render::{
     blit_scaled, hit_test_col_button, hit_test_drive_icon, hit_test_power_button,
@@ -53,6 +54,7 @@ pub struct App {
     pub egui_renderer: Option<egui_wgpu::Renderer>,
     pub shader_params: ShaderParams,
     pub show_shader_ui: bool,
+    pub cpu_monitor: CpuMonitor,
 }
 
 impl App {
@@ -80,6 +82,7 @@ impl App {
             egui_renderer: None,
             shader_params: ShaderParams::default(),
             show_shader_ui: false,
+            cpu_monitor: CpuMonitor::new(),
         }
     }
 
@@ -448,13 +451,58 @@ impl App {
                 crt.update_monochrome(pixels.queue(), self.cpu.bus.video.monochrome);
                 crt.update_shader_params(pixels.queue(), &self.shader_params);
 
-                // Run egui UI
-                let egui_output = if self.show_shader_ui {
+                // Run egui UI (for shader UI and/or CPU monitor)
+                let egui_output = if self.show_shader_ui || self.cpu_monitor.visible {
                     if let Some(egui_state) = self.egui_state.as_mut() {
                         let window = self.window.as_ref().unwrap();
                         let raw_input = egui_state.take_egui_input(window.as_ref());
+                        
+                        // Prepare CPU state for monitor
+                        let cpu_state = CpuState {
+                            pc: self.cpu.pc,
+                            a: self.cpu.regs.a,
+                            x: self.cpu.regs.x,
+                            y: self.cpu.regs.y,
+                            sp: self.cpu.regs.sp,
+                            p: self.cpu.p.bits(),
+                            cycles: self.cpu.cycles,
+                        };
+                        
+                        // Copy the last trace entry from CPU to monitor
+                        if self.cpu.capture_trace && self.cpu_monitor.enabled {
+                            self.cpu_monitor.record(self.cpu.last_trace);
+                        }
+                        
+                        // Snapshot memory for the monitor (stack + current memory page)
+                        let mut memory_snapshot = [0u8; 512]; // Stack page + one more page
+                        for i in 0..256 {
+                            memory_snapshot[i] = self.cpu.bus.read_byte(0x0100 + i as u16);
+                        }
+                        let mem_page = self.cpu_monitor.memory_page;
+                        let page_base = (mem_page as u16) << 8;
+                        for i in 0..256 {
+                            memory_snapshot[256 + i] = self.cpu.bus.read_byte(page_base + i as u16);
+                        }
+                        
                         let output = self.egui_ctx.run(raw_input, |ctx| {
-                            shader_ui::render_shader_ui(ctx, &mut self.shader_params, &mut self.show_shader_ui);
+                            if self.show_shader_ui {
+                                shader_ui::render_shader_ui(ctx, &mut self.shader_params, &mut self.show_shader_ui);
+                            }
+                            if self.cpu_monitor.visible {
+                                // Memory reader from snapshot
+                                let memory_reader = |addr: u16| -> u8 {
+                                    // Stack page
+                                    if addr >= 0x0100 && addr < 0x0200 {
+                                        memory_snapshot[(addr - 0x0100) as usize]
+                                    // Current memory page
+                                    } else if addr >= page_base && addr < page_base + 256 {
+                                        memory_snapshot[256 + (addr - page_base) as usize]
+                                    } else {
+                                        0x00 // Unsnapshotted memory
+                                    }
+                                };
+                                self.cpu_monitor.render(ctx, &cpu_state, &memory_reader);
+                            }
                         });
                         egui_state.handle_platform_output(window.as_ref(), output.platform_output.clone());
                         let ppp = output.pixels_per_point;
@@ -676,6 +724,18 @@ impl App {
                     if self.show_shader_ui { "ON" } else { "OFF" }
                 );
             }
+            return;
+        }
+
+        // F12 toggles CPU monitor
+        if event.logical_key == Key::Named(NamedKey::F12) && event.state.is_pressed() {
+            self.cpu_monitor.toggle();
+            // Enable/disable trace capture on CPU
+            self.cpu.capture_trace = self.cpu_monitor.enabled;
+            println!(
+                "CPU Monitor: {}",
+                if self.cpu_monitor.visible { "ON" } else { "OFF" }
+            );
             return;
         }
 
