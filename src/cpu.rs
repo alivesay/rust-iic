@@ -245,6 +245,12 @@ impl CPU {
         // Reset IOU (soft switches) — on real hardware the reset line resets the IOU chip
         self.bus.iou.reset();
 
+        // Clear and re-register timed hooks (mockingboard deactivated on IOU reset)
+        self.hooks.clear_timed_hooks();
+        if self.bus.iou.mockingboard.is_enabled() {
+            self.hooks.register_mockingboard_hook(self.cycles, 3_000_000);
+        }
+
         self.pc = self.bus.read_word(0xFFFC);
 
         println!(
@@ -271,6 +277,12 @@ impl CPU {
         self.cycles = 0;
         self.bus.iou.cycles = 0;
         self.bus.iou.scan_cycle = 0;
+
+        // Clear and re-register timed hooks (mockingboard deactivated on IOU reset)
+        self.hooks.clear_timed_hooks();
+        if self.bus.iou.mockingboard.is_enabled() {
+            self.hooks.register_mockingboard_hook(0, 3_000_000);
+        }
 
         self.pc = self.bus.read_word(0xFFFC);
 

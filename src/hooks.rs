@@ -211,14 +211,21 @@ impl HookManager {
         !self.timed_hooks.is_empty()
     }
 
+    /// Clear all timed hooks (call on reset)
+    pub fn clear_timed_hooks(&mut self) {
+        self.timed_hooks.clear();
+    }
+
     /// Register the Mockingboard activation hook using a timer.
     /// This fires after enough cycles for DOS/ProDOS to fully initialize.
     /// ~3 seconds at 1MHz = ~3,000,000 cycles is safe for most boot scenarios.
-    pub fn register_mockingboard_hook(&mut self, delay_cycles: u64) {
-        println!("Mockingboard timed activation: will activate after {} cycles (~{:.1}s at 1MHz)",
-            delay_cycles, delay_cycles as f64 / 1_000_000.0);
+    /// `current_cycle` allows registering relative to current time (for reset handling).
+    pub fn register_mockingboard_hook(&mut self, current_cycle: u64, delay_cycles: u64) {
+        let trigger_at = current_cycle + delay_cycles;
+        println!("Mockingboard timed activation: will activate at cycle {} (~{:.1}s from now at 1MHz)",
+            trigger_at, delay_cycles as f64 / 1_000_000.0);
         self.add_timed_hook(
-            delay_cycles,
+            trigger_at,
             "mockingboard_activate",
             |cycle| {
                 log::info!("Timed hook triggered at cycle {}: Mockingboard activating", cycle);
