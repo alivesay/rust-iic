@@ -1,6 +1,7 @@
 use crate::bus::Bus;
 use crate::device::speaker::AudioProducer;
 use crate::disassembler::{Disassembler, SymbolTable};
+use crate::hooks::{HookContext, HookManager};
 use crate::interrupts::InterruptType;
 use crate::rom::ROM;
 use bitflags::bitflags;
@@ -104,6 +105,9 @@ pub struct CPU {
     pub entry_point_override: Option<u16>,
     pub debug: bool,
     extra_cycles: u64,  // Extra cycles for taken branches / page crosses
+    
+    /// Hook manager for ROM/execution hooks
+    pub hooks: HookManager,
 }
 
 impl CPU {
@@ -121,6 +125,7 @@ impl CPU {
             symbol_table: SymbolTable::new(),
             debug: false,
             extra_cycles: 0,
+            hooks: HookManager::new(),
         }
     }
 
@@ -443,6 +448,28 @@ impl CPU {
             } else {
                 self.bus.tick(1);
                 return 1;
+            }
+        }
+
+        // Check for execution hooks at current PC
+        if self.hooks.has_hooks_at(self.pc) {
+            let ctx = HookContext {
+                pc: self.pc,
+                a: self.regs.a,
+                x: self.regs.x,
+                y: self.regs.y,
+                sp: self.regs.sp,
+                p: self.p.bits(),
+                cycles: self.cycles,
+            };
+            let _skip = self.hooks.execute_hooks(&ctx);
+            // Note: skip functionality would require more complex handling
+            // For now, hooks are for side effects only (like activating Mockingboard)
+            
+            // Process pending actions from hooks
+            if self.hooks.pending_mockingboard_activate {
+                self.hooks.pending_mockingboard_activate = false;
+                self.bus.iou.mockingboard.activate();
             }
         }
 

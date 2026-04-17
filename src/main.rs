@@ -12,6 +12,7 @@ mod cli;
 mod cpu;
 mod device;
 mod disassembler;
+mod hooks;
 mod interrupts;
 mod iou;
 mod memory;
@@ -112,7 +113,14 @@ fn main() -> Result<(), Error> {
         let (mb_producer, mb_sample_rate, mb_audio) = create_audio();
         cpu.bus.iou.mockingboard = crate::device::mockingboard::Mockingboard::with_audio(mb_producer, mb_sample_rate);
         cpu.bus.iou.set_mockingboard_enabled(true);
+        
+        // Use hook-based activation: activate at $FA6F after mouse firmware init
+        // This is more precise than the timer-based approach
+        cpu.bus.iou.mockingboard.set_hook_activation(true);
+        cpu.hooks.register_mockingboard_hook();
+        
         println!("Mockingboard enabled in slot 4 (memory expansion disabled)");
+        println!("  → Hook-based activation: will activate after mouse firmware init at $FA6F");
         Some(mb_audio)
     } else {
         None
