@@ -110,6 +110,38 @@ impl Bus {
         }
     }
 
+    /// Write a byte without triggering soft switch side effects
+    /// Used for injecting data from emulator (custom commands, etc.)
+    /// Respects RAMRD/RAMWRT soft switches to write to correct bank
+    pub fn poke_byte(&mut self, addr: u16, value: u8) {
+        if self.system_type == SystemType::AppleIIc {
+            if addr >= 0xC000 && addr <= 0xC0FF {
+                // Skip soft switch writes - can't poke I/O space safely
+                return;
+            }
+            // Use the same memory path as normal writes (respects banking)
+            if addr < 0xC000 {
+                let mem_state = self.iou.mem_state.get();
+                let video_mode = self.iou.video_mode.get();
+                let is_page2 = (video_mode & crate::video::VideoModeMask::PAGE2) != 0;
+                let is_hires = (video_mode & crate::video::VideoModeMask::HIRES) != 0;
+                let is_80store = self.iou.is_80store.get();
+
+                self.mmu.write_byte(
+                    &mut self.iou,
+                    addr,
+                    value,
+                    mem_state,
+                    is_80store,
+                    is_page2,
+                    is_hires,
+                );
+            }
+        } else {
+            self.bus_ram.write_byte(addr, value);
+        }
+    }
+
     pub fn update_interrupts(&mut self) {
         if self.system_type == SystemType::AppleIIc {
             self.interrupts.irq = self.iou.check_interrupts();
