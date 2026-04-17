@@ -352,7 +352,7 @@ const OPCODES: [(u8, &str, AddressingMode); 256] = [
 pub struct Disassembler;
 
 impl Disassembler {
-    pub fn disassemble(bus: &Bus, addr: u16) -> String {
+    pub fn disassemble(bus: &mut Bus, addr: u16) -> String {
         let opcode = bus.peek_byte(addr);
         let (mnemonic, mode) = Disassembler::lookup_opcode(opcode);
         let operand_bytes = mode.operand_bytes();

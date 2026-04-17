@@ -622,6 +622,7 @@ impl App {
                                             self.last_drive_click = None;
                                             let (has_disk, _, _) =
                                                 self.cpu.bus.iou.iwm.drive_status(drive);
+                                            println!("Drive {}: double-click detected, has_disk={}", drive + 1, has_disk);
                                             if has_disk {
                                                 self.cpu.bus.iou.iwm.eject_disk(drive);
                                                 println!("Drive {}: ejected", drive + 1);

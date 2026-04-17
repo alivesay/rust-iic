@@ -97,13 +97,13 @@ impl Bus {
         }
     }
 
-    pub fn peek_byte(&self, addr: u16) -> u8 {
+    pub fn peek_byte(&mut self, addr: u16) -> u8 {
         if self.system_type == SystemType::AppleIIc {
             if addr >= 0xC000 && addr <= 0xC0FF {
                 // TODO: For now, return 0 for soft switches to avoid side effects
                 0x00
             } else {
-                self.mmu.read_byte(&self.iou, addr)
+                self.mmu.read_byte(&mut self.iou, addr)
             }
         } else {
             self.bus_ram.read_byte(addr)
@@ -128,7 +128,7 @@ impl Bus {
                 }
                 result
             } else {
-                self.mmu.read_byte(&self.iou, addr)
+                self.mmu.read_byte(&mut self.iou, addr)
             }
         } else {
             // #[cfg(feature = "klauss-interrupt-test")]
@@ -162,11 +162,13 @@ impl Bus {
                 let is_page2 = (video_mode & crate::video::VideoModeMask::PAGE2) != 0;
                 let is_hires = (video_mode & crate::video::VideoModeMask::HIRES) != 0;
                 let is_80store = self.iou.is_80store.get();
+                let mem_state = self.iou.mem_state.get();
 
                 self.mmu.write_byte(
+                    &mut self.iou,
                     addr,
                     value,
-                    self.iou.mem_state.get(),
+                    mem_state,
                     is_80store,
                     is_page2,
                     is_hires,
@@ -222,7 +224,7 @@ impl Bus {
                 self.iou.zip.io_access();  // ZIP Chip: slow down for I/O
                 self.iou.ss_read(addr)
             },
-            _ => self.mmu.read_byte(&self.iou, addr),
+            _ => self.mmu.read_byte(&mut self.iou, addr),
         }
     }
 
@@ -237,11 +239,13 @@ impl Bus {
                 let is_page2 = (video_mode & VideoModeMask::PAGE2) != 0;
                 let is_hires = (video_mode & VideoModeMask::HIRES) != 0;
                 let is_80store = self.iou.is_80store.get();
+                let mem_state = self.iou.mem_state.get();
 
                 self.mmu.write_byte(
+                    &mut self.iou,
                     addr,
                     value,
-                    self.iou.mem_state.get(),
+                    mem_state,
                     is_80store,
                     is_page2,
                     is_hires,
@@ -289,6 +293,12 @@ impl Bus {
         self.iou.iwm.tick(cycles);
         self.iou.scc.tick(cycles);
         self.iou.zip.tick();  // ZIP Chip slowdown counter
+        
+        // Mockingboard ticks once per cycle
+        for _ in 0..cycles {
+            self.iou.mockingboard.tick();
+        }
+        
         if self.iou.check_interrupts() {
             self.interrupts.request_irq();
         }

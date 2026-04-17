@@ -139,7 +139,7 @@ impl MMU {
         self.ram[1].read_byte(addr)
     }
 
-    pub fn read_byte(&self, iou: &IOU, addr: u16) -> u8 {
+    pub fn read_byte(&self, iou: &mut IOU, addr: u16) -> u8 {
         let mem_state = iou.mem_state.get();
         let video_mode = iou.video_mode.get();
         let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
@@ -183,11 +183,24 @@ impl MMU {
 
             // **Language Card (LC) RAM / ROM ($C100 - $CFFF)**
             0xC100..=0xCFFF => {
-                // if lcram == 1 {
-                //     self.lcram[bank + (ramrd << 1)].read_byte(addr.wrapping_sub(0xC100))
-                // } else {
-                self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
-                // }
+                // Mockingboard slot 4 ROM space ($C400-$C4FF) - VIA register access
+                // Only intercept reads if Mockingboard has been ACTIVATED (by timer or hotkey).
+                // This allows mouse firmware/ROM to work during boot.
+                if (0xC400..=0xC4FF).contains(&addr) && iou.mockingboard.is_enabled() {
+                    println!("MMU READ: addr=${:04X} activated={}", addr, iou.mockingboard.is_activated());
+                }
+                if iou.mockingboard.is_activated() && (0xC400..=0xC4FF).contains(&addr) {
+                    let offset = (addr & 0xFF) as u8;
+                    let value = iou.mockingboard.read(offset);
+                    println!("MMU READ: returning VIA value ${:02X}", value);
+                    value
+                } else {
+                    // if lcram == 1 {
+                    //     self.lcram[bank + (ramrd << 1)].read_byte(addr.wrapping_sub(0xC100))
+                    // } else {
+                    self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
+                    // }
+                }
             }
 
             // **Language Card RAM ($D000 - $DFFF)**
@@ -204,6 +217,17 @@ impl MMU {
                 if lcram == 1 {
                     self.ram[altzp].read_byte(addr)
                 } else {
+                    // Machine ID spoofing: When Mockingboard is enabled, report as Apple IIe
+                    // so games like Ultima V don't refuse to use Mockingboard on IIc.
+                    // $FBB3 = machine ID ($00 = IIc, $06 = IIe)
+                    // $FBC0 = version ($00 = IIc, $EA = IIe)
+                    if iou.mockingboard.is_enabled() {
+                        match addr {
+                            0xFBB3 => return 0x06, // Report as IIe
+                            0xFBC0 => return 0xEA, // IIe version byte
+                            _ => {}
+                        }
+                    }
                     self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
                 }
             } // // **Reset Slot ROM Mapping ($CFFF)**
@@ -220,6 +244,7 @@ impl MMU {
 
     pub fn write_byte(
         &mut self,
+        iou: &mut IOU,
         addr: u16,
         value: u8,
         mem_state: u8,
@@ -270,7 +295,19 @@ impl MMU {
             //     value
             // ),
             0xC100..=0xCFFF => {
-                // TODO: Read-Only ROM space?
+                // Debug: log ALL writes to this range
+                if (0xC400..=0xC4FF).contains(&addr) {
+                    println!("MMU WRITE: addr=${:04X} value=${:02X} mb_enabled={}", addr, value, iou.mockingboard.is_enabled());
+                }
+                // Mockingboard slot 4 ROM space ($C400-$C4FF) - VIA register writes
+                // Any write to $C4xx activates the Mockingboard (mimicking MB4c hardware)
+                if iou.mockingboard.is_enabled() && (0xC400..=0xC4FF).contains(&addr) {
+                    log::debug!("MMU: Mockingboard write intercepted at ${:04X} = ${:02X}", addr, value);
+                    iou.mockingboard.activate();  // First write wakes up the Mockingboard
+                    let offset = (addr & 0xFF) as u8;
+                    iou.mockingboard.write(offset, value);
+                }
+                // ROM space is read-only, writes are ignored
                 0x00
             },
 
