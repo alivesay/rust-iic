@@ -67,6 +67,18 @@ pub struct CrtRenderer {
     phosphor_bind_group_a: wgpu::BindGroup,  // reads A, writes B
     phosphor_bind_group_b: wgpu::BindGroup,  // reads B, writes A
     phosphor_frame_idx: std::cell::Cell<u32>,  // toggles 0/1 for ping-pong
+    clear_frames_remaining: std::cell::Cell<u32>,  // Clear textures for this many frames on startup/resize
+    // Chromatic aberration post-processing pass
+    chroma_pipeline: wgpu::RenderPipeline,
+    chroma_bind_group_layout: wgpu::BindGroupLayout,
+    chroma_vertex_buffer: wgpu::Buffer,
+    chroma_uniform_buffer: wgpu::Buffer,
+    chroma_texture: wgpu::Texture,  // CRT output before chromatic aberration
+    chroma_texture_view: wgpu::TextureView,
+    chroma_bind_group: wgpu::BindGroup,
+    // Cached values for chroma uniform updates
+    chroma_amount: std::cell::Cell<f32>,
+    is_mono: std::cell::Cell<f32>,
 }
 
 #[repr(C)]
@@ -78,6 +90,13 @@ struct CrtUniforms {
     params: [f32; 4],
     // x = monochrome (0.0 or 1.0), y/z/w = reserved
     extra: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ChromaUniforms {
+    // x = chromatic_aberration amount (0-1), y = is_mono (0 or 1), z/w = reserved
+    params: [f32; 4],
 }
 
 impl CrtRenderer {
@@ -592,6 +611,127 @@ impl CrtRenderer {
             &sampler, &phosphor_uniform_buffer,
         );
 
+        // --- Chromatic aberration post-processing pipeline ---
+        let chroma_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/chromatic.wgsl"));
+
+        let chroma_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chroma_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let chroma_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("chroma_pipeline_layout"),
+            bind_group_layouts: &[&chroma_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let chroma_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("chroma_render_pipeline"),
+            layout: Some(&chroma_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &chroma_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 0,
+                        format: wgpu::VertexFormat::Float32x2,
+                    }],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &chroma_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let chroma_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chroma_vertex_buffer"),
+            contents: bytemuck::cast_slice(&vertex_data),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let chroma_uniforms = ChromaUniforms {
+            params: [0.0, 0.0, 0.0, 0.0],  // chroma_amt=0, is_mono=0
+        };
+        let chroma_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chroma_uniform_buffer"),
+            contents: bytemuck::bytes_of(&chroma_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Intermediate texture for CRT output (before chromatic aberration)
+        let chroma_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chroma_intermediate_texture"),
+            size: wgpu::Extent3d {
+                width: surface_width,
+                height: surface_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let chroma_texture_view = chroma_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let chroma_bind_group = Self::create_chroma_bind_group(
+            device, &chroma_bind_group_layout, &chroma_texture_view, &sampler, &chroma_uniform_buffer, &glow_view,
+        );
+
         Self {
             pipeline,
             bind_group_layout,
@@ -640,6 +780,16 @@ impl CrtRenderer {
             phosphor_bind_group_a,
             phosphor_bind_group_b,
             phosphor_frame_idx: std::cell::Cell::new(0),
+            clear_frames_remaining: std::cell::Cell::new(10),  // Clear for multiple frames
+            chroma_pipeline,
+            chroma_bind_group_layout,
+            chroma_vertex_buffer,
+            chroma_uniform_buffer,
+            chroma_texture,
+            chroma_texture_view,
+            chroma_bind_group,
+            chroma_amount: std::cell::Cell::new(0.0),
+            is_mono: std::cell::Cell::new(0.0),
         }
     }
 
@@ -783,6 +933,38 @@ impl CrtRenderer {
         })
     }
 
+    fn create_chroma_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        texture_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
+        glow_view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chroma_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(glow_view),
+                },
+            ],
+        })
+    }
+
     /// Call when the surface is resized to recreate the intermediate texture.
     /// Uniforms (content_rect) are now updated per-frame via update_content_rect.
     pub fn resize(
@@ -894,6 +1076,31 @@ impl CrtRenderer {
             &self.sampler, &self.phosphor_uniform_buffer,
         );
         self.phosphor_frame_idx.set(0);
+        self.clear_frames_remaining.set(10);  // Clear for multiple frames
+
+        // Recreate chroma intermediate texture at new resolution
+        let chroma_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chroma_intermediate_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.chroma_texture_view = chroma_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.chroma_texture = chroma_tex;
+
+        // Recreate chroma bind group
+        self.chroma_bind_group = Self::create_chroma_bind_group(
+            device, &self.chroma_bind_group_layout, &self.chroma_texture_view,
+            &self.sampler, &self.chroma_uniform_buffer, &self.glow_view,
+        );
     }
 
     /// Update the time uniform for flicker effects. Call once per frame.
@@ -914,6 +1121,12 @@ impl CrtRenderer {
         queue.write_buffer(&self.glowy_uniform_buffer, 8, bytemuck::bytes_of(&params.glow_width));
         // Update phosphor decay (offset 0 = first float)
         queue.write_buffer(&self.phosphor_uniform_buffer, 0, bytemuck::bytes_of(&params.phosphor));
+        // Update chromatic aberration amount and glow (glow is added in chroma pass)
+        self.chroma_amount.set(params.chromatic_aberration);
+        let chroma_uniforms = ChromaUniforms {
+            params: [params.chromatic_aberration, self.is_mono.get(), params.glow, 0.0],
+        };
+        queue.write_buffer(&self.chroma_uniform_buffer, 0, bytemuck::bytes_of(&chroma_uniforms));
     }
 
     /// Update the content rect and source dimensions based on actual blit geometry.
@@ -955,6 +1168,9 @@ impl CrtRenderer {
         // extra.x is at byte offset 16 (content_rect) + 16 (params) = 32
         let val: f32 = if monochrome { 1.0 } else { 0.0 };
         queue.write_buffer(&self.uniform_buffer, 32, bytemuck::bytes_of(&val));
+        // Update is_mono in chroma uniforms cache
+        self.is_mono.set(val);
+        // Note: chroma_uniform_buffer is updated in update_shader_params which should be called per-frame
     }
 
     /// Compute the content rect and bar boundary in intermediate texture UV space.
@@ -999,6 +1215,27 @@ impl CrtRenderer {
     /// The scaling renderer should render into this instead of the final surface.
     pub fn intermediate_view(&self) -> &wgpu::TextureView {
         &self.intermediate_render_view
+    }
+
+    /// Clear the intermediate texture to black.
+    /// Call this before the scaling renderer writes to prevent ghosting artifacts.
+    pub fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder) {
+        let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("intermediate_clear_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.intermediate_render_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        // Pass drops immediately, executing the clear
     }
 
     /// Render the CRT post-processing passes:
@@ -1047,37 +1284,32 @@ impl CrtRenderer {
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                    rpass.set_pipeline(&self.mipgen_pipeline);
-                    rpass.set_bind_group(0, &bind_group, &[]);
-                    rpass.set_vertex_buffer(0, self.mipgen_vertex_buffer.slice(..));
-                    rpass.draw(0..3, 0..1);
-                }
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rpass.set_pipeline(&self.mipgen_pipeline);
+                rpass.set_bind_group(0, &bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.mipgen_vertex_buffer.slice(..));
+                rpass.draw(0..3, 0..1);
             }
+        }
 
-            // Pass 0.5: Phosphor persistence (blend current frame with decayed history)
-            // This runs after mip generation so we have the current frame ready.
-            // Result is copied back to intermediate for subsequent passes.
-            {
-                let frame_idx = self.phosphor_frame_idx.get();
-                let (bind_group, dst_view, dst_texture) = if frame_idx == 0 {
-                    (&self.phosphor_bind_group_a, &self.phosphor_history_b_view, &self.phosphor_history_b)
-                } else {
-                    (&self.phosphor_bind_group_b, &self.phosphor_history_a_view, &self.phosphor_history_a)
-                };
-                self.phosphor_frame_idx.set(1 - frame_idx);
-
-                // Phosphor blend pass
+        // Phosphor persistence (blend current frame with decayed history)
+        // Clear history textures ONCE after resize to remove stale GPU memory,
+        // then immediately resume normal blending so history can rebuild
+        {
+            let clear_remaining = self.clear_frames_remaining.get();
+            if clear_remaining > 0 {
+                self.clear_frames_remaining.set(clear_remaining - 1);
+                // Clear both history textures to black (removes garbage from old GPU memory)
                 {
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("phosphor_render_pass"),
+                    let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("clear_phosphor_a"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: dst_view,
+                            view: &self.phosphor_history_a_view,
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
@@ -1089,132 +1321,180 @@ impl CrtRenderer {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
-                    rpass.set_pipeline(&self.phosphor_pipeline);
-                    rpass.set_bind_group(0, bind_group, &[]);
-                    rpass.set_vertex_buffer(0, self.phosphor_vertex_buffer.slice(..));
-                    rpass.draw(0..3, 0..1);
                 }
+                {
+                    let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("clear_phosphor_b"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &self.phosphor_history_b_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                }
+                // Fall through to normal blending - history is now clean black,
+                // so the first blend will just copy current frame to history
+            }
+            
+            // Normal phosphor blending (runs every frame, even after clear)
+            let frame_idx = self.phosphor_frame_idx.get();
+            let (bind_group, dst_view, dst_texture) = if frame_idx == 0 {
+                (&self.phosphor_bind_group_a, &self.phosphor_history_b_view, &self.phosphor_history_b)
+            } else {
+                (&self.phosphor_bind_group_b, &self.phosphor_history_a_view, &self.phosphor_history_a)
+            };
+            self.phosphor_frame_idx.set(1 - frame_idx);
 
-                // Copy phosphor result back to intermediate (level 0 only)
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: dst_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
+            // Phosphor blend pass
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("phosphor_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: dst_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rpass.set_pipeline(&self.phosphor_pipeline);
+                rpass.set_bind_group(0, bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.phosphor_vertex_buffer.slice(..));
+                rpass.draw(0..3, 0..1);
+            }
+
+            // Copy phosphor result back to intermediate (level 0 only)
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: dst_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.intermediate_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.tex_width,
+                    height: self.tex_height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        // Pass 1: Gaussian horizontal blur (intermediate → gaussx_texture)
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("gaussx_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.gaussx_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
                     },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.intermediate_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.gauss_pipeline);
+            rpass.set_bind_group(0, &self.gaussx_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+            rpass.draw(0..3, 0..1);
+        }
+
+        // Pass 2: Gaussian vertical blur (gaussx_texture → blur_texture)
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("gaussy_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.blur_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
                     },
-                    wgpu::Extent3d {
-                        width: self.tex_width,
-                        height: self.tex_height,
-                        depth_or_array_layers: 1,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.gauss_pipeline);
+            rpass.set_bind_group(0, &self.gaussy_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+            rpass.draw(0..3, 0..1);
+        }
+
+        // Pass 2.5: Glow horizontal blur (blur_texture → glowx_texture)
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glowx_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.glowx_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
                     },
-                );
-            }
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.gauss_pipeline);
+            rpass.set_bind_group(0, &self.glowx_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+            rpass.draw(0..3, 0..1);
+        }
 
-            // Pass 1: Gaussian horizontal blur (intermediate → gaussx_texture)
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("gaussx_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.gaussx_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                rpass.set_pipeline(&self.gauss_pipeline);
-                rpass.set_bind_group(0, &self.gaussx_bind_group, &[]);
-                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
-                rpass.draw(0..3, 0..1);
-            }
+        // Pass 2.6: Glow vertical blur (glowx_texture → glow_texture)
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glowy_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.glow_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.gauss_pipeline);
+            rpass.set_bind_group(0, &self.glowy_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+            rpass.draw(0..3, 0..1);
+        }
 
-            // Pass 2: Gaussian vertical blur (gaussx_texture → blur_texture)
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("gaussy_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.blur_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                rpass.set_pipeline(&self.gauss_pipeline);
-                rpass.set_bind_group(0, &self.gaussy_bind_group, &[]);
-                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
-                rpass.draw(0..3, 0..1);
-            }
-
-            // Pass 2.5: Glow horizontal blur (blur_texture → glowx_texture)
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("glowx_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.glowx_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                rpass.set_pipeline(&self.gauss_pipeline);
-                rpass.set_bind_group(0, &self.glowx_bind_group, &[]);
-                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
-                rpass.draw(0..3, 0..1);
-            }
-
-            // Pass 2.6: Glow vertical blur (glowx_texture → glow_texture)
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("glowy_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.glow_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                rpass.set_pipeline(&self.gauss_pipeline);
-                rpass.set_bind_group(0, &self.glowy_bind_group, &[]);
-                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
-                rpass.draw(0..3, 0..1);
-            }
-
-        // Pass 3: CRT-Geom-Deluxe composite (intermediate + blur + glow → screen)
+        // Pass 3: CRT-Geom-Deluxe composite (intermediate + blur → chroma texture, no glow)
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("crt_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: render_target,
+                    view: &self.chroma_texture_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1229,6 +1509,30 @@ impl CrtRenderer {
             rpass.set_pipeline(&self.pipeline);
             rpass.set_bind_group(0, &self.bind_group, &[]);
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            rpass.draw(0..3, 0..1);
+        }
+
+        // Pass 4: Chromatic aberration + glow composite → screen
+        // Chromatic aberration applied to CRT output, glow added after (unaffected by aberration)
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("chroma_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: render_target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.chroma_pipeline);
+            rpass.set_bind_group(0, &self.chroma_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.chroma_vertex_buffer.slice(..));
             rpass.draw(0..3, 0..1);
         }
     }
@@ -1279,6 +1583,10 @@ impl PostProcessor for CrtRenderer {
 
     fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams) {
         CrtRenderer::update_shader_params(self, queue, params)
+    }
+
+    fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder) {
+        CrtRenderer::clear_intermediate(self, encoder)
     }
 
     fn render(

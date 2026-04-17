@@ -98,11 +98,11 @@ pub struct Args {
     #[arg(long)]
     pub zip: bool,
 
-    /// Enable Mockingboard sound card in slot 4 (disables memory expansion)
+    /// Enable Mockingboard sound card in slot 5
     #[arg(long)]
     pub mockingboard: bool,
 
-    /// Enable second Mockingboard in slot 5 (for Ultima V, etc.)
+    /// Enable second Mockingboard in slot 4 (disables memory expansion, for Ultima V etc.)
     #[arg(long)]
     pub mockingboard2: bool,
 }

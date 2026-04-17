@@ -531,6 +531,7 @@ impl App {
                 let egui_renderer = self.egui_renderer.as_mut();
 
                 let render_res = pixels.render_with(|encoder, render_target, context| {
+                    crt.clear_intermediate(encoder);
                     context.scaling_renderer.render(encoder, crt.intermediate_view());
                     crt.render(encoder, render_target, device);
 

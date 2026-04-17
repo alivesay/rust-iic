@@ -12,7 +12,8 @@ struct ShaderParams {
     group2: vec4<f32>,  // aperture_strength, aperture_brightboost, scanline_weight, lum
     group3: vec4<f32>,  // curvature_on, saturation, halation, rasterbloom
     group4: vec4<f32>,  // blur_width, mask_type, vignette, phosphor
-    group5: vec4<f32>,  // glow, _pad1, _pad2, _pad3
+    group5: vec4<f32>,  // glow, glow_width, vignette_opacity, flicker
+    group6: vec4<f32>,  // chromatic_aberration, _pad1, _pad2, _pad3
 };
 
 struct VertexOutput {
@@ -324,6 +325,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let glow_raw = textureSampleLevel(r_glow, r_sampler, blur_uv, 0.0).rgb;
     var glow = pow(max(glow_raw, vec3<f32>(0.0)), vec3<f32>(2.2));
     
+    // Apply power curve to concentrate glow around bright sources
+    // Power > 1 suppresses dim areas (glow edges) while preserving bright areas (near source)
+    // This creates natural exponential falloff instead of uniform gaussian spread
+    glow = pow(glow, vec3<f32>(1.8));
+    
     // Boost glow saturation to preserve color when averaging blurs out hue
     // This makes the glow tinted by the dominant colors rather than grey/white
     let glow_lum = dot(glow, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -351,8 +357,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let chi = ifbright * aperture_average * mul_res - (ifbright - 1.0) * clow;
     var cout_masked = mix(clow, chi, mask_rgb);
 
-    // Add fullscreen glow AFTER shadow mask (glow bypasses mask for smooth bloom)
-    cout_masked = cout_masked + glow * glow_amt * 0.1 * cval * rbloom;
+    // Glow is added in chromatic aberration pass (so it's not affected by aberration)
+    // Store cval in alpha for the chromatic pass to use with glow
+    let glow_cval_rbloom = cval * rbloom;
 
     // Output gamma
     var result = pow(max(cout_masked, vec3<f32>(0.0)), vec3<f32>(1.0 / mgamma));
@@ -361,20 +368,51 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let l = dot(result, vec3<f32>(0.2126, 0.7152, 0.0722));
     result = mix(vec3<f32>(l), result, SATURATION);
 
-    // Vignette effect (soft darkening towards edges, never full black)
+    // Note: Chromatic aberration is applied in a separate post-processing pass
+    // (see chromatic.wgsl) so it operates on screen pixels, not source pixels.
+
+    // Vignette effect (soft darkening towards edges)
+    // Shape matches CRT - rectangular with curved corners based on cornersize
+    let vignette_opacity = params.group5.z;
     if vignette_amt > 0.0 {
-        // Distance from center in emulator UV space
-        let vig_uv = emu_uv - vec2<f32>(0.5);
-        // Squared distance (0 at center, 0.5 at corners)
-        let vig_dist = dot(vig_uv, vig_uv);
-        // Smooth falloff - starts early (0.05) for larger coverage
-        // vignette_amt controls both intensity and spread
-        let falloff = smoothstep(0.0, 0.3, vig_dist);
-        // Allow up to 85% darkening at max slider, min brightness 15%
-        let max_darken = min(vignette_amt * 0.425, 0.85);
-        let vig = 1.0 - max_darken * falloff;
+        // Use box-shaped distance (rectangular with rounded corners)
+        // This matches the CRT screen shape better than circular
+        let vig_uv = abs(emu_uv - vec2<f32>(0.5)) * 2.0;  // [0,1] from center to edge
+        
+        // Box distance: max of X and Y gives rectangular falloff
+        // Mix in corner rounding using the corner_size parameter
+        let corner_blend = csize * 10.0;  // Scale corner_size for vignette effect
+        let box_dist = max(vig_uv.x, vig_uv.y);  // Pure rectangle distance
+        let corner_dist = length(max(vig_uv - vec2<f32>(1.0 - corner_blend), vec2<f32>(0.0)));
+        
+        // Blend between rectangular and corner-rounded distance
+        let vig_dist = mix(box_dist, box_dist + corner_dist, min(corner_blend, 1.0));
+        
+        // Apply vignette falloff with adjustable intensity
+        // vignette_amt controls how quickly darkening starts from edges
+        let edge_start = 1.0 - (0.3 * vignette_amt);  // Where darkening begins (0.7 at max)
+        let falloff = smoothstep(edge_start, 1.0, vig_dist);
+        
+        // vignette_opacity controls how dark the edges get (0=no effect, 1=full black)
+        let vig = 1.0 - vignette_opacity * falloff;
         result = result * vig;
     }
 
-    return vec4<f32>(clamp(result, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    // CRT Flicker effect - subtle brightness variation simulating refresh rate instability
+    let flicker_amt = params.group5.w;
+    if flicker_amt > 0.0 {
+        let time = uniforms.params.z;  // time is in params
+        // 60Hz base flicker (refresh rate) - primary component
+        let flicker_60hz = sin(time * 376.99112) * 0.5 + 0.5; // 60 * 2 * PI
+        // Slower "power supply hum" component at ~8Hz
+        let flicker_hum = sin(time * 50.265) * 0.5 + 0.5; // 8 * 2 * PI
+        // Combine: 60Hz flicker with power supply variation
+        let flicker = flicker_60hz * 0.6 + flicker_hum * 0.4;
+        // Scale to visible brightness variation (max ~15% at full slider)
+        let brightness_mod = 1.0 - flicker_amt * 0.15 * flicker;
+        result = result * brightness_mod;
+    }
+
+    // Output RGB with cval*rbloom in alpha for chromatic pass to use with glow
+    return vec4<f32>(clamp(result, vec3<f32>(0.0), vec3<f32>(1.0)), glow_cval_rbloom);
 }

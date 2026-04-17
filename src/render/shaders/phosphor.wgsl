@@ -37,7 +37,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     // Phosphor persistence: max of current vs decayed history
     // This gives bright pixels a "trail" as they fade
-    let decayed_history = history * decay;
+    var decayed_history = history * decay;
+    
+    // Threshold tiny values to zero to prevent ghost artifacts
+    // Without this, values asymptotically approach zero but never reach it,
+    // causing faint ghost images visible at extreme gamma settings
+    let threshold = 0.004;  // ~1/255, below visible in 8-bit color
+    decayed_history = select(decayed_history, vec4<f32>(0.0), decayed_history.r < threshold && decayed_history.g < threshold && decayed_history.b < threshold);
+    
     let result = max(current, decayed_history);
     
     return vec4<f32>(result.rgb, 1.0);
