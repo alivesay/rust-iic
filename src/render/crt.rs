@@ -79,6 +79,21 @@ pub struct CrtRenderer {
     // Cached values for chroma uniform updates
     chroma_amount: std::cell::Cell<f32>,
     is_mono: std::cell::Cell<f32>,
+    // Cached for glow curvature alignment
+    content_rect_cache: std::cell::Cell<[f32; 4]>,
+    curvature_cache: std::cell::Cell<[f32; 4]>,  // d, R, overscan_x/100, overscan_y/100
+    glow_amt_cache: std::cell::Cell<f32>,
+    curvature_on_cache: std::cell::Cell<f32>,
+    source_width_cache: std::cell::Cell<f32>,
+    source_height_cache: std::cell::Cell<f32>,
+    // NTSC notch filter pass
+    ntsc_pipeline: wgpu::RenderPipeline,
+    ntsc_bind_group_layout: wgpu::BindGroupLayout,
+    ntsc_bind_group: wgpu::BindGroup,
+    ntsc_uniform_buffer: wgpu::Buffer,
+    ntsc_texture: wgpu::Texture,
+    ntsc_view: wgpu::TextureView,
+    ntsc_strength: std::cell::Cell<f32>,
 }
 
 #[repr(C)]
@@ -95,8 +110,12 @@ struct CrtUniforms {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ChromaUniforms {
-    // x = chromatic_aberration amount (0-1), y = is_mono (0 or 1), z/w = reserved
+    // x = chromatic_aberration amount (0-1), y = is_mono (0 or 1), z = glow_amt, w = curvature_on
     params: [f32; 4],
+    // content_rect: left, top, right, bottom (normalized screen coords)
+    content_rect: [f32; 4],
+    // x = d (distance), y = R (radius), z = overscan_x/100, w = overscan_y/100
+    curvature: [f32; 4],
 }
 
 impl CrtRenderer {
@@ -703,7 +722,9 @@ impl CrtRenderer {
         });
 
         let chroma_uniforms = ChromaUniforms {
-            params: [0.0, 0.0, 0.0, 0.0],  // chroma_amt=0, is_mono=0
+            params: [0.0, 0.0, 0.0, 1.0],  // chroma_amt=0, is_mono=0, glow=0, curv_on=1
+            content_rect: [0.0, 0.0, 1.0, 1.0],
+            curvature: [3.0, 1.3, 1.0, 1.0],  // default d, R, overscan
         };
         let chroma_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("chroma_uniform_buffer"),
@@ -730,6 +751,106 @@ impl CrtRenderer {
 
         let chroma_bind_group = Self::create_chroma_bind_group(
             device, &chroma_bind_group_layout, &chroma_texture_view, &sampler, &chroma_uniform_buffer, &glow_view,
+        );
+
+        // --- NTSC notch filter pass ---
+        let ntsc_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/ntsc.wgsl"));
+
+        let ntsc_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ntsc_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let ntsc_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ntsc_pipeline_layout"),
+            bind_group_layouts: &[&ntsc_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let ntsc_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ntsc_render_pipeline"),
+            layout: Some(&ntsc_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &ntsc_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ntsc_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // NTSC uniforms: params (filter_strength, source_width, source_height, is_mono) + content_rect
+        let ntsc_uniforms: [f32; 8] = [0.0, source_width, source_height, 0.0, 0.0, 0.0, 1.0, 1.0];
+        let ntsc_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ntsc_uniform_buffer"),
+            contents: bytemuck::cast_slice(&ntsc_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // NTSC output texture (same size as intermediate)
+        let ntsc_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ntsc_texture"),
+            size: wgpu::Extent3d {
+                width: surface_width,
+                height: surface_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let ntsc_view = ntsc_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let ntsc_bind_group = Self::create_ntsc_bind_group(
+            device, &ntsc_bind_group_layout, &intermediate_view, &sampler, &ntsc_uniform_buffer,
         );
 
         Self {
@@ -790,6 +911,19 @@ impl CrtRenderer {
             chroma_bind_group,
             chroma_amount: std::cell::Cell::new(0.0),
             is_mono: std::cell::Cell::new(0.0),
+            content_rect_cache: std::cell::Cell::new([0.0, 0.0, 1.0, 1.0]),
+            curvature_cache: std::cell::Cell::new([3.0, 1.3, 1.0, 1.0]),
+            glow_amt_cache: std::cell::Cell::new(0.0),
+            curvature_on_cache: std::cell::Cell::new(1.0),
+            source_width_cache: std::cell::Cell::new(560.0),
+            source_height_cache: std::cell::Cell::new(384.0),
+            ntsc_pipeline,
+            ntsc_bind_group_layout,
+            ntsc_bind_group,
+            ntsc_uniform_buffer,
+            ntsc_texture,
+            ntsc_view,
+            ntsc_strength: std::cell::Cell::new(0.0),
         }
     }
 
@@ -965,6 +1099,33 @@ impl CrtRenderer {
         })
     }
 
+    fn create_ntsc_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        texture_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ntsc_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
     /// Call when the surface is resized to recreate the intermediate texture.
     /// Uniforms (content_rect) are now updated per-frame via update_content_rect.
     pub fn resize(
@@ -1101,6 +1262,30 @@ impl CrtRenderer {
             device, &self.chroma_bind_group_layout, &self.chroma_texture_view,
             &self.sampler, &self.chroma_uniform_buffer, &self.glow_view,
         );
+
+        // Recreate NTSC filter texture at new resolution
+        let ntsc_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ntsc_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        self.ntsc_view = ntsc_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.ntsc_texture = ntsc_tex;
+
+        // Recreate NTSC bind group
+        self.ntsc_bind_group = Self::create_ntsc_bind_group(
+            device, &self.ntsc_bind_group_layout, &self.intermediate_view,
+            &self.sampler, &self.ntsc_uniform_buffer,
+        );
     }
 
     /// Update the time uniform for flicker effects. Call once per frame.
@@ -1121,12 +1306,33 @@ impl CrtRenderer {
         queue.write_buffer(&self.glowy_uniform_buffer, 8, bytemuck::bytes_of(&params.glow_width));
         // Update phosphor decay (offset 0 = first float)
         queue.write_buffer(&self.phosphor_uniform_buffer, 0, bytemuck::bytes_of(&params.phosphor));
-        // Update chromatic aberration amount and glow (glow is added in chroma pass)
+        // Update chromatic aberration + glow + curvature for chroma pass
         self.chroma_amount.set(params.chromatic_aberration);
+        self.glow_amt_cache.set(params.glow);
+        self.curvature_on_cache.set(params.curvature);
+        self.curvature_cache.set([
+            params.distance,
+            params.radius,
+            params.overscan_x / 100.0,
+            params.overscan_y / 100.0,
+        ]);
         let chroma_uniforms = ChromaUniforms {
-            params: [params.chromatic_aberration, self.is_mono.get(), params.glow, 0.0],
+            params: [params.chromatic_aberration, self.is_mono.get(), params.glow, params.curvature],
+            content_rect: self.content_rect_cache.get(),
+            curvature: self.curvature_cache.get(),
         };
         queue.write_buffer(&self.chroma_uniform_buffer, 0, bytemuck::bytes_of(&chroma_uniforms));
+        // Update NTSC filter uniforms: params + content_rect
+        self.ntsc_strength.set(params.ntsc_filter);
+        let content_rect = self.content_rect_cache.get();
+        let ntsc_uniforms: [f32; 8] = [
+            params.ntsc_filter,
+            self.source_width_cache.get(),
+            self.source_height_cache.get(),
+            self.is_mono.get(),
+            content_rect[0], content_rect[1], content_rect[2], content_rect[3],
+        ];
+        queue.write_buffer(&self.ntsc_uniform_buffer, 0, bytemuck::bytes_of(&ntsc_uniforms));
     }
 
     /// Update the content rect and source dimensions based on actual blit geometry.
@@ -1154,6 +1360,12 @@ impl CrtRenderer {
         } else {
             bottom // no bar = bar boundary at bottom of content
         };
+
+        // Cache content_rect for chroma pass (glow curvature alignment)
+        self.content_rect_cache.set([left as f32, top as f32, right as f32, bottom as f32]);
+        // Cache source dimensions for NTSC pass
+        self.source_width_cache.set(source_width);
+        self.source_height_cache.set(source_height);
 
         let uniforms = CrtUniforms {
             content_rect: [left as f32, top as f32, right as f32, bottom as f32],
@@ -1379,6 +1591,54 @@ impl CrtRenderer {
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: dst_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.intermediate_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.tex_width,
+                    height: self.tex_height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        // Pass 0.5: NTSC notch filter (intermediate → ntsc_texture → intermediate)
+        // Simulates composite video decoding with notch filter for authentic artifact colors
+        if self.ntsc_strength.get() > 0.01 && self.is_mono.get() < 0.5 {
+            // NTSC filter pass
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("ntsc_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.ntsc_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rpass.set_pipeline(&self.ntsc_pipeline);
+                rpass.set_bind_group(0, &self.ntsc_bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));  // Reuse vertex buffer
+                rpass.draw(0..3, 0..1);
+            }
+
+            // Copy NTSC result back to intermediate so all subsequent passes use filtered colors
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.ntsc_texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
