@@ -205,7 +205,7 @@ impl<'a> Monitor<'a> {
         );
     }
 
-    fn view_memory(&self, start: &str, end: Option<&str>) {
+    fn view_memory(&mut self, start: &str, end: Option<&str>) {
         if let Ok(start_addr) = u16::from_str_radix(start, 16) {
             let end_addr = end
                 .and_then(|e| u16::from_str_radix(e, 16).ok())
@@ -223,7 +223,7 @@ impl<'a> Monitor<'a> {
         }
     }
 
-    fn view_memory_page(&self, addr: &str) {
+    fn view_memory_page(&mut self, addr: &str) {
         if let Ok(addr) = u16::from_str_radix(addr, 16) {
             let page_start = addr & 0xFF00; // align to $XX00
             for i in 0..16 {

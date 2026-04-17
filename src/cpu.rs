@@ -449,12 +449,16 @@ impl CPU {
         let pc = self.pc;
 
         let instruction = if self.debug {
-            Disassembler::disassemble(&self.bus, pc)
+            Disassembler::disassemble(&mut self.bus, pc)
         } else {
             String::new()
         };
 
+        // Set flag so MMU knows this is opcode fetch (for Mockingboard activation logic)
+        // Opcode fetches should NOT activate Mockingboard; only data reads should
+        self.bus.iou.is_opcode_fetch = true;
         let opcode = self.fetch_byte();
+        self.bus.iou.is_opcode_fetch = false;
 
         // Tick base cycles BEFORE execution so that iou.cycles is accurate
         // when softswitch handlers (e.g. speaker toggle) read it

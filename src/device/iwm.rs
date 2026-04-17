@@ -214,12 +214,17 @@ impl Iwm {
         }
         self.drives[drive].disk = None;
         self.drives[drive].disk_path = None;
+        self.drives[drive].woz_format = WozFormat::Unknown;
+        self.drives[drive].woz_raw.clear();
+        self.drives[drive].woz_tmap = [0xFF; 160];
+        self.drives[drive].woz_bit_counts = [0; 35];
         self.drives[drive].track_data.clear();
         self.drives[drive].track_bit_count = 0;
         self.drives[drive].loaded_track = None;
         self.drives[drive].nibbles_valid = false;
         self.drives[drive].dirty = false;
-        self.drives[drive].head_pos = 0;
+        // NOTE: Do NOT reset head_pos - real Apple IIc preserves head position
+        // across disk changes, and some programs (like disk copiers) rely on this
         self.drives[drive].bit_index = 0;
         self.drives[drive].shift_register = 0;
         self.drives[drive].data_latch = 0;
@@ -308,6 +313,18 @@ impl Iwm {
         self.drives[drive].disk = Some(a2kit::create_img_from_file(path_str).map_err(|e| anyhow::anyhow!(e.to_string()))?);
         self.drives[drive].disk_path = Some(path_str.to_string());
         self.drives[drive].dirty = false;
+        
+        // Clear stale track data so new disk is read fresh
+        // NOTE: Do NOT reset head_pos - real Apple IIc preserves head position
+        // across disk changes, and some programs (like disk copiers) rely on this
+        self.drives[drive].loaded_track = None;
+        self.drives[drive].track_data.clear();
+        self.drives[drive].track_bit_count = 0;
+        self.drives[drive].bit_index = 0;
+        self.drives[drive].shift_register = 0;
+        self.drives[drive].data_latch = 0;
+        self.drives[drive].data_ready = false;
+        self.drives[drive].nibbles_valid = false;
         Ok(())
     }
 
@@ -1229,7 +1246,10 @@ impl Iwm {
                      if !self.drives[d].has_disk() || self.drives[d].write_protect {
                          status |= 0x80;
                      }
-                     if self.debug { println!("IWM Read Status: {:02X} (drive={}, has_disk={}, wp={})", status, d+1, self.drives[d].has_disk(), self.drives[d].write_protect); }
+                     if self.debug { 
+                         println!("IWM Read Status: {:02X} (drive={}, has_disk={}, wp={})", 
+                             status, d+1, self.drives[d].has_disk(), self.drives[d].write_protect); 
+                     }
                      status
                  },
                  (true, false) => {

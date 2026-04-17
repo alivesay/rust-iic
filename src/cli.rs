@@ -97,4 +97,8 @@ pub struct Args {
     /// Enable ZIP CHIP II-8 accelerator (8MHz, toggle with Ctrl+Z)
     #[arg(long)]
     pub zip: bool,
+
+    /// Enable Mockingboard sound card in slot 4 (disables memory expansion)
+    #[arg(long)]
+    pub mockingboard: bool,
 }

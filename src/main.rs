@@ -107,6 +107,17 @@ fn main() -> Result<(), Error> {
         println!("ZIP CHIP II-8 enabled (8MHz) - Press ESC during boot to disable, Ctrl+Z to toggle");
     }
 
+    // Mockingboard sound card (uses slot 4, disables memory expansion)
+    let _mockingboard_audio = if args.mockingboard {
+        let (mb_producer, mb_sample_rate, mb_audio) = create_audio();
+        cpu.bus.iou.mockingboard = crate::device::mockingboard::Mockingboard::with_audio(mb_producer, mb_sample_rate);
+        cpu.bus.iou.set_mockingboard_enabled(true);
+        println!("Mockingboard enabled in slot 4 (memory expansion disabled)");
+        Some(mb_audio)
+    } else {
+        None
+    };
+
     // Load ROM
     let iic_rom_file = include_bytes!("../iic3.bin");
     let iic_rom = rom::ROM::load_from_bytes(iic_rom_file, cpu.system_type).unwrap();
@@ -247,6 +258,7 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
 
             cpu_time = frame_start.elapsed();
             app.cpu.bus.iou.speaker.update(app.cpu.bus.iou.cycles);
+            app.cpu.bus.iou.mockingboard.update(app.cpu.bus.iou.cycles);
         }
 
         let status = event_loop.pump_app_events(timeout, &mut app);

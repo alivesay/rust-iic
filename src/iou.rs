@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, memexp::MemoryExpansion, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
+use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, memexp::MemoryExpansion, mockingboard::Mockingboard, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
 
 macro_rules! set_lcram_mode {
   ($mem_state:expr, $mode:expr) => {{
@@ -47,11 +47,13 @@ pub struct IOU {
   pub mouse: Mouse,
   pub speaker: Speaker,
   pub memexp: MemoryExpansion, // Apple IIc Memory Expansion Card (Slot 4)
+  pub mockingboard: Mockingboard, // Mockingboard sound card (Slot 4, conflicts with memexp)
   pub zip: ZipChip,  // ZIP Chip accelerator (optional)
   pub cycles: u64,
   pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
   pub floating_bus: u8,  // Last byte video hardware would read from RAM at current scan position
   pub col80_switch: bool, // Physical 80/40 column slide switch (true = 80 col)
+  pub is_opcode_fetch: bool, // True during CPU opcode fetch (for Mockingboard activation logic)
   pub debug: bool,
   pub self_test: bool,
 }
@@ -73,11 +75,13 @@ impl IOU {
           mouse: Mouse::new(),
           speaker: Speaker::new(audio_producer, sample_rate),
           memexp: MemoryExpansion::new(),
+          mockingboard: Mockingboard::new(),  // Disabled by default, enabled via --mockingboard
           zip: ZipChip::new(false),  // Disabled by default, enabled via --zip
           cycles: 0,
           scan_cycle: 0,
           floating_bus: 0,
           col80_switch: true, // Default: 80-column switch ON (typical IIc position)
+          is_opcode_fetch: false,
           debug: false,
           self_test,
       }
@@ -86,6 +90,15 @@ impl IOU {
     /// Enable or disable the ZIP Chip accelerator.
     pub fn set_zip_enabled(&mut self, present: bool) {
         self.zip = ZipChip::new(present);
+    }
+
+    /// Enable the Mockingboard sound card (disables memory expansion).
+    pub fn set_mockingboard_enabled(&mut self, enabled: bool) {
+        self.mockingboard.set_enabled(enabled);
+        if enabled {
+            // Disable memexp - they share slot 4
+            self.memexp.set_enabled(false);
+        }
     }
 
     /// Reset IOU state as if the hardware reset line was asserted.
@@ -103,6 +116,7 @@ impl IOU {
         self.scc.reset();
         self.iwm.reset();
         self.zip.reset();
+        self.mockingboard.reset();
     }
 
     #[rustfmt::skip]
@@ -288,8 +302,14 @@ impl IOU {
             // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
             0xC098..=0xC09F | 0xC0A8..=0xC0AF => self.scc.slot_read(addr),
 
-            // Slot 4 — Memory Expansion Card ($C0C0–$C0CF)
-            0xC0C0..=0xC0CF => self.memexp.read((addr & 0x0F) as u8),
+            // Slot 4 — Mockingboard or Memory Expansion Card ($C0C0–$C0CF)
+            0xC0C0..=0xC0CF => {
+                if self.mockingboard.is_enabled() {
+                    self.mockingboard.read((addr & 0x0F) as u8)
+                } else {
+                    self.memexp.read((addr & 0x0F) as u8)
+                }
+            },
 
             // Other slot I/O (stubbed — floating bus)
             0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0D0..=0xC0DF | 0xC0F0..=0xC0FF => self.floating_bus,
@@ -482,8 +502,15 @@ impl IOU {
           // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
           0xC098..=0xC09F | 0xC0A8..=0xC0AF => { self.scc.slot_write(addr, val); 0x00 },
 
-          // Slot 4 — Memory Expansion Card ($C0C0–$C0CF)
-          0xC0C0..=0xC0CF => { self.memexp.write((addr & 0x0F) as u8, val); 0x00 },
+          // Slot 4 — Mockingboard or Memory Expansion Card ($C0C0–$C0CF)
+          0xC0C0..=0xC0CF => {
+              if self.mockingboard.is_enabled() {
+                  self.mockingboard.write((addr & 0x0F) as u8, val);
+              } else {
+                  self.memexp.write((addr & 0x0F) as u8, val);
+              }
+              0x00
+          },
 
           // Other slot I/O (stubbed)
           0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0D0..=0xC0DF | 0xC0F0..=0xC0FF => 0x00,
@@ -509,6 +536,9 @@ impl IOU {
         // Check SCC interrupts
         let scc_irq = self.scc.irq_pending();
 
-        mouse_irq || scc_irq
+        // Check Mockingboard interrupts (VIA timers)
+        let mockingboard_irq = self.mockingboard.irq_active();
+
+        mouse_irq || scc_irq || mockingboard_irq
     }
 }
