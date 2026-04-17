@@ -126,6 +126,9 @@ fn main() -> Result<(), Error> {
         None
     };
 
+    // Register ProDOS MLI hooks (logs all ProDOS system calls)
+    hooks::register_hooks(&mut cpu.hooks);
+
     // Load ROM
     let iic_rom_file = include_bytes!("../iic3.bin");
     let iic_rom = rom::ROM::load_from_bytes(iic_rom_file, cpu.system_type).unwrap();

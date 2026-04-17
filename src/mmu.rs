@@ -139,6 +139,12 @@ impl MMU {
         self.ram[1].read_byte(addr)
     }
 
+    /// Direct write to main RAM (bypasses soft switches)
+    /// Used by emulator for injecting data (custom commands, etc.)
+    pub fn write_main_byte(&mut self, addr: u16, value: u8) {
+        self.ram[0].write_byte(addr, value);
+    }
+
     pub fn read_byte(&self, iou: &mut IOU, addr: u16) -> u8 {
         let mem_state = iou.mem_state.get();
         let video_mode = iou.video_mode.get();

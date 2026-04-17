@@ -2,7 +2,7 @@ use crate::bus::Bus;
 use crate::cpu_monitor::CpuTraceEntry;
 use crate::device::speaker::AudioProducer;
 use crate::disassembler::{Disassembler, SymbolTable};
-use crate::hooks::{HookContext, HookManager};
+use crate::hooks::{HookContext, HookManager, check_mli_calls, check_custom_command_mli};
 use crate::interrupts::InterruptType;
 use crate::rom::ROM;
 use bitflags::bitflags;
@@ -522,7 +522,9 @@ impl CPU {
                 p: self.p.bits(),
                 cycles: self.cycles,
             };
-            let _skip = self.hooks.execute_hooks(&ctx);
+            // Provide memory peek function for filter checking
+            let mut peek = |addr: u16| self.bus.peek_byte(addr);
+            let _skip = self.hooks.execute_hooks_filtered(&ctx, &mut peek);
             // Note: skip functionality would require more complex handling
             // For now, hooks are for side effects only (like activating Mockingboard)
         }
@@ -533,6 +535,21 @@ impl CPU {
             self.bus.iou.mockingboard.activate();
             println!("==> Mockingboard activated");
         }
+        
+        // Check for ProDOS MLI calls at $BF00 and log them
+        if self.pc == 0xBF00 {
+            if let Some(mli_info) = check_mli_calls(&mut self.bus, self.pc, self.regs.sp) {
+                // Check for custom commands first (RUSTIIC, DEBUG, etc.)
+                if !check_custom_command_mli(&mut self.bus, &mli_info) {
+                    // Not a custom command - log normal MLI call
+                    let details = mli_info.read_details(&mut self.bus);
+                    println!("==> MLI ${:02X} {}", mli_info.call_num, details);
+                }
+            }
+        }
+        
+        // Legacy custom command check - now uses MLI hooking instead
+        // (pending_custom_command_check is no longer used)
 
         let pc = self.pc;
 
