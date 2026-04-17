@@ -126,6 +126,25 @@ fn main() -> Result<(), Error> {
         None
     };
 
+    // Second Mockingboard in slot 5 (for Ultima V dual-MB support, etc.)
+    let _mockingboard2_audio = if args.mockingboard2 {
+        if !args.mockingboard {
+            println!("Warning: --mockingboard2 requires --mockingboard to also be enabled");
+        }
+        let (mb2_producer, mb2_sample_rate, mb2_audio) = create_audio();
+        cpu.bus.iou.mockingboard2 = crate::device::mockingboard::Mockingboard::with_audio(mb2_producer, mb2_sample_rate);
+        cpu.bus.iou.set_mockingboard2_enabled(true);
+        
+        // Use same timer-based activation as slot 4
+        cpu.bus.iou.mockingboard2.set_hook_activation(true);
+        cpu.hooks.register_mockingboard_hook(1, 3_000_000);  // Hook ID 1 for slot 5
+        
+        println!("Second Mockingboard enabled in slot 5 (12 total sound channels!)");
+        Some(mb2_audio)
+    } else {
+        None
+    };
+
     // Register ProDOS MLI hooks (logs all ProDOS system calls)
     hooks::register_hooks(&mut cpu.hooks);
 
@@ -270,6 +289,7 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
             cpu_time = frame_start.elapsed();
             app.cpu.bus.iou.speaker.update(app.cpu.bus.iou.cycles);
             app.cpu.bus.iou.mockingboard.update(app.cpu.bus.iou.cycles);
+            app.cpu.bus.iou.mockingboard2.update(app.cpu.bus.iou.cycles);
         }
 
         let status = event_loop.pump_app_events(timeout, &mut app);

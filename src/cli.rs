@@ -101,4 +101,8 @@ pub struct Args {
     /// Enable Mockingboard sound card in slot 4 (disables memory expansion)
     #[arg(long)]
     pub mockingboard: bool,
+
+    /// Enable second Mockingboard in slot 5 (for Ultima V, etc.)
+    #[arg(long)]
+    pub mockingboard2: bool,
 }

@@ -289,7 +289,7 @@ impl Ay8910 {
 }
 
 /// 6522 VIA chip (simplified for Mockingboard)
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct Via6522 {
     // Port registers
     ora: u8,    // Output Register A
@@ -315,6 +315,31 @@ struct Via6522 {
     pcr: u8,    // Peripheral Control Register
     ifr: u8,    // Interrupt Flag Register
     ier: u8,    // Interrupt Enable Register
+}
+
+impl Default for Via6522 {
+    fn default() -> Self {
+        Self {
+            ora: 0,
+            orb: 0,
+            ira: 0xFF,  // Input pins float high when undriven
+            irb: 0xFF,
+            ddra: 0,
+            ddrb: 0,
+            // Real 6522s have undefined power-on state for timers.
+            // Initialize to non-zero so detection can distinguish from ROM.
+            // $FFFF is a reasonable "undefined" value.
+            t1c: 0xFFFF,
+            t1l: 0xFFFF,
+            t2c: 0xFFFF,
+            t2l: 0xFF,
+            sr: 0,
+            acr: 0,
+            pcr: 0,
+            ifr: 0,
+            ier: 0,
+        }
+    }
 }
 
 impl Via6522 {

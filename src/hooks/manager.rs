@@ -141,8 +141,10 @@ pub struct HookManager {
     timed_hooks: Vec<TimedHook>,
     /// Count of hooks that have fired (for debugging)
     pub fire_count: u64,
-    /// Pending action: activate Mockingboard (set by hooks, cleared after processing)
+    /// Pending action: activate Mockingboard slot 4 (set by hooks, cleared after processing)
     pub pending_mockingboard_activate: bool,
+    /// Pending action: activate Mockingboard slot 5 (set by hooks, cleared after processing)
+    pub pending_mockingboard2_activate: bool,
     /// Pending action: check for custom commands (set by GETLN hook)
     pub pending_custom_command_check: bool,
 }
@@ -160,6 +162,7 @@ impl HookManager {
             timed_hooks: Vec::new(),
             fire_count: 0,
             pending_mockingboard_activate: false,
+            pending_mockingboard2_activate: false,
             pending_custom_command_check: false,
         }
     }
@@ -235,6 +238,10 @@ impl HookManager {
                     println!("==> Setting pending_mockingboard_activate = true");
                     self.pending_mockingboard_activate = true;
                 }
+                if hook.name == "mockingboard2_activate" {
+                    println!("==> Setting pending_mockingboard2_activate = true");
+                    self.pending_mockingboard2_activate = true;
+                }
                 
                 (hook.callback)(current_cycle);
                 fired = true;
@@ -261,15 +268,19 @@ impl HookManager {
     /// This fires after enough cycles for DOS/ProDOS to fully initialize.
     /// ~3 seconds at 1MHz = ~3,000,000 cycles is safe for most boot scenarios.
     /// `current_cycle` allows registering relative to current time (for reset handling).
-    pub fn register_mockingboard_hook(&mut self, current_cycle: u64, delay_cycles: u64) {
-        let trigger_at = current_cycle + delay_cycles;
-        println!("Mockingboard timed activation: will activate at cycle {} (~{:.1}s from now at 1MHz)",
-            trigger_at, delay_cycles as f64 / 1_000_000.0);
+    /// `slot` is 0 for slot 4, 1 for slot 5 (second Mockingboard).
+    pub fn register_mockingboard_hook(&mut self, slot: u8, delay_cycles: u64) {
+        let trigger_at = delay_cycles;  // From boot
+        let hook_name = if slot == 0 { "mockingboard_activate" } else { "mockingboard2_activate" };
+        let slot_num = if slot == 0 { 4 } else { 5 };
+        
+        println!("Mockingboard slot {} timed activation: will activate at cycle {} (~{:.1}s from boot at 1MHz)",
+            slot_num, trigger_at, delay_cycles as f64 / 1_000_000.0);
         self.add_timed_hook(
             trigger_at,
-            "mockingboard_activate",
-            |cycle| {
-                log::info!("Timed hook triggered at cycle {}: Mockingboard activating", cycle);
+            hook_name,
+            move |cycle| {
+                log::info!("Timed hook triggered at cycle {}: Mockingboard slot {} activating", cycle, slot_num);
             }
         );
     }
