@@ -75,10 +75,32 @@ impl Hook {
     }
 }
 
-/// Manages all registered hooks
+/// A timer-based hook that fires after a certain number of cycles
+pub struct TimedHook {
+    pub trigger_cycle: u64,
+    pub name: String,
+    pub callback: Box<dyn FnMut(u64) + Send>,
+}
+
+impl TimedHook {
+    pub fn new<F>(trigger_cycle: u64, name: impl Into<String>, callback: F) -> Self
+    where
+        F: FnMut(u64) + Send + 'static,
+    {
+        Self {
+            trigger_cycle,
+            name: name.into(),
+            callback: Box::new(callback),
+        }
+    }
+}
+
+/// Manages all registered hooks (address-based and timer-based)
 pub struct HookManager {
     /// Hooks indexed by address for fast lookup
     hooks: HashMap<u16, Vec<Hook>>,
+    /// Timer-based hooks (sorted by trigger cycle)
+    timed_hooks: Vec<TimedHook>,
     /// Count of hooks that have fired (for debugging)
     pub fire_count: u64,
     /// Pending action: activate Mockingboard (set by hooks, cleared after processing)
@@ -95,6 +117,7 @@ impl HookManager {
     pub fn new() -> Self {
         Self {
             hooks: HashMap::new(),
+            timed_hooks: Vec::new(),
             fire_count: 0,
             pending_mockingboard_activate: false,
         }
@@ -108,6 +131,7 @@ impl HookManager {
     }
 
     /// Convenience method to add a one-shot hook
+    #[allow(dead_code)]
     pub fn add_oneshot<F>(&mut self, address: u16, name: impl Into<String>, callback: F)
     where
         F: FnMut(&HookContext) -> HookResult + Send + 'static,
@@ -140,16 +164,64 @@ impl HookManager {
         self.hooks.retain(|_, v| !v.is_empty());
     }
 
-    /// Register the Mockingboard activation hook at the ideal ROM location
-    /// (after mouse firmware init completes at $FA6F).
-    /// This is safer than timer-based activation as it hooks at the exact right moment.
-    pub fn register_mockingboard_hook(&mut self) {
-        self.add_oneshot(
-            iic_addresses::AFTER_INITMOUSE, 
+    /// Add a timer-based hook that fires after N cycles from boot
+    pub fn add_timed_hook<F>(&mut self, cycles_from_boot: u64, name: impl Into<String>, callback: F)
+    where
+        F: FnMut(u64) + Send + 'static,
+    {
+        let name = name.into();
+        log::debug!("Timed hook registered: '{}' at cycle {}", name, cycles_from_boot);
+        self.timed_hooks.push(TimedHook::new(cycles_from_boot, name, callback));
+        // Keep sorted by trigger cycle for efficient checking
+        self.timed_hooks.sort_by_key(|h| h.trigger_cycle);
+    }
+
+    /// Check and execute any timed hooks that should fire at current cycle
+    /// Returns true if any hooks fired
+    pub fn check_timed_hooks(&mut self, current_cycle: u64) -> bool {
+        let mut fired = false;
+        
+        // Process all hooks that should fire (they're sorted, so we can stop early)
+        while let Some(hook) = self.timed_hooks.first() {
+            if hook.trigger_cycle <= current_cycle {
+                let mut hook = self.timed_hooks.remove(0);
+                self.fire_count += 1;
+                println!("==> Timed hook fired: '{}' at cycle {} (target: {})", 
+                    hook.name, current_cycle, hook.trigger_cycle);
+                
+                // Check for special system hooks
+                if hook.name == "mockingboard_activate" {
+                    println!("==> Setting pending_mockingboard_activate = true");
+                    self.pending_mockingboard_activate = true;
+                }
+                
+                (hook.callback)(current_cycle);
+                fired = true;
+            } else {
+                break; // No more hooks ready to fire
+            }
+        }
+        
+        fired
+    }
+
+    /// Check if any timed hooks are pending
+    #[inline]
+    pub fn has_pending_timed_hooks(&self) -> bool {
+        !self.timed_hooks.is_empty()
+    }
+
+    /// Register the Mockingboard activation hook using a timer.
+    /// This fires after enough cycles for DOS/ProDOS to fully initialize.
+    /// ~3 seconds at 1MHz = ~3,000,000 cycles is safe for most boot scenarios.
+    pub fn register_mockingboard_hook(&mut self, delay_cycles: u64) {
+        println!("Mockingboard timed activation: will activate after {} cycles (~{:.1}s at 1MHz)",
+            delay_cycles, delay_cycles as f64 / 1_000_000.0);
+        self.add_timed_hook(
+            delay_cycles,
             "mockingboard_activate",
-            |_ctx| {
-                log::info!("Hook triggered: Mouse firmware init complete, Mockingboard ready to activate");
-                HookResult::Continue
+            |cycle| {
+                log::info!("Timed hook triggered at cycle {}: Mockingboard activating", cycle);
             }
         );
     }
@@ -176,9 +248,10 @@ impl HookManager {
             }
 
             self.fire_count += 1;
-            log::debug!("Hook fired: '{}' at ${:04X}", hook.name, ctx.pc);
+            println!("==> Hook fired: '{}' at ${:04X}", hook.name, ctx.pc);
             
             // Check for special system hooks that need to set pending actions
+            // (Note: address-based mockingboard_activate is deprecated, use timed hooks)
             if hook.name == "mockingboard_activate" {
                 self.pending_mockingboard_activate = true;
             }

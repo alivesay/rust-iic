@@ -10,6 +10,7 @@ mod audio;
 mod bus;
 mod cli;
 mod cpu;
+mod cpu_monitor;
 mod device;
 mod disassembler;
 mod hooks;
@@ -114,13 +115,12 @@ fn main() -> Result<(), Error> {
         cpu.bus.iou.mockingboard = crate::device::mockingboard::Mockingboard::with_audio(mb_producer, mb_sample_rate);
         cpu.bus.iou.set_mockingboard_enabled(true);
         
-        // Use hook-based activation: activate at $FA6F after mouse firmware init
-        // This is more precise than the timer-based approach
+        // Use timer-based activation - wait for DOS/ProDOS to fully initialize
+        // ~3M cycles = ~3 seconds at 1MHz, should be enough for most boot scenarios
         cpu.bus.iou.mockingboard.set_hook_activation(true);
-        cpu.hooks.register_mockingboard_hook();
+        cpu.hooks.register_mockingboard_hook(3_000_000);
         
         println!("Mockingboard enabled in slot 4 (memory expansion disabled)");
-        println!("  → Hook-based activation: will activate after mouse firmware init at $FA6F");
         Some(mb_audio)
     } else {
         None

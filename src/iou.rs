@@ -53,7 +53,6 @@ pub struct IOU {
   pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
   pub floating_bus: u8,  // Last byte video hardware would read from RAM at current scan position
   pub col80_switch: bool, // Physical 80/40 column slide switch (true = 80 col)
-  pub is_opcode_fetch: bool, // True during CPU opcode fetch (for Mockingboard activation logic)
   pub debug: bool,
   pub self_test: bool,
 }
@@ -81,7 +80,6 @@ impl IOU {
           scan_cycle: 0,
           floating_bus: 0,
           col80_switch: true, // Default: 80-column switch ON (typical IIc position)
-          is_opcode_fetch: false,
           debug: false,
           self_test,
       }

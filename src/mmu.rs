@@ -184,23 +184,14 @@ impl MMU {
             // **Language Card (LC) RAM / ROM ($C100 - $CFFF)**
             0xC100..=0xCFFF => {
                 // Mockingboard slot 4 ROM space ($C400-$C4FF) - VIA register access
-                // Only intercept reads if Mockingboard has been ACTIVATED (by timer or hotkey).
-                // This allows mouse firmware/ROM to work during boot.
-                if (0xC400..=0xC4FF).contains(&addr) && iou.mockingboard.is_enabled() {
-                    println!("MMU READ: addr=${:04X} activated={}", addr, iou.mockingboard.is_activated());
-                }
+                // ONLY intercept if Mockingboard is both enabled AND activated.
+                // Timer-based activation ensures this only happens after boot completes.
                 if iou.mockingboard.is_activated() && (0xC400..=0xC4FF).contains(&addr) {
                     let offset = (addr & 0xFF) as u8;
-                    let value = iou.mockingboard.read(offset);
-                    println!("MMU READ: returning VIA value ${:02X}", value);
-                    value
-                } else {
-                    // if lcram == 1 {
-                    //     self.lcram[bank + (ramrd << 1)].read_byte(addr.wrapping_sub(0xC100))
-                    // } else {
-                    self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
-                    // }
+                    return iou.mockingboard.read(offset);
                 }
+                // Other slot ROM space (or $C4xx when MB not activated): read from ROM
+                self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
             }
 
             // **Language Card RAM ($D000 - $DFFF)**

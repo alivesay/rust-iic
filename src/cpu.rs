@@ -1,4 +1,5 @@
 use crate::bus::Bus;
+use crate::cpu_monitor::CpuTraceEntry;
 use crate::device::speaker::AudioProducer;
 use crate::disassembler::{Disassembler, SymbolTable};
 use crate::hooks::{HookContext, HookManager};
@@ -67,6 +68,41 @@ fn format_flags(flags: u8) -> String {
         .collect()
 }
 
+/// Get instruction length in bytes based on opcode
+/// Returns 1, 2, or 3 based on addressing mode
+fn instruction_length(opcode: u8) -> u8 {
+    // 65C02 instruction lengths by addressing mode pattern
+    match opcode {
+        // Implied/Accumulator (1 byte)
+        0x0A | 0x18 | 0x1A | 0x2A | 0x38 | 0x3A | 0x4A | 0x58 |
+        0x5A | 0x6A | 0x78 | 0x7A | 0x88 | 0x8A | 0x98 | 0x9A |
+        0xA8 | 0xAA | 0xB8 | 0xBA | 0xC8 | 0xCA | 0xD8 | 0xDA |
+        0xE8 | 0xEA | 0xF8 | 0xFA |
+        0x00 | 0x40 | 0x60 | 0xCB | 0xDB => 1, // BRK, RTI, RTS, WAI, STP
+        
+        // Immediate, Zero Page, Zero Page X/Y, (ZP,X), (ZP),Y, (ZP) (2 bytes)
+        0x09 | 0x29 | 0x49 | 0x69 | 0x89 | 0xA0 | 0xA2 | 0xA9 |
+        0xC0 | 0xC9 | 0xE0 | 0xE9 | // Immediate
+        0x05 | 0x06 | 0x14 | 0x15 | 0x16 | 0x24 | 0x25 | 0x26 |
+        0x34 | 0x35 | 0x36 | 0x45 | 0x46 | 0x55 | 0x56 | 0x64 |
+        0x65 | 0x66 | 0x74 | 0x75 | 0x76 | 0x84 | 0x85 | 0x86 |
+        0x94 | 0x95 | 0x96 | 0xA4 | 0xA5 | 0xA6 | 0xB4 | 0xB5 |
+        0xB6 | 0xC4 | 0xC5 | 0xC6 | 0xD5 | 0xD6 | 0xE4 | 0xE5 |
+        0xE6 | 0xF5 | 0xF6 | 0x04 | 0x44 => 2, // Zero page variants
+        
+        // Relative branches (2 bytes)
+        0x10 | 0x30 | 0x50 | 0x70 | 0x80 | 0x90 | 0xB0 | 0xD0 | 0xF0 => 2,
+        
+        // (ZP,X), (ZP),Y, (ZP) indirect modes (2 bytes)
+        0x01 | 0x11 | 0x12 | 0x21 | 0x31 | 0x32 | 0x41 | 0x51 |
+        0x52 | 0x61 | 0x71 | 0x72 | 0x81 | 0x91 | 0x92 | 0xA1 |
+        0xB1 | 0xB2 | 0xC1 | 0xD1 | 0xD2 | 0xE1 | 0xF1 | 0xF2 => 2,
+        
+        // Absolute, Absolute X/Y, Indirect, (Abs,X) (3 bytes)
+        _ => 3,
+    }
+}
+
 
 const CYCLE_TABLE: [u64; 256] = [
     7, 6, 2, 2, 2, 3, 5, 2, 3, 2, 2, 2, 2, 4, 6, 2,
@@ -108,6 +144,11 @@ pub struct CPU {
     
     /// Hook manager for ROM/execution hooks
     pub hooks: HookManager,
+    
+    /// Whether to capture trace entries for the CPU monitor
+    pub capture_trace: bool,
+    /// Last captured trace entry (valid when capture_trace is true)
+    pub last_trace: CpuTraceEntry,
 }
 
 impl CPU {
@@ -126,6 +167,8 @@ impl CPU {
             debug: false,
             extra_cycles: 0,
             hooks: HookManager::new(),
+            capture_trace: false,
+            last_trace: CpuTraceEntry::default(),
         }
     }
 
@@ -451,6 +494,11 @@ impl CPU {
             }
         }
 
+        // Check for timed hooks (fires based on cycle count, not PC)
+        if self.hooks.has_pending_timed_hooks() {
+            self.hooks.check_timed_hooks(self.cycles);
+        }
+
         // Check for execution hooks at current PC
         if self.hooks.has_hooks_at(self.pc) {
             let ctx = HookContext {
@@ -465,12 +513,13 @@ impl CPU {
             let _skip = self.hooks.execute_hooks(&ctx);
             // Note: skip functionality would require more complex handling
             // For now, hooks are for side effects only (like activating Mockingboard)
-            
-            // Process pending actions from hooks
-            if self.hooks.pending_mockingboard_activate {
-                self.hooks.pending_mockingboard_activate = false;
-                self.bus.iou.mockingboard.activate();
-            }
+        }
+        
+        // Process pending actions from hooks (both timed and address-based)
+        if self.hooks.pending_mockingboard_activate {
+            self.hooks.pending_mockingboard_activate = false;
+            self.bus.iou.mockingboard.activate();
+            println!("==> Mockingboard activated");
         }
 
         let pc = self.pc;
@@ -481,11 +530,29 @@ impl CPU {
             String::new()
         };
 
-        // Set flag so MMU knows this is opcode fetch (for Mockingboard activation logic)
-        // Opcode fetches should NOT activate Mockingboard; only data reads should
-        self.bus.iou.is_opcode_fetch = true;
         let opcode = self.fetch_byte();
-        self.bus.iou.is_opcode_fetch = false;
+
+        // Capture trace entry if monitoring is enabled (fast path - just struct copy)
+        if self.capture_trace {
+            // Peek at operand bytes without advancing PC
+            let operand1 = self.bus.read_byte(self.pc);
+            let operand2 = self.bus.read_byte(self.pc.wrapping_add(1));
+            let instruction_len = instruction_length(opcode);
+            
+            self.last_trace = CpuTraceEntry {
+                pc,
+                opcode,
+                operand1,
+                operand2,
+                instruction_len,
+                a: self.regs.a,
+                x: self.regs.x,
+                y: self.regs.y,
+                sp: self.regs.sp,
+                p: self.p.bits(),
+                cycles: self.cycles,
+            };
+        }
 
         // Tick base cycles BEFORE execution so that iou.cycles is accurate
         // when softswitch handlers (e.g. speaker toggle) read it
