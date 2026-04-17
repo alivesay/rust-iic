@@ -118,7 +118,7 @@ fn main() -> Result<(), Error> {
         // Use timer-based activation - wait for DOS/ProDOS to fully initialize
         // ~3M cycles = ~3 seconds at 1MHz, should be enough for most boot scenarios
         cpu.bus.iou.mockingboard.set_hook_activation(true);
-        cpu.hooks.register_mockingboard_hook(3_000_000);
+        cpu.hooks.register_mockingboard_hook(0, 3_000_000);
         
         println!("Mockingboard enabled in slot 4 (memory expansion disabled)");
         Some(mb_audio)
