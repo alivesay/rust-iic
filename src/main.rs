@@ -109,7 +109,7 @@ fn main() -> Result<(), Error> {
         println!("ZIP CHIP II-8 enabled (8MHz) - Press ESC during boot to disable, Ctrl+Z to toggle");
     }
 
-    // Mockingboard sound card (uses slot 4, disables memory expansion)
+    // Mockingboard sound card in slot 5 (no conflict with memory expansion)
     let _mockingboard_audio = if args.mockingboard {
         let (mb_producer, mb_sample_rate, mb_audio) = create_audio();
         cpu.bus.iou.mockingboard = crate::device::mockingboard::Mockingboard::with_audio(mb_producer, mb_sample_rate);
@@ -118,28 +118,29 @@ fn main() -> Result<(), Error> {
         // Use timer-based activation - wait for DOS/ProDOS to fully initialize
         // ~3M cycles = ~3 seconds at 1MHz, should be enough for most boot scenarios
         cpu.bus.iou.mockingboard.set_hook_activation(true);
-        cpu.hooks.register_mockingboard_hook(0, 3_000_000);
+        cpu.hooks.register_mockingboard_hook(1, 3_000_000);  // Slot 5
         
-        println!("Mockingboard enabled in slot 4 (memory expansion disabled)");
+        println!("Mockingboard enabled in slot 5");
         Some(mb_audio)
     } else {
         None
     };
 
-    // Second Mockingboard in slot 5 (for Ultima V dual-MB support, etc.)
+    // Second Mockingboard in slot 4 (for Ultima V dual-MB support, disables memory expansion)
     let _mockingboard2_audio = if args.mockingboard2 {
-        if !args.mockingboard {
-            println!("Warning: --mockingboard2 requires --mockingboard to also be enabled");
-        }
         let (mb2_producer, mb2_sample_rate, mb2_audio) = create_audio();
         cpu.bus.iou.mockingboard2 = crate::device::mockingboard::Mockingboard::with_audio(mb2_producer, mb2_sample_rate);
         cpu.bus.iou.set_mockingboard2_enabled(true);
         
-        // Use same timer-based activation as slot 4
+        // Use timer-based activation
         cpu.bus.iou.mockingboard2.set_hook_activation(true);
-        cpu.hooks.register_mockingboard_hook(1, 3_000_000);  // Hook ID 1 for slot 5
+        cpu.hooks.register_mockingboard_hook(0, 3_000_000);  // Slot 4
         
-        println!("Second Mockingboard enabled in slot 5 (12 total sound channels!)");
+        if args.mockingboard {
+            println!("Second Mockingboard enabled in slot 4 (12 total sound channels, memory expansion disabled)");
+        } else {
+            println!("Mockingboard enabled in slot 4 (memory expansion disabled)");
+        }
         Some(mb2_audio)
     } else {
         None

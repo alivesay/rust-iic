@@ -11,6 +11,7 @@ mod manager;
 mod custom_commands;
 
 // Re-export main types from manager
+#[allow(unused_imports)]
 pub use manager::{
     Hook,
     HookContext,

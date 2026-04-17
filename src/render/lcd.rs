@@ -406,6 +406,24 @@ impl PostProcessor for LcdRenderer {
         queue.write_buffer(&self.shader_params_buffer, 0, bytemuck::bytes_of(&gpu));
     }
 
+    fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder) {
+        let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lcd_intermediate_clear_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.intermediate_render_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+    }
+
     fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,

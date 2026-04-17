@@ -141,6 +141,7 @@ impl MMU {
 
     /// Direct write to main RAM (bypasses soft switches)
     /// Used by emulator for injecting data (custom commands, etc.)
+    #[allow(dead_code)]
     pub fn write_main_byte(&mut self, addr: u16, value: u8) {
         self.ram[0].write_byte(addr, value);
     }
@@ -189,19 +190,19 @@ impl MMU {
 
             // **Language Card (LC) RAM / ROM ($C100 - $CFFF)**
             0xC100..=0xCFFF => {
-                // Mockingboard slot 4 ROM space ($C400-$C4FF) - VIA register access
+                // Mockingboard2 slot 4 ROM space ($C400-$C4FF) - VIA register access
                 // ONLY intercept if Mockingboard is both enabled AND activated.
                 // Timer-based activation ensures this only happens after boot completes.
-                if iou.mockingboard.is_activated() && (0xC400..=0xC4FF).contains(&addr) {
-                    let offset = (addr & 0xFF) as u8;
-                    let value = iou.mockingboard.read(offset);
-                    println!("MMU READ: addr=${:04X} value=${:02X} (Mockingboard slot 4)", addr, value);
-                    return value;
-                }
-                // Mockingboard slot 5 ROM space ($C500-$C5FF) - second Mockingboard
-                if iou.mockingboard2.is_activated() && (0xC500..=0xC5FF).contains(&addr) {
+                if iou.mockingboard2.is_activated() && (0xC400..=0xC4FF).contains(&addr) {
                     let offset = (addr & 0xFF) as u8;
                     let value = iou.mockingboard2.read(offset);
+                    println!("MMU READ: addr=${:04X} value=${:02X} (Mockingboard2 slot 4)", addr, value);
+                    return value;
+                }
+                // Mockingboard slot 5 ROM space ($C500-$C5FF)
+                if iou.mockingboard.is_activated() && (0xC500..=0xC5FF).contains(&addr) {
+                    let offset = (addr & 0xFF) as u8;
+                    let value = iou.mockingboard.read(offset);
                     println!("MMU READ: addr=${:04X} value=${:02X} (Mockingboard slot 5)", addr, value);
                     return value;
                 }
@@ -223,11 +224,11 @@ impl MMU {
                 if lcram == 1 {
                     self.ram[altzp].read_byte(addr)
                 } else {
-                    // Machine ID spoofing: When Mockingboard is enabled, report as Apple IIe
+                    // Machine ID spoofing: When any Mockingboard is enabled, report as Apple IIe
                     // so games like Ultima V don't refuse to use Mockingboard on IIc.
                     // $FBB3 = machine ID ($00 = IIc, $06 = IIe)
                     // $FBC0 = version ($00 = IIc, $EA = IIe)
-                    if iou.mockingboard.is_enabled() {
+                    if iou.mockingboard.is_enabled() || iou.mockingboard2.is_enabled() {
                         match addr {
                             0xFBB3 => return 0x06, // Report as IIe
                             0xFBC0 => return 0xEA, // IIe version byte
@@ -303,25 +304,25 @@ impl MMU {
             0xC100..=0xCFFF => {
                 // Debug: log ALL writes to slot 4/5 ROM space
                 if (0xC400..=0xC4FF).contains(&addr) {
-                    println!("MMU WRITE: addr=${:04X} value=${:02X} mb_enabled={}", addr, value, iou.mockingboard.is_enabled());
-                }
-                if (0xC500..=0xC5FF).contains(&addr) {
                     println!("MMU WRITE: addr=${:04X} value=${:02X} mb2_enabled={}", addr, value, iou.mockingboard2.is_enabled());
                 }
-                // Mockingboard slot 4 ROM space ($C400-$C4FF) - VIA register writes
-                // Any write to $C4xx activates the Mockingboard (mimicking MB4c hardware)
-                if iou.mockingboard.is_enabled() && (0xC400..=0xC4FF).contains(&addr) {
-                    log::debug!("MMU: Mockingboard write intercepted at ${:04X} = ${:02X}", addr, value);
-                    iou.mockingboard.activate();  // First write wakes up the Mockingboard
-                    let offset = (addr & 0xFF) as u8;
-                    iou.mockingboard.write(offset, value);
+                if (0xC500..=0xC5FF).contains(&addr) {
+                    println!("MMU WRITE: addr=${:04X} value=${:02X} mb_enabled={}", addr, value, iou.mockingboard.is_enabled());
                 }
-                // Mockingboard slot 5 ROM space ($C500-$C5FF) - second Mockingboard
-                if iou.mockingboard2.is_enabled() && (0xC500..=0xC5FF).contains(&addr) {
+                // Mockingboard2 slot 4 ROM space ($C400-$C4FF) - VIA register writes
+                // Any write to $C4xx activates the Mockingboard2 (mimicking MB4c hardware)
+                if iou.mockingboard2.is_enabled() && (0xC400..=0xC4FF).contains(&addr) {
                     log::debug!("MMU: Mockingboard2 write intercepted at ${:04X} = ${:02X}", addr, value);
                     iou.mockingboard2.activate();  // First write wakes up the Mockingboard
                     let offset = (addr & 0xFF) as u8;
                     iou.mockingboard2.write(offset, value);
+                }
+                // Mockingboard slot 5 ROM space ($C500-$C5FF)
+                if iou.mockingboard.is_enabled() && (0xC500..=0xC5FF).contains(&addr) {
+                    log::debug!("MMU: Mockingboard write intercepted at ${:04X} = ${:02X}", addr, value);
+                    iou.mockingboard.activate();  // First write wakes up the Mockingboard
+                    let offset = (addr & 0xFF) as u8;
+                    iou.mockingboard.write(offset, value);
                 }
                 // ROM space is read-only, writes are ignored
                 0x00

@@ -47,8 +47,8 @@ pub struct IOU {
   pub mouse: Mouse,
   pub speaker: Speaker,
   pub memexp: MemoryExpansion, // Apple IIc Memory Expansion Card (Slot 4)
-  pub mockingboard: Mockingboard, // Mockingboard sound card (Slot 4, conflicts with memexp)
-  pub mockingboard2: Mockingboard, // Second Mockingboard (Slot 5, for Ultima V etc.)
+  pub mockingboard: Mockingboard, // Mockingboard sound card (Slot 5)
+  pub mockingboard2: Mockingboard, // Second Mockingboard (Slot 4, conflicts with memexp)
   pub zip: ZipChip,  // ZIP Chip accelerator (optional)
   pub cycles: u64,
   pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
@@ -92,18 +92,18 @@ impl IOU {
         self.zip = ZipChip::new(present);
     }
 
-    /// Enable the Mockingboard sound card (disables memory expansion).
+    /// Enable the Mockingboard sound card in slot 5.
     pub fn set_mockingboard_enabled(&mut self, enabled: bool) {
         self.mockingboard.set_enabled(enabled);
+    }
+
+    /// Enable the second Mockingboard in slot 4 (disables memory expansion).
+    pub fn set_mockingboard2_enabled(&mut self, enabled: bool) {
+        self.mockingboard2.set_enabled(enabled);
         if enabled {
             // Disable memexp - they share slot 4
             self.memexp.set_enabled(false);
         }
-    }
-
-    /// Enable the second Mockingboard in slot 5.
-    pub fn set_mockingboard2_enabled(&mut self, enabled: bool) {
-        self.mockingboard2.set_enabled(enabled);
     }
 
     /// Reset IOU state as if the hardware reset line was asserted.
@@ -308,19 +308,19 @@ impl IOU {
             // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
             0xC098..=0xC09F | 0xC0A8..=0xC0AF => self.scc.slot_read(addr),
 
-            // Slot 4 — Mockingboard or Memory Expansion Card ($C0C0–$C0CF)
+            // Slot 4 — Mockingboard2 or Memory Expansion Card ($C0C0–$C0CF)
             0xC0C0..=0xC0CF => {
-                if self.mockingboard.is_enabled() {
-                    self.mockingboard.read((addr & 0x0F) as u8)
+                if self.mockingboard2.is_enabled() {
+                    self.mockingboard2.read((addr & 0x0F) as u8)
                 } else {
                     self.memexp.read((addr & 0x0F) as u8)
                 }
             },
 
-            // Slot 5 — Second Mockingboard ($C0D0–$C0DF)
+            // Slot 5 — Mockingboard ($C0D0–$C0DF)
             0xC0D0..=0xC0DF => {
-                if self.mockingboard2.is_enabled() {
-                    self.mockingboard2.read((addr & 0x0F) as u8)
+                if self.mockingboard.is_enabled() {
+                    self.mockingboard.read((addr & 0x0F) as u8)
                 } else {
                     self.floating_bus
                 }
@@ -517,20 +517,20 @@ impl IOU {
           // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
           0xC098..=0xC09F | 0xC0A8..=0xC0AF => { self.scc.slot_write(addr, val); 0x00 },
 
-          // Slot 4 — Mockingboard or Memory Expansion Card ($C0C0–$C0CF)
+          // Slot 4 — Mockingboard2 or Memory Expansion Card ($C0C0–$C0CF)
           0xC0C0..=0xC0CF => {
-              if self.mockingboard.is_enabled() {
-                  self.mockingboard.write((addr & 0x0F) as u8, val);
+              if self.mockingboard2.is_enabled() {
+                  self.mockingboard2.write((addr & 0x0F) as u8, val);
               } else {
                   self.memexp.write((addr & 0x0F) as u8, val);
               }
               0x00
           },
 
-          // Slot 5 — Second Mockingboard ($C0D0–$C0DF)
+          // Slot 5 — Mockingboard ($C0D0–$C0DF)
           0xC0D0..=0xC0DF => {
-              if self.mockingboard2.is_enabled() {
-                  self.mockingboard2.write((addr & 0x0F) as u8, val);
+              if self.mockingboard.is_enabled() {
+                  self.mockingboard.write((addr & 0x0F) as u8, val);
               }
               0x00
           },

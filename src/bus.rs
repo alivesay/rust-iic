@@ -113,6 +113,7 @@ impl Bus {
     /// Write a byte without triggering soft switch side effects
     /// Used for injecting data from emulator (custom commands, etc.)
     /// Respects RAMRD/RAMWRT soft switches to write to correct bank
+    #[allow(dead_code)]
     pub fn poke_byte(&mut self, addr: u16, value: u8) {
         if self.system_type == SystemType::AppleIIc {
             if addr >= 0xC000 && addr <= 0xC0FF {

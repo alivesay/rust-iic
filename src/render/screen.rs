@@ -41,6 +41,9 @@ pub trait PostProcessor {
     /// Update shader-specific parameters.
     fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams);
 
+    /// Clear the intermediate texture to black before rendering.
+    fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder);
+
     /// Execute the post-processing render passes.
     fn render(
         &self,

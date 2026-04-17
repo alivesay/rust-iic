@@ -101,7 +101,9 @@ const EXAMPLE_PLAYER_X_ADDR: u16 = 0x1235;
 const EXAMPLE_PLAYER_Y_ADDR: u16 = 0x1236;
 
 /// Tracks previous state for change detection
+#[allow(dead_code)]
 static WATCHED_VALUE: AtomicU8 = AtomicU8::new(0);
+#[allow(dead_code)]
 static WATCH_ADDR: AtomicU16 = AtomicU16::new(0);
 
 // =============================================================================
@@ -233,6 +235,7 @@ fn read_prodos_string(bus: &mut Bus, addr: u16) -> String {
 
 /// Apple II text screen base addresses for each line (40-column mode)
 /// The screen memory has an interleaved layout
+#[allow(dead_code)]
 const TEXT_LINE_ADDRS: [u16; 24] = [
     0x0400, 0x0480, 0x0500, 0x0580, 0x0600, 0x0680, 0x0700, 0x0780,
     0x0428, 0x04A8, 0x0528, 0x05A8, 0x0628, 0x06A8, 0x0728, 0x07A8,
@@ -240,6 +243,7 @@ const TEXT_LINE_ADDRS: [u16; 24] = [
 ];
 
 /// Write a string to the Apple II text screen at specified line
+#[allow(dead_code)]
 fn write_screen_line(bus: &mut Bus, line: usize, text: &str) {
     if line >= 24 {
         return;
@@ -322,6 +326,7 @@ pub fn check_custom_command_mli(_bus: &mut Bus, _mli_info: &MliCallInfo) -> bool
 
 /// Set up a memory watch at a specific address
 /// When the value changes, on_change callback is called with (old, new) values
+#[allow(dead_code)]
 pub fn watch_memory(addr: u16) {
     WATCH_ADDR.store(addr, Ordering::Relaxed);
     println!("Memory watch set at ${:04X}", addr);
@@ -329,6 +334,7 @@ pub fn watch_memory(addr: u16) {
 
 /// Check watched memory for changes - call this periodically
 /// Returns Some((old, new)) if the value changed
+#[allow(dead_code)]
 pub fn check_memory_watch(bus: &mut Bus) -> Option<(u8, u8)> {
     let addr = WATCH_ADDR.load(Ordering::Relaxed);
     if addr == 0 {
