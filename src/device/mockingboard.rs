@@ -446,13 +446,17 @@ pub struct Mockingboard {
     // Hardware variant
     mb_type: MockingboardType,
     
-    /// Set true after activation (by timer, hotkey, or write to $C4xx).
+    /// Set true after activation (by hook, timer, hotkey, or write to $C4xx).
     /// Until activated, reads from $C4xx return ROM instead of VIA registers.
     /// This allows IIc mouse firmware to work during boot.
     activated: bool,
     
     /// Cycles remaining until auto-activation (0 = ready to activate on next tick)
+    /// Set to u64::MAX when using hook-based activation
     activation_countdown: u64,
+    
+    /// When true, use hook-based activation instead of countdown timer
+    use_hook_activation: bool,
 }
 
 impl Default for Mockingboard {
@@ -470,6 +474,7 @@ impl Default for Mockingboard {
             mb_type: MockingboardType::TypeA,  // Standard Mockingboard: 2 VIAs, each with 1 PSG
             activated: false,
             activation_countdown: ACTIVATION_DELAY_CYCLES,
+            use_hook_activation: false,
         }
     }
 }
@@ -501,7 +506,21 @@ impl Mockingboard {
         self.enabled
     }
     
-    /// Activate the Mockingboard (called on first write to $C4xx).
+    /// Enable hook-based activation instead of timer-based.
+    /// When enabled, the Mockingboard waits for explicit activate() call
+    /// instead of counting down cycles. This should be used with the
+    /// ROM hook at $FA6F (after mouse firmware init).
+    pub fn set_hook_activation(&mut self, use_hook: bool) {
+        self.use_hook_activation = use_hook;
+        if use_hook {
+            // Disable the countdown timer
+            self.activation_countdown = u64::MAX;
+        } else {
+            self.activation_countdown = ACTIVATION_DELAY_CYCLES;
+        }
+    }
+    
+    /// Activate the Mockingboard (called on first write to $C4xx or by hook).
     /// Mockingboard stays dormant at boot to avoid conflicts with
     /// Apple IIc mouse firmware, then activates when software accesses it.
     pub fn activate(&mut self) {
@@ -665,14 +684,19 @@ impl Mockingboard {
             return;
         }
         
-        // Auto-activation timer: wait for boot to complete before enabling
+        // Handle activation: either wait for hook or countdown timer
         if !self.activated {
+            if self.use_hook_activation {
+                // Hook-based activation: just wait for explicit activate() call
+                return;
+            }
+            // Timer-based activation: countdown until ready
             if self.activation_countdown > 0 {
                 self.activation_countdown -= 1;
+                return;
             } else {
                 self.activated = true;
             }
-            return; // Don't tick VIAs/PSGs until activated
         }
         
         // Tick VIAs (for timer interrupts)
@@ -724,6 +748,11 @@ impl Mockingboard {
         self.last_cycle = 0;
         self.psg_tick_accum = 0.0;
         self.activated = false;  // Require re-activation after reset
-        self.activation_countdown = ACTIVATION_DELAY_CYCLES;
+        // Preserve hook vs timer activation mode
+        if self.use_hook_activation {
+            self.activation_countdown = u64::MAX;
+        } else {
+            self.activation_countdown = ACTIVATION_DELAY_CYCLES;
+        }
     }
 }
