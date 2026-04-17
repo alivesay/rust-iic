@@ -194,9 +194,18 @@ impl MMU {
                 // Timer-based activation ensures this only happens after boot completes.
                 if iou.mockingboard.is_activated() && (0xC400..=0xC4FF).contains(&addr) {
                     let offset = (addr & 0xFF) as u8;
-                    return iou.mockingboard.read(offset);
+                    let value = iou.mockingboard.read(offset);
+                    println!("MMU READ: addr=${:04X} value=${:02X} (Mockingboard slot 4)", addr, value);
+                    return value;
                 }
-                // Other slot ROM space (or $C4xx when MB not activated): read from ROM
+                // Mockingboard slot 5 ROM space ($C500-$C5FF) - second Mockingboard
+                if iou.mockingboard2.is_activated() && (0xC500..=0xC5FF).contains(&addr) {
+                    let offset = (addr & 0xFF) as u8;
+                    let value = iou.mockingboard2.read(offset);
+                    println!("MMU READ: addr=${:04X} value=${:02X} (Mockingboard slot 5)", addr, value);
+                    return value;
+                }
+                // Other slot ROM space (or $C4xx/$C5xx when MB not activated): read from ROM
                 self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
             }
 
@@ -292,9 +301,12 @@ impl MMU {
             //     value
             // ),
             0xC100..=0xCFFF => {
-                // Debug: log ALL writes to this range
+                // Debug: log ALL writes to slot 4/5 ROM space
                 if (0xC400..=0xC4FF).contains(&addr) {
                     println!("MMU WRITE: addr=${:04X} value=${:02X} mb_enabled={}", addr, value, iou.mockingboard.is_enabled());
+                }
+                if (0xC500..=0xC5FF).contains(&addr) {
+                    println!("MMU WRITE: addr=${:04X} value=${:02X} mb2_enabled={}", addr, value, iou.mockingboard2.is_enabled());
                 }
                 // Mockingboard slot 4 ROM space ($C400-$C4FF) - VIA register writes
                 // Any write to $C4xx activates the Mockingboard (mimicking MB4c hardware)
@@ -303,6 +315,13 @@ impl MMU {
                     iou.mockingboard.activate();  // First write wakes up the Mockingboard
                     let offset = (addr & 0xFF) as u8;
                     iou.mockingboard.write(offset, value);
+                }
+                // Mockingboard slot 5 ROM space ($C500-$C5FF) - second Mockingboard
+                if iou.mockingboard2.is_enabled() && (0xC500..=0xC5FF).contains(&addr) {
+                    log::debug!("MMU: Mockingboard2 write intercepted at ${:04X} = ${:02X}", addr, value);
+                    iou.mockingboard2.activate();  // First write wakes up the Mockingboard
+                    let offset = (addr & 0xFF) as u8;
+                    iou.mockingboard2.write(offset, value);
                 }
                 // ROM space is read-only, writes are ignored
                 0x00

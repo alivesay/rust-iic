@@ -248,7 +248,10 @@ impl CPU {
         // Clear and re-register timed hooks (mockingboard deactivated on IOU reset)
         self.hooks.clear_timed_hooks();
         if self.bus.iou.mockingboard.is_enabled() {
-            self.hooks.register_mockingboard_hook(self.cycles, 3_000_000);
+            self.hooks.register_mockingboard_hook(0, 3_000_000);
+        }
+        if self.bus.iou.mockingboard2.is_enabled() {
+            self.hooks.register_mockingboard_hook(1, 3_000_000);
         }
 
         self.pc = self.bus.read_word(0xFFFC);
@@ -282,6 +285,9 @@ impl CPU {
         self.hooks.clear_timed_hooks();
         if self.bus.iou.mockingboard.is_enabled() {
             self.hooks.register_mockingboard_hook(0, 3_000_000);
+        }
+        if self.bus.iou.mockingboard2.is_enabled() {
+            self.hooks.register_mockingboard_hook(1, 3_000_000);
         }
 
         self.pc = self.bus.read_word(0xFFFC);
@@ -533,7 +539,12 @@ impl CPU {
         if self.hooks.pending_mockingboard_activate {
             self.hooks.pending_mockingboard_activate = false;
             self.bus.iou.mockingboard.activate();
-            println!("==> Mockingboard activated");
+            println!("==> Mockingboard slot 4 activated");
+        }
+        if self.hooks.pending_mockingboard2_activate {
+            self.hooks.pending_mockingboard2_activate = false;
+            self.bus.iou.mockingboard2.activate();
+            println!("==> Mockingboard slot 5 activated");
         }
         
         // Check for ProDOS MLI calls at $BF00 and log them

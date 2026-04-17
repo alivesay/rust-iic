@@ -48,6 +48,7 @@ pub struct IOU {
   pub speaker: Speaker,
   pub memexp: MemoryExpansion, // Apple IIc Memory Expansion Card (Slot 4)
   pub mockingboard: Mockingboard, // Mockingboard sound card (Slot 4, conflicts with memexp)
+  pub mockingboard2: Mockingboard, // Second Mockingboard (Slot 5, for Ultima V etc.)
   pub zip: ZipChip,  // ZIP Chip accelerator (optional)
   pub cycles: u64,
   pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
@@ -75,6 +76,7 @@ impl IOU {
           speaker: Speaker::new(audio_producer, sample_rate),
           memexp: MemoryExpansion::new(),
           mockingboard: Mockingboard::new(),  // Disabled by default, enabled via --mockingboard
+          mockingboard2: Mockingboard::new(), // Disabled by default, enabled via --mockingboard2
           zip: ZipChip::new(false),  // Disabled by default, enabled via --zip
           cycles: 0,
           scan_cycle: 0,
@@ -99,6 +101,11 @@ impl IOU {
         }
     }
 
+    /// Enable the second Mockingboard in slot 5.
+    pub fn set_mockingboard2_enabled(&mut self, enabled: bool) {
+        self.mockingboard2.set_enabled(enabled);
+    }
+
     /// Reset IOU state as if the hardware reset line was asserted.
     /// On a real Apple IIc, the IOU chip clears all soft switches on reset.
     pub fn reset(&mut self) {
@@ -115,6 +122,7 @@ impl IOU {
         self.iwm.reset();
         self.zip.reset();
         self.mockingboard.reset();
+        self.mockingboard2.reset();
     }
 
     #[rustfmt::skip]
@@ -309,8 +317,17 @@ impl IOU {
                 }
             },
 
+            // Slot 5 — Second Mockingboard ($C0D0–$C0DF)
+            0xC0D0..=0xC0DF => {
+                if self.mockingboard2.is_enabled() {
+                    self.mockingboard2.read((addr & 0x0F) as u8)
+                } else {
+                    self.floating_bus
+                }
+            },
+
             // Other slot I/O (stubbed — floating bus)
-            0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0D0..=0xC0DF | 0xC0F0..=0xC0FF => self.floating_bus,
+            0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0F0..=0xC0FF => self.floating_bus,
             _ => {
               if self.debug { println!("IOU: Unhandled read at address {:04X}", addr); }
               0x00
@@ -510,8 +527,16 @@ impl IOU {
               0x00
           },
 
+          // Slot 5 — Second Mockingboard ($C0D0–$C0DF)
+          0xC0D0..=0xC0DF => {
+              if self.mockingboard2.is_enabled() {
+                  self.mockingboard2.write((addr & 0x0F) as u8, val);
+              }
+              0x00
+          },
+
           // Other slot I/O (stubbed)
-          0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0D0..=0xC0DF | 0xC0F0..=0xC0FF => 0x00,
+          0xC090..=0xC097 | 0xC0A0..=0xC0A7 | 0xC0B0..=0xC0BF | 0xC0F0..=0xC0FF => 0x00,
 
             _ => {
               println!("IOU: Unhandled write at address {:04X}", addr);
@@ -535,7 +560,7 @@ impl IOU {
         let scc_irq = self.scc.irq_pending();
 
         // Check Mockingboard interrupts (VIA timers)
-        let mockingboard_irq = self.mockingboard.irq_active();
+        let mockingboard_irq = self.mockingboard.irq_active() || self.mockingboard2.irq_active();
 
         mouse_irq || scc_irq || mockingboard_irq
     }

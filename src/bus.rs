@@ -329,6 +329,7 @@ impl Bus {
         // Mockingboard ticks once per cycle
         for _ in 0..cycles {
             self.iou.mockingboard.tick();
+            self.iou.mockingboard2.tick();
         }
         
         if self.iou.check_interrupts() {
