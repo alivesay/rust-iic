@@ -659,22 +659,29 @@ impl Video {
                                     }
                                 }
                             } else {
-                                // Artifact color for this pixel's phase position
-                                // On real hardware, an ON pixel has full white luma;
-                                // NTSC decoding adds color to that brightness.
-                                // These must be bright — the pixel IS on, color is overlaid.
+                                // NTSC artifact colors
+                                // Phase determines color: even columns vs odd columns
+                                // Palette bit (bit 7) shifts the phase, selecting color pair
                                 let artifact_color = if palette_flag {
+                                    // Palette 1: Blue/Orange
                                     if x_logical % 2 == 0 { [100, 140, 255, 255] }   // Blue (Even)
-                                    else { [255, 180, 80, 255] }             // Orange (Odd)
+                                    else { [255, 180, 80, 255] }                      // Orange (Odd)
                                 } else {
+                                    // Palette 0: Violet/Green
                                     if x_logical % 2 == 0 { [180, 100, 255, 255] }   // Violet (Even)
-                                    else { [100, 255, 100, 255] }            // Green (Odd)
+                                    else { [100, 255, 100, 255] }                     // Green (Odd)
                                 };
 
+                                // NTSC color cancellation: adjacent ON pixels at opposite phases
+                                // cancel their chroma component, resulting in white
+                                // Adjacent bits are always opposite phase, so any neighbor ON = white
                                 let is_white = prev_on || next_on;
+                                
                                 let color = if is_white {
+                                    // Adjacent ON pixels cancel to white
                                     [240, 240, 240, 255]
                                 } else {
+                                    // Isolated pixel = full artifact color
                                     artifact_color
                                 };
 
@@ -686,42 +693,6 @@ impl Video {
                                             if index + 4 <= self.framebuffer.len() {
                                                 self.framebuffer[index..index + 4]
                                                     .copy_from_slice(&color);
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Color fringing at edges of white runs:
-                                // Subtle NTSC chroma bleed — blend artifact color with black
-                                // at ~40% intensity (real composite signal decay, not full color)
-                                if is_white {
-                                    let fringe = [
-                                        (artifact_color[0] as u16 * 100 / 255) as u8,
-                                        (artifact_color[1] as u16 * 100 / 255) as u8,
-                                        (artifact_color[2] as u16 * 100 / 255) as u8,
-                                        255,
-                                    ];
-                                    if !prev_on && x > 0 {
-                                        let fx = x - 1;
-                                        for dy in 0..2 {
-                                            if fx < self.active_width {
-                                                let index = self.fb_index(fx, y + dy);
-                                                if index + 4 <= self.framebuffer.len() {
-                                                    self.framebuffer[index..index + 4]
-                                                        .copy_from_slice(&fringe);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if !next_on {
-                                        let fx = x + 2;
-                                        for dy in 0..2 {
-                                            if fx < self.active_width {
-                                                let index = self.fb_index(fx, y + dy);
-                                                if index + 4 <= self.framebuffer.len() {
-                                                    self.framebuffer[index..index + 4]
-                                                        .copy_from_slice(&fringe);
-                                                }
                                             }
                                         }
                                     }
