@@ -77,8 +77,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         glow = mix(vec3<f32>(glow_lum), glow, glow_sat_boost);
         glow = max(glow, vec3<f32>(0.0));
         
-        // Add glow with cval*rbloom factor from CRT shader
-        result = result + glow * glow_amt * 0.25 * glow_factor;
+        // Add glow - use 1.0 instead of glow_factor for now to debug
+        // (glow_factor should be cval*rbloom from CRT shader alpha)
+        result = result + glow * glow_amt * 0.25;
     }
     
     return vec4<f32>(result, 1.0);
