@@ -1,3 +1,4 @@
+pub mod drive_audio;
 pub mod iwm;
 pub mod joystick;
 pub mod keyboard;
@@ -5,5 +6,6 @@ pub mod memexp;
 pub mod mockingboard;
 pub mod mouse;
 pub mod scc;
+pub mod smartport;
 pub mod speaker;
 pub mod zip;

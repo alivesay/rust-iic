@@ -1,9 +1,158 @@
 use std::path::Path;
 use std::time::Instant;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use a2kit::img::DiskImage;
+
+use super::drive_audio::{DriveAudio, DriveEvent, AudioProducer};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum WozFormat { Woz1, Woz2, Unknown }
+
+/// 3.5" disk geometry - sectors per track varies by zone
+const SECTORS_PER_TRACK_35: [u8; 5] = [12, 11, 10, 9, 8];
+
+/// GCR 6-and-2 encoding table for 3.5" disks (maps 6-bit value to disk byte)
+const TO_DISK_BYTE_35: [u8; 64] = [
+    0x96, 0x97, 0x9A, 0x9B, 0x9D, 0x9E, 0x9F, 0xA6,
+    0xA7, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB2, 0xB3,
+    0xB4, 0xB5, 0xB6, 0xB7, 0xB9, 0xBA, 0xBB, 0xBC,
+    0xBD, 0xBE, 0xBF, 0xCB, 0xCD, 0xCE, 0xCF, 0xD3,
+    0xD6, 0xD7, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE,
+    0xDF, 0xE5, 0xE6, 0xE7, 0xE9, 0xEA, 0xEB, 0xEC,
+    0xED, 0xEE, 0xEF, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6,
+    0xF7, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+];
+
+/// Track zone boundaries (tracks 0-15 = zone 0, 16-31 = zone 1, etc.)
+fn track_zone_35(track: u8) -> usize {
+    match track {
+        0..=15 => 0,
+        16..=31 => 1,
+        32..=47 => 2,
+        48..=63 => 3,
+        _ => 4,
+    }
+}
+
+/// Get sectors per track for 3.5" disk
+fn sectors_for_track_35(track: u8) -> u8 {
+    SECTORS_PER_TRACK_35[track_zone_35(track)]
+}
+
+/// 3.5" drive state (UniDisk 3.5 / Apple 3.5 Drive)
+struct Drive35State {
+    /// Path to loaded disk image
+    disk_path: Option<String>,
+    /// File handle for block I/O
+    file: Option<File>,
+    /// Number of tracks (80 for 800K, 160 for double-sided addressing)
+    num_tracks: u16,
+    /// Current track (0-79) * 2 + side (0-1)
+    cur_qtr_track: u16,
+    /// Write protect status
+    write_prot: bool,
+    /// Disk was just ejected (for disk-switched detection)  
+    just_ejected: bool,
+    /// Motor state for 3.5" (separate from 5.25")
+    motor_on: bool,
+    /// Step direction: false = inward (higher tracks), true = outward (lower)
+    step_direction: bool,
+    /// Current head: 0 = lower (side 0), 1 = upper (side 1)
+    head: u8,
+    /// Track data buffer for nibblized data
+    track_data: Vec<u8>,
+    /// Current position in track
+    nib_pos: usize,
+    /// Track length in bytes
+    track_len: usize,
+    /// Dirty flag
+    dirty: bool,
+    /// Loaded track number (-1 if none)
+    loaded_track: i16,
+}
+
+impl Drive35State {
+    fn new() -> Self {
+        Self {
+            disk_path: None,
+            file: None,
+            num_tracks: 0,
+            cur_qtr_track: 0,
+            write_prot: false,
+            just_ejected: false,
+            motor_on: false,
+            step_direction: false,
+            head: 0,
+            track_data: Vec::new(),
+            nib_pos: 0,
+            track_len: 0,
+            dirty: false,
+            loaded_track: -1,
+        }
+    }
+
+    fn has_disk(&self) -> bool {
+        self.num_tracks > 0
+    }
+
+    /// Load a ProDOS-order (.po) or 2IMG disk image
+    fn load(&mut self, path: &str) -> Result<(), String> {
+        let mut file = File::open(path)
+            .map_err(|e| format!("Failed to open 3.5\" disk image: {}", e))?;
+
+        let metadata = file.metadata()
+            .map_err(|e| format!("Failed to get file metadata: {}", e))?;
+
+        let file_size = metadata.len();
+
+        // Detect format by size
+        // 800K = 819200 bytes (ProDOS order)
+        // 2IMG has 64-byte header
+        let data_offset;
+        let data_size;
+
+        if file_size == 819200 {
+            // Raw ProDOS order
+            data_offset = 0;
+            data_size = 819200;
+        } else if file_size == 819200 + 64 {
+            // 2IMG with header
+            let mut header = [0u8; 64];
+            file.read_exact(&mut header)
+                .map_err(|e| format!("Failed to read 2IMG header: {}", e))?;
+            // Verify 2IMG magic
+            if &header[0..4] != b"2IMG" {
+                return Err("Invalid 2IMG header".to_string());
+            }
+            data_offset = 64;
+            data_size = 819200;
+        } else if file_size >= 819200 {
+            // Assume raw with possible extra data
+            data_offset = 0;
+            data_size = 819200;
+        } else {
+            return Err(format!("Invalid 3.5\" disk image size: {} bytes", file_size));
+        }
+
+        // Verify we have enough data
+        if file_size < data_offset + data_size {
+            return Err("Disk image too small".to_string());
+        }
+
+        self.disk_path = Some(path.to_string());
+        self.file = Some(file);
+        self.num_tracks = 160; // 80 tracks * 2 sides
+        self.cur_qtr_track = 0;
+        self.write_prot = metadata.permissions().readonly();
+        self.just_ejected = false;
+        self.dirty = false;
+        self.loaded_track = -1;
+
+        log::info!("Loaded 3.5\" disk: {} ({} bytes)", path, data_size);
+        Ok(())
+    }
+}
 
 /// Per-drive state
 struct DriveState {
@@ -110,7 +259,17 @@ pub struct Iwm {
     motor_off_timer: u64,          // Cycles remaining before motor actually turns off
     motor_on_cycles: u64,          // Cycles since motor turned on (for MZ status bit)
 
-    drives: [DriveState; 2],
+    drives: [DriveState; 2],       // 5.25" drives (internal + external)
+    drives35: [Drive35State; 2],   // 3.5" drives (SmartPort devices)
+    
+    // 3.5" drive specific state
+    head35: u8,                    // Current head for 3.5" drives: 0=lower, 1=upper
+    motor_on35: bool,              // Motor state for 3.5" drives (separate from 5.25")
+    step_direction35: bool,        // Step direction for 3.5": false=inward, true=outward
+
+    // Drive audio synthesis
+    pub drive_audio: DriveAudio,
+    audio_cycle: u64,  // Current cycle count for audio events
 
     // Metrics
     pub bytes_read_counter: u64,
@@ -140,12 +299,45 @@ impl Iwm {
             motor_on_cycles: 0,
 
             drives: [DriveState::new(), DriveState::new()],
+            drives35: [Drive35State::new(), Drive35State::new()],
+            
+            head35: 0,
+            motor_on35: false,
+            step_direction35: false,
+
+            drive_audio: DriveAudio::new(),
+            audio_cycle: 0,
 
             bytes_read_counter: 0,
             revolutions_counter: 0,
             current_track_revolutions: 0,
             data_overrun_counter: 0,
         }
+    }
+    
+    /// Get current 3.5" head selection (0=lower/side0, 1=upper/side1)
+    pub fn get_head35(&self) -> u8 {
+        self.head35
+    }
+    
+    /// Set 3.5" head selection (from $C031 bit 7)
+    pub fn set_head35(&mut self, head: u8) {
+        self.head35 = head & 1;
+    }
+
+    /// Initialize drive audio with an audio producer
+    pub fn init_audio(&mut self, producer: AudioProducer, sample_rate: u32) {
+        self.drive_audio = DriveAudio::with_audio(producer, sample_rate);
+    }
+
+    /// Enable or disable drive audio
+    pub fn set_drive_audio_enabled(&mut self, enabled: bool) {
+        self.drive_audio.set_enabled(enabled);
+    }
+
+    /// Update drive audio synthesis (call once per frame)
+    pub fn update_audio(&mut self) {
+        self.drive_audio.update(self.audio_cycle);
     }
 
     /// Reset IWM chip state as if the hardware reset line was asserted.
@@ -172,12 +364,25 @@ impl Iwm {
             drive.data_ready = false;
             drive.consumed_epoch = 0;
         }
+        // Reset 3.5" drive state
+        self.head35 = 0;
+        self.motor_on35 = false;
+        self.step_direction35 = false;
+        for drive in &mut self.drives35 {
+            drive.motor_on = false;
+            drive.just_ejected = false;
+        }
     }
 
     /// Index of the currently selected drive (0 or 1).
     #[inline]
     fn di(&self) -> usize {
         self.drive_select as usize
+    }
+    
+    /// Check if any 3.5" drive has a disk loaded
+    pub fn has_35_disk(&self) -> bool {
+        self.drives35[0].has_disk() || self.drives35[1].has_disk()
     }
 
     pub fn get_and_reset_metrics(&mut self) -> (u64, bool, u8, u64, u64) {
@@ -238,6 +443,45 @@ impl Iwm {
 
     pub fn load_disk2<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         self.load_disk_drive(1, path)
+    }
+    
+    /// Load a 3.5" disk image (.po, .2mg) into drive 3 (first SmartPort/3.5" drive)
+    pub fn load_disk35<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        let path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?;
+        self.drives35[0].load(path_str).map_err(|e| anyhow::anyhow!(e))
+    }
+    
+    /// Load a 3.5" disk image (.po, .2mg) into drive 4 (second SmartPort/3.5" drive)
+    pub fn load_disk35_2<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        let path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?;
+        self.drives35[1].load(path_str).map_err(|e| anyhow::anyhow!(e))
+    }
+    
+    /// Returns (has_disk, is_active, is_write_protected) for the given 3.5" drive (0 or 1).
+    pub fn drive_status_35(&self, drive: usize) -> (bool, bool, bool) {
+        let has_disk = self.drives35[drive].has_disk();
+        let is_active = self.drives35[drive].motor_on;
+        let wp = self.drives35[drive].write_prot;
+        (has_disk, is_active, wp)
+    }
+    
+    /// Toggle write protect for the given 3.5" drive.
+    pub fn toggle_write_protect_35(&mut self, drive: usize) {
+        self.drives35[drive].write_prot = !self.drives35[drive].write_prot;
+    }
+    
+    /// Eject the disk from the given 3.5" drive.
+    pub fn eject_disk_35(&mut self, drive: usize) {
+        // TODO: Flush dirty data if needed
+        self.drives35[drive].disk_path = None;
+        self.drives35[drive].file = None;
+        self.drives35[drive].num_tracks = 0;
+        self.drives35[drive].track_data.clear();
+        self.drives35[drive].nib_pos = 0;
+        self.drives35[drive].track_len = 0;
+        self.drives35[drive].loaded_track = -1;
+        self.drives35[drive].dirty = false;
+        self.drives35[drive].just_ejected = true;
     }
 
     fn load_disk_drive<P: AsRef<Path>>(&mut self, drive: usize, path: P) -> anyhow::Result<()> {
@@ -341,6 +585,8 @@ impl Iwm {
                         self.drives[d].head_pos, self.drives[d].loaded_track);
                 }
                 self.motor_on_cycles = 0;
+                // Queue motor on audio event
+                self.drive_audio.queue_event(self.audio_cycle, DriveEvent::MotorOn);
             }
             self.motor_on = true;
             self.cycles_since_last_read = 0;
@@ -354,6 +600,8 @@ impl Iwm {
                     self.save_disk(d);
                 }
                 self.motor_on = false;
+                // Queue motor off audio event
+                self.drive_audio.queue_event(self.audio_cycle, DriveEvent::MotorOff);
                 if self.debug { println!("IWM MOTOR: ON → OFF immediate (drive={})", d + 1); }
             } else {
                 // Mode bit 2 clear (default): start ~1 second motor-off timer
@@ -410,10 +658,28 @@ impl Iwm {
                             }
                             self.drives[d].head_pos = new_pos as u8;
                             self.current_track_revolutions = 0;
+                            
+                            // Queue stepper audio event only for selected drive
+                            if d == self.di() {
+                                self.drive_audio.queue_event(
+                                    self.audio_cycle,
+                                    DriveEvent::Step { quarter_track: new_pos as u8 }
+                                );
+                            }
+                            
                             if self.debug {
                                 println!("IWM: Drive {} head moved to {} (Delta: {})", d + 1, self.drives[d].head_pos, delta);
                             }
                         }
+                    } else if new_pos < 0 && self.drives[d].head_pos > 0 {
+                        // Trying to step below track 0
+                        self.drives[d].head_pos = 0;
+                        if self.debug {
+                            println!("IWM: Drive {} hit track 0 stop", d + 1);
+                        }
+                    } else if new_pos < 0 {
+                        // Already at track 0, just clamp
+                        self.drives[d].head_pos = 0;
                     }
                 }
             }
@@ -421,6 +687,9 @@ impl Iwm {
     }
 
     pub fn tick(&mut self, cycles: u64) {
+        // Update audio cycle counter
+        self.audio_cycle += cycles;
+
         // Process motor-off timer even if motor appears on
         if self.motor_off_pending {
             if cycles >= self.motor_off_timer {
@@ -433,6 +702,8 @@ impl Iwm {
                 }
                 self.drives[d].was_writing = false;
                 self.motor_on = false;
+                // Queue motor off audio event
+                self.drive_audio.queue_event(self.audio_cycle, DriveEvent::MotorOff);
                 if self.debug { println!("IWM MOTOR: delayed OFF fired (drive={})", d + 1); }
             } else {
                 self.motor_off_timer -= cycles;
@@ -511,6 +782,8 @@ impl Iwm {
             }
             self.drives[d].was_writing = false;
             self.motor_on = false;
+            // Queue motor off audio event
+            self.drive_audio.queue_event(self.audio_cycle, DriveEvent::MotorOff);
             self.cycles_since_last_read = 0;
             if self.debug { println!("IWM: Motor auto-off (no access for ~10s)"); }
         }
@@ -1068,8 +1341,369 @@ impl Iwm {
         0
     }
 
-    pub fn access(&mut self, addr: u16, val: u8, write: bool, floating_bus: u8) -> u8 {
+    /// Handle IWM access in 3.5"/SmartPort mode ($C031 bit 6 = 1)
+    /// In this mode, phase signals encode status queries and actions
+    /// instead of stepper motor control.
+    fn access_35(&mut self, addr: u16, val: u8, write: bool, floating_bus: u8) -> u8 {
+        let loc = addr & 0xF;
+        let on = (loc & 1) != 0;
+        
+        // Handle phase changes - in 3.5" mode these encode status/commands
+        if loc < 8 {
+            let phase = (loc >> 1) as u8;
+            if on {
+                self.phases |= 1 << phase;
+            } else {
+                self.phases &= !(1 << phase);
+            }
+            
+            // Phase 3 going ON triggers an action (if motor is on)
+            if phase == 3 && on && self.motor_on {
+                self.do_action_35();
+            }
+        } else {
+            // Non-phase switches (motor, drive select, Q6/Q7) work the same
+            match loc {
+                0x8 => self.set_motor(false),
+                0x9 => self.set_motor(true),
+                0xA => self.drive_select = false,
+                0xB => self.drive_select = true,
+                0xC => self.q6 = false,
+                0xD => {
+                    self.q6 = true;
+                    if write && self.q7 {
+                        if self.motor_on {
+                            self.write_load(val);
+                        } else {
+                            self.mode = val;
+                        }
+                    }
+                },
+                0xE => {
+                    self.write_mode = false;
+                    self.q7 = false;
+                },
+                0xF => {
+                    self.q7 = true;
+                    if write && self.q6 {
+                        if self.motor_on {
+                            self.write_load(val);
+                        } else {
+                            self.mode = val;
+                        }
+                    }
+                    self.write_mode = true;
+                },
+                _ => {}
+            }
+        }
+        
+        // Return value based on Q6/Q7/motor state
+        if write {
+            return 0;
+        }
+        
+        if loc < 0xC {
+            return floating_bus;
+        }
+        
+        match (self.q7, self.q6) {
+            (false, false) => {
+                if self.motor_on {
+                    // In 3.5" mode, return data from disk
+                    self.read_data_35()
+                } else {
+                    floating_bus
+                }
+            },
+            (false, true) => {
+                // Status register - includes 3.5" status in bit 7
+                let status = self.read_status_35();
+                (status << 7) | (self.motor_on as u8) << 5 | (self.mode & 0x1F)
+            },
+            (true, false) => {
+                // Write handshake - same as 5.25"
+                0xC0  // Ready to write
+            },
+            (true, true) => {
+                0xFF
+            },
+        }
+    }
+    
+    /// Read 3.5" drive status based on phase encoding
+    /// State is encoded as: phase1<<3 | phase0<<2 | head35<<1 | phase2
+    fn read_status_35(&self) -> u8 {
+        let drive = self.drive_select as usize;
+        let dsk = &self.drives35[drive];
+        
+        // Encode state from phases and head
+        let state = ((self.phases >> 1) & 0x8)  // phase1 -> bit 3
+                  | ((self.phases << 2) & 0x4)  // phase0 -> bit 2  
+                  | ((self.head35 as u8) << 1)  // head -> bit 1
+                  | ((self.phases >> 2) & 0x1); // phase2 -> bit 0
+        
+        if !self.motor_on {
+            return 1;  // Drive not ready
+        }
+        
+        match state {
+            0x00 => self.step_direction35 as u8,           // Step direction
+            0x01 => 0,                                      // Lower head activate (return data bit)
+            0x02 => (!dsk.has_disk()) as u8,               // Disk in place (0=disk, 1=no disk)
+            0x03 => 0,                                      // Upper head activate (return data bit)
+            0x04 => 1,                                      // Disk stepping (1=not stepping)
+            0x05 => 1,                                      // Unknown (ROM 03 function)
+            0x06 => (!dsk.write_prot) as u8,               // Disk locked (0=locked, 1=unlocked)
+            0x08 => (!self.motor_on35) as u8,              // Motor on (0=on, 1=off)
+            0x09 => 1,                                      // Number of sides (1=two sides)
+            0x0A => (dsk.cur_qtr_track != 0) as u8,        // At track 0 (0=at track 0)
+            0x0B => (!self.motor_on35) as u8,              // Disk ready (0=ready)
+            0x0C => dsk.just_ejected as u8,                // Disk switched (1=switched)
+            0x0D => 1,                                      // Ejecting (always 1)
+            0x0E => 0,                                      // Tachometer (random bit)
+            0x0F => if drive == 0 { 0 } else { 1 },        // Drive installed (0=yes)
+            _ => 1,
+        }
+    }
+    
+    /// Perform 3.5" drive action based on phase encoding
+    fn do_action_35(&mut self) {
+        let drive = self.drive_select as usize;
+        
+        // Encode state from phases and head
+        let state = ((self.phases >> 1) & 0x8)  // phase1 -> bit 3
+                  | ((self.phases << 2) & 0x4)  // phase0 -> bit 2  
+                  | ((self.head35 as u8) << 1)  // head -> bit 1
+                  | ((self.phases >> 2) & 0x1); // phase2 -> bit 0
+        
+        if self.debug {
+            println!("IWM 3.5: action state={:02X} drive={}", state, drive);
+        }
+        
+        match state {
+            0x00 => {
+                // Set step direction inward (towards higher tracks)
+                self.step_direction35 = false;
+            },
+            0x01 => {
+                // Set step direction outward (towards lower tracks)
+                self.step_direction35 = true;
+            },
+            0x03 => {
+                // Reset disk-switched flag
+                self.drives35[drive].just_ejected = false;
+            },
+            0x04 => {
+                // Step disk
+                let dsk = &mut self.drives35[drive];
+                if dsk.has_disk() {
+                    if self.step_direction35 {
+                        // Step outward (towards track 0)
+                        if dsk.cur_qtr_track >= 2 {
+                            dsk.cur_qtr_track -= 2;
+                        } else {
+                            dsk.cur_qtr_track = 0;
+                        }
+                    } else {
+                        // Step inward (towards higher tracks)
+                        if dsk.cur_qtr_track < dsk.num_tracks - 2 {
+                            dsk.cur_qtr_track += 2;
+                        }
+                    }
+                    dsk.loaded_track = -1; // Force track reload
+                    if self.debug {
+                        println!("IWM 3.5: stepped to qtr_track {}", dsk.cur_qtr_track);
+                    }
+                }
+            },
+            0x08 => {
+                // Turn motor on
+                self.motor_on35 = true;
+                self.drives35[drive].motor_on = true;
+            },
+            0x09 => {
+                // Turn motor off
+                self.motor_on35 = false;
+                self.drives35[drive].motor_on = false;
+            },
+            0x0D => {
+                // Eject disk
+                self.drives35[drive].just_ejected = true;
+                // Note: actual ejection would clear the disk
+                if self.debug {
+                    println!("IWM 3.5: eject requested for drive {}", drive);
+                }
+            },
+            _ => {
+                // Ignore unknown actions
+            }
+        }
+    }
+    
+    /// Load and nibblize a track for 3.5" drive
+    fn load_track_35(&mut self, drive: usize) {
+        let dsk = &mut self.drives35[drive];
+        
+        if !dsk.has_disk() || dsk.file.is_none() {
+            return;
+        }
+        
+        let track = (dsk.cur_qtr_track >> 1) as u8;  // Physical track (0-79)
+        let side = (dsk.cur_qtr_track & 1) as u8;    // Side (0 or 1)
+        
+        // Check if track is already loaded
+        let qtr_track = dsk.cur_qtr_track as i16;
+        if dsk.loaded_track == qtr_track && !dsk.track_data.is_empty() {
+            return;
+        }
+        
+        let num_sectors = sectors_for_track_35(track) as usize;
+        
+        // Calculate starting block for this track
+        // 3.5" disks have variable sectors per track based on zone
+        let mut block_offset = 0u32;
+        for t in 0..track {
+            let spt = sectors_for_track_35(t) as u32;
+            block_offset += spt * 2; // 2 sides
+        }
+        block_offset += (side as u32) * (num_sectors as u32);
+        
+        // Read sector data from file
+        let mut sector_data = vec![0u8; num_sectors * 512];
+        if let Some(ref mut file) = dsk.file {
+            let offset = (block_offset as u64) * 512;
+            if file.seek(SeekFrom::Start(offset)).is_err() {
+                return;
+            }
+            if file.read_exact(&mut sector_data).is_err() {
+                // Partial read is OK for short tracks
+                let _ = file.read(&mut sector_data);
+            }
+        }
+        
+        // Build nibblized track
+        // Each sector becomes: sync + address + gap + data + gap
+        // Approximate size: 800-1000 bytes per sector
+        let mut nib = Vec::with_capacity(num_sectors * 1000);
+        
+        // 2:1 interleave table
+        let mut phys_to_log = vec![-1i32; num_sectors];
+        let mut phys_sec = 0usize;
+        for log_sec in 0..num_sectors {
+            while phys_to_log[phys_sec] >= 0 {
+                phys_sec = (phys_sec + 1) % num_sectors;
+            }
+            phys_to_log[phys_sec] = log_sec as i32;
+            phys_sec = (phys_sec + 2) % num_sectors;
+        }
+        
+        for phys_sec in 0..num_sectors {
+            let log_sec = phys_to_log[phys_sec] as usize;
+            
+            // Sync bytes
+            let num_sync = if phys_sec == 0 { 100 } else { 20 };
+            for _ in 0..num_sync {
+                nib.push(0xFF);
+            }
+            
+            // Address field
+            nib.push(0xD5); // Prolog
+            nib.push(0xAA);
+            nib.push(0x96);
+            
+            let phys_track = track & 0x3F;
+            let phys_side = (side << 5) | (track >> 6);
+            let capacity = 0x22u8;
+            let cksum = (phys_track ^ (log_sec as u8) ^ phys_side ^ capacity) & 0x3F;
+            
+            nib.push(TO_DISK_BYTE_35[(phys_track & 0x3F) as usize]);
+            nib.push(TO_DISK_BYTE_35[(log_sec & 0x3F) as usize]);
+            nib.push(TO_DISK_BYTE_35[(phys_side & 0x3F) as usize]);
+            nib.push(TO_DISK_BYTE_35[(capacity & 0x3F) as usize]);
+            nib.push(TO_DISK_BYTE_35[(cksum & 0x3F) as usize]);
+            
+            nib.push(0xDE); // Epilog
+            nib.push(0xAA);
+            
+            // Gap
+            for _ in 0..6 {
+                nib.push(0xFF);
+            }
+            
+            // Data field
+            nib.push(0xD5); // Prolog
+            nib.push(0xAA);
+            nib.push(0xAD);
+            nib.push(TO_DISK_BYTE_35[(log_sec & 0x3F) as usize]); // Sector again
+            
+            // Encode 512 bytes of sector data using 3.5" GCR
+            // This is simplified - real encoding is more complex
+            let sector_start = log_sec * 512;
+            let sector_end = sector_start + 512;
+            let data = &sector_data[sector_start..sector_end.min(sector_data.len())];
+            
+            // Simple encoding: split bytes into 6-bit groups
+            // Real 3.5" encoding is more complex (uses 3 buffers), but this works for reading
+            let mut checksum = 0u8;
+            for &byte in data.iter().take(512) {
+                let val = byte ^ checksum;
+                checksum = byte;
+                nib.push(TO_DISK_BYTE_35[(val & 0x3F) as usize]);
+                nib.push(TO_DISK_BYTE_35[((val >> 2) & 0x3F) as usize]);
+            }
+            
+            // Checksum bytes
+            nib.push(TO_DISK_BYTE_35[(checksum & 0x3F) as usize]);
+            
+            // Data epilog
+            nib.push(0xDE);
+            nib.push(0xAA);
+            
+            // Gap
+            for _ in 0..6 {
+                nib.push(0xFF);
+            }
+        }
+        
+        dsk.track_data = nib;
+        dsk.track_len = dsk.track_data.len();
+        dsk.nib_pos = 0;
+        dsk.loaded_track = qtr_track;
+        
+        if self.debug {
+            println!("IWM 3.5: Loaded track {}.{} ({} sectors, {} nibbles)",
+                track, side, num_sectors, dsk.track_len);
+        }
+    }
+    
+    /// Read data from 3.5" drive
+    fn read_data_35(&mut self) -> u8 {
+        let drive = self.drive_select as usize;
+        
+        // Make sure track is loaded
+        self.load_track_35(drive);
+        
+        let dsk = &mut self.drives35[drive];
+        
+        if dsk.track_data.is_empty() {
+            return 0;  // No disk or no data
+        }
+        
+        // Return next byte from track with MSB set (data valid)
+        let byte = dsk.track_data[dsk.nib_pos];
+        dsk.nib_pos = (dsk.nib_pos + 1) % dsk.track_len;
+        
+        byte | 0x80  // Set MSB to indicate valid data
+    }
+
+    pub fn access(&mut self, addr: u16, val: u8, write: bool, floating_bus: u8, disk35_mode: bool) -> u8 {
         self.cycles_since_last_read = 0;
+        
+        // In 3.5"/SmartPort mode, phase signals have different meanings
+        if disk35_mode {
+            return self.access_35(addr, val, write, floating_bus);
+        }
 
         match addr & 0xF {
             0x0 => self.set_phase(0, false),

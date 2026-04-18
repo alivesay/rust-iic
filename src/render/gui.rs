@@ -24,6 +24,10 @@ static DISK1_MASK: LazyLock<[u8; 1024]> =
     LazyLock::new(|| decode_icon_mask(include_bytes!("../../assets/disk1.png")));
 static DISK2_MASK: LazyLock<[u8; 1024]> =
     LazyLock::new(|| decode_icon_mask(include_bytes!("../../assets/disk2.png")));
+static DISK35_1_MASK: LazyLock<[u8; 1024]> =
+    LazyLock::new(|| decode_icon_mask(include_bytes!("../../assets/disk35_1.png")));
+static DISK35_2_MASK: LazyLock<[u8; 1024]> =
+    LazyLock::new(|| decode_icon_mask(include_bytes!("../../assets/disk35_2.png")));
 
 /// Height of the native-resolution status bar at the bottom of the window.
 pub const STATUS_BAR_HEIGHT: u32 = 96;
@@ -52,7 +56,7 @@ pub fn blit_scaled(
 /// Draw the drive status bar at native resolution into the bottom bar_h rows of frame.
 pub fn render_status_bar(
     frame: &mut [u8], surf_w: u32, surf_h: u32, bar_h: u32,
-    drives: &[DriveStatusInfo; 2], col80: bool,
+    drives: &[DriveStatusInfo; 4], col80: bool,
 ) {
     let bar_y = surf_h.saturating_sub(bar_h);
 
@@ -88,19 +92,20 @@ pub fn render_status_bar(
     draw_button(frame, surf_w, cx, cy, cw, ch, col_label, &col_color);
 
     // Drive slots in the bottom-right — 32×32 icons scaled 2× = 64×64
+    // 4 drives: 2x 5.25" + 2x 3.5"
     let icon_scale = 2u32;
     let icon_dim = 32 * icon_scale; // 64px
     let toggle_gap = 8u32;
     let toggle_w = 12u32;
     let toggle_h = 40u32;
     let slot_width = icon_dim + toggle_gap + toggle_w;
-    let slot_gap = 24u32;
-    let total_slots_width = slot_width * 2 + slot_gap;
+    let slot_gap = 16u32;  // Reduced gap for 4 drives
+    let total_slots_width = slot_width * 4 + slot_gap * 3;
     let start_x = surf_w.saturating_sub(total_slots_width + 32);
 
-    let masks: [&[u8; 1024]; 2] = [&*DISK1_MASK, &*DISK2_MASK];
+    let masks: [&[u8; 1024]; 4] = [&*DISK1_MASK, &*DISK2_MASK, &*DISK35_1_MASK, &*DISK35_2_MASK];
 
-    for drive in 0..2usize {
+    for drive in 0..4usize {
         let slot_x = start_x + drive as u32 * (slot_width + slot_gap);
         let icon_y = bar_y + (bar_h.saturating_sub(icon_dim)) / 2;
 
@@ -334,7 +339,7 @@ pub fn hit_test_drive_icon(px: u32, py: u32, surf_w: u32, surf_h: u32, bar_h: u3
 
     let (icon_dim, slot_width, slot_gap, start_x) = drive_slot_layout(surf_w);
 
-    for drive in 0..2u32 {
+    for drive in 0..4u32 {
         let slot_x = start_x + drive * (slot_width + slot_gap);
         // Hit-test the icon area only (not the toggle)
         if px >= slot_x && px < slot_x + icon_dim {
@@ -356,7 +361,7 @@ pub fn hit_test_write_toggle(px: u32, py: u32, surf_w: u32, surf_h: u32, bar_h: 
     let toggle_w = 12u32;
     let toggle_h = 40u32;
 
-    for drive in 0..2u32 {
+    for drive in 0..4u32 {
         let slot_x = start_x + drive * (slot_width + slot_gap);
         let tx = slot_x + icon_dim + toggle_gap;
         let ty = bar_y + (bar_h.saturating_sub(icon_dim)) / 2 + (icon_dim.saturating_sub(toggle_h)) / 2;
@@ -373,8 +378,8 @@ fn drive_slot_layout(surf_w: u32) -> (u32, u32, u32, u32) {
     let toggle_gap = 8u32;
     let toggle_w = 12u32;
     let slot_width = icon_dim + toggle_gap + toggle_w;
-    let slot_gap = 24u32;
-    let total_slots_width = slot_width * 2 + slot_gap;
+    let slot_gap = 16u32;  // Reduced for 4 drives
+    let total_slots_width = slot_width * 4 + slot_gap * 3;
     let start_x = surf_w.saturating_sub(total_slots_width + 32);
     (icon_dim, slot_width, slot_gap, start_x)
 }

@@ -196,14 +196,12 @@ impl MMU {
                 if iou.mockingboard2.is_activated() && (0xC400..=0xC4FF).contains(&addr) {
                     let offset = (addr & 0xFF) as u8;
                     let value = iou.mockingboard2.read(offset);
-                    println!("MMU READ: addr=${:04X} value=${:02X} (Mockingboard2 slot 4)", addr, value);
                     return value;
                 }
                 // Mockingboard slot 5 ROM space ($C500-$C5FF)
                 if iou.mockingboard.is_activated() && (0xC500..=0xC5FF).contains(&addr) {
                     let offset = (addr & 0xFF) as u8;
                     let value = iou.mockingboard.read(offset);
-                    println!("MMU READ: addr=${:04X} value=${:02X} (Mockingboard slot 5)", addr, value);
                     return value;
                 }
                 // Other slot ROM space (or $C4xx/$C5xx when MB not activated): read from ROM

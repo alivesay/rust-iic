@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, memexp::MemoryExpansion, mockingboard::Mockingboard, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
+use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, memexp::MemoryExpansion, mockingboard::Mockingboard, mouse::Mouse, scc::Scc, smartport::SmartPort, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::{VideoMode, VideoModeMask}};
 
 macro_rules! set_lcram_mode {
   ($mem_state:expr, $mode:expr) => {{
@@ -49,11 +49,13 @@ pub struct IOU {
   pub memexp: MemoryExpansion, // Apple IIc Memory Expansion Card (Slot 4)
   pub mockingboard: Mockingboard, // Mockingboard sound card (Slot 5)
   pub mockingboard2: Mockingboard, // Second Mockingboard (Slot 4, conflicts with memexp)
+  pub smartport: SmartPort, // SmartPort hard drive (HDV files)
   pub zip: ZipChip,  // ZIP Chip accelerator (optional)
   pub cycles: u64,
   pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
   pub floating_bus: u8,  // Last byte video hardware would read from RAM at current scan position
   pub col80_switch: bool, // Physical 80/40 column slide switch (true = 80 col)
+  pub disk35_mode: bool, // $C031 bit 6: false=5.25" drives, true=3.5"/SmartPort
   pub debug: bool,
   pub self_test: bool,
 }
@@ -77,11 +79,13 @@ impl IOU {
           memexp: MemoryExpansion::new(),
           mockingboard: Mockingboard::new(),  // Disabled by default, enabled via --mockingboard
           mockingboard2: Mockingboard::new(), // Disabled by default, enabled via --mockingboard2
+          smartport: SmartPort::new(),        // SmartPort hard drive support
           zip: ZipChip::new(false),  // Disabled by default, enabled via --zip
           cycles: 0,
           scan_cycle: 0,
           floating_bus: 0,
           col80_switch: true, // Default: 80-column switch ON (typical IIc position)
+          disk35_mode: false, // Start in 5.25" mode
           debug: false,
           self_test,
       }
@@ -180,6 +184,13 @@ impl IOU {
             0xC028 => { toggle_bits_cell!(self.mem_state, MemStateMask::ALTROM); 0x00 }, // ROMBANK
 
             0xC030 => { self.speaker.toggle(self.cycles); 0x00 }, // C030 48200 SPKR         OECG  R   Toggle Speaker
+
+            // C031 - DISKREG: Disk interface control
+            // Bit 6: 0=5.25" drives, 1=3.5"/SmartPort mode
+            // Bit 7: Read/Write head select (for double-sided 3.5")
+            0xC031 => {
+                ((self.disk35_mode as u8) << 6) | ((self.iwm.get_head35() as u8) << 7)
+            },
 
             // Zilog 8530 SCC — $C038: ChB Cmd, $C039: ChA Cmd, $C03A: ChB Data, $C03B: ChA Data
             0xC038..=0xC03B => self.scc.read(addr),
@@ -302,7 +313,7 @@ impl IOU {
             0xC067 => (self.mouse.y_dir.get() as u8) << 7, //           RDMOUY1        C   R7  Mouse Y1 Direction (1 = down)
             0xC068 => 0x00, // STATEREG (IIGS) - Ignore on IIc
 
-            0xC0E0..=0xC0EF => self.iwm.access(addr, 0, false, self.floating_bus),
+            0xC0E0..=0xC0EF => self.iwm.access(addr, 0, false, self.floating_bus, self.disk35_mode),
 
             // Slot 1 — SCC Channel A / Modem ($C098–$C09F)
             // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)
@@ -376,6 +387,15 @@ impl IOU {
             0xC011..=0xC01F => 0x00,
 
           0xC030 => { self.speaker.toggle(self.cycles); 0x00 }, // Speaker toggles on any access
+
+          // C031 - DISKREG: Disk interface control
+          // Bit 6: 0=5.25" drives, 1=3.5"/SmartPort mode
+          // Bit 7: Read/Write head select (for double-sided 3.5")
+          0xC031 => {
+              self.disk35_mode = (val & 0x40) != 0;
+              self.iwm.set_head35((val >> 7) & 1);
+              0x00
+          },
 
           // Zilog 8530 SCC
           0xC038..=0xC03B => { self.scc.write(addr, val); 0x00 },
@@ -511,7 +531,7 @@ impl IOU {
           },
 
 
-          0xC0E0..=0xC0EF => self.iwm.access(addr, val, true, self.floating_bus),
+          0xC0E0..=0xC0EF => self.iwm.access(addr, val, true, self.floating_bus, self.disk35_mode),
 
           // Slot 1 — SCC Channel A / Modem ($C098–$C09F)
           // Slot 2 — SCC Channel B / Printer ($C0A8–$C0AF)

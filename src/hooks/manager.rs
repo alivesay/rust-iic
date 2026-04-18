@@ -147,6 +147,20 @@ pub struct HookManager {
     pub pending_mockingboard2_activate: bool,
     /// Pending action: check for custom commands (set by GETLN hook)
     pub pending_custom_command_check: bool,
+    /// SmartPort hook enabled (for HDV support)
+    pub smartport_enabled: bool,
+    /// Pending SmartPort call to process (set by hook, cleared after processing)
+    pub pending_smartport_call: Option<SmartPortCall>,
+}
+
+/// SmartPort call information captured by hook
+#[derive(Clone, Debug)]
+pub struct SmartPortCall {
+    pub command: u8,
+    pub unit: u8,
+    pub buffer_addr: u16,
+    pub block_num: u32,
+    pub return_addr: u16,  // Where to return after handling
 }
 
 impl Default for HookManager {
@@ -164,6 +178,8 @@ impl HookManager {
             pending_mockingboard_activate: false,
             pending_mockingboard2_activate: false,
             pending_custom_command_check: false,
+            smartport_enabled: false,
+            pending_smartport_call: None,
         }
     }
 
@@ -283,6 +299,13 @@ impl HookManager {
                 log::info!("Timed hook triggered at cycle {}: Mockingboard slot {} activating", cycle, slot_num);
             }
         );
+    }
+
+    /// Register the SmartPort hook for HDV hard drive support.
+    /// This enables interception of SmartPort calls to virtual hard drives.
+    pub fn register_smartport_hook(&mut self) {
+        self.smartport_enabled = true;
+        log::info!("SmartPort hook enabled for HDV support");
     }
 
     /// Check if any hooks exist at this address (fast path for execution loop)
