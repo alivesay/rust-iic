@@ -7,6 +7,7 @@ mod macros;
 
 mod app;
 mod audio;
+mod audio_mixer;
 mod bus;
 mod cli;
 mod cpu;
@@ -34,7 +35,7 @@ use winit::event_loop::EventLoop;
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 
 use crate::app::{run_monitor_mode, App};
-use crate::audio::create_audio;
+use crate::audio_mixer::AudioMixer;
 use crate::cli::{Args, ShaderType};
 use crate::cpu::{CpuType, SystemType, CPU};
 
@@ -60,17 +61,22 @@ fn main() -> Result<(), Error> {
 
     let args = Args::parse();
 
-    // Create audio backend (cpal) - producer goes to Speaker, we keep AudioOutput alive
-    let (audio_producer, sample_rate, _audio_output) = create_audio();
+    // Create centralized audio mixer - single cpal stream for all audio sources
+    let (_audio_mixer, audio_producers) = AudioMixer::new();
+    let sample_rate = _audio_mixer.sample_rate();
 
     let mut cpu = CPU::new(
         SystemType::AppleIIc,
         CpuType::CMOS65C02,
         (args.speed * 1_023_000.0) as u32,
         args.self_test,
-        audio_producer,
+        audio_producers.speaker,
         sample_rate,
     );
+
+    // Initialize drive audio with mixer channel
+    cpu.bus.iou.iwm.init_audio(audio_producers.drive_audio, sample_rate);
+    println!("Drive audio synthesis enabled");
 
     // Configure CPU/system based on args
     cpu.debug = args.debug;
@@ -110,9 +116,9 @@ fn main() -> Result<(), Error> {
     }
 
     // Mockingboard sound card in slot 5 (no conflict with memory expansion)
-    let _mockingboard_audio = if args.mockingboard {
-        let (mb_producer, mb_sample_rate, mb_audio) = create_audio();
-        cpu.bus.iou.mockingboard = crate::device::mockingboard::Mockingboard::with_audio(mb_producer, mb_sample_rate);
+    // Uses centralized audio mixer channel
+    if args.mockingboard {
+        cpu.bus.iou.mockingboard = crate::device::mockingboard::Mockingboard::with_audio(audio_producers.mockingboard1, sample_rate);
         cpu.bus.iou.set_mockingboard_enabled(true);
         
         // Use timer-based activation - wait for DOS/ProDOS to fully initialize
@@ -121,15 +127,12 @@ fn main() -> Result<(), Error> {
         cpu.hooks.register_mockingboard_hook(1, 3_000_000);  // Slot 5
         
         println!("Mockingboard enabled in slot 5");
-        Some(mb_audio)
-    } else {
-        None
-    };
+    }
 
     // Second Mockingboard in slot 4 (for Ultima V dual-MB support, disables memory expansion)
-    let _mockingboard2_audio = if args.mockingboard2 {
-        let (mb2_producer, mb2_sample_rate, mb2_audio) = create_audio();
-        cpu.bus.iou.mockingboard2 = crate::device::mockingboard::Mockingboard::with_audio(mb2_producer, mb2_sample_rate);
+    // Uses centralized audio mixer channel
+    if args.mockingboard2 {
+        cpu.bus.iou.mockingboard2 = crate::device::mockingboard::Mockingboard::with_audio(audio_producers.mockingboard2, sample_rate);
         cpu.bus.iou.set_mockingboard2_enabled(true);
         
         // Use timer-based activation
@@ -141,10 +144,7 @@ fn main() -> Result<(), Error> {
         } else {
             println!("Mockingboard enabled in slot 4 (memory expansion disabled)");
         }
-        Some(mb2_audio)
-    } else {
-        None
-    };
+    }
 
     // Register ProDOS MLI hooks (logs all ProDOS system calls)
     hooks::register_hooks(&mut cpu.hooks);
@@ -173,6 +173,56 @@ fn main() -> Result<(), Error> {
     if let Some(path) = &args.disk2 {
         println!("Loading disk 2: {}", path);
         cpu.bus.iou.iwm.load_disk2(path).unwrap();
+    }
+
+    // Load 3.5" disk images (ProDOS order / 2IMG)
+    if let Some(path) = &args.disk35 {
+        match cpu.bus.iou.iwm.load_disk35(path) {
+            Ok(()) => {
+                println!("3.5\" drive 1: {}", path);
+            }
+            Err(e) => {
+                eprintln!("Failed to load 3.5\" disk '{}': {}", path, e);
+            }
+        }
+    }
+
+    if let Some(path) = &args.disk35_2 {
+        match cpu.bus.iou.iwm.load_disk35_2(path) {
+            Ok(()) => {
+                println!("3.5\" drive 2: {}", path);
+            }
+            Err(e) => {
+                eprintln!("Failed to load 3.5\" disk '{}': {}", path, e);
+            }
+        }
+    }
+
+    // Load hard drive images (HDV)
+    if let Some(path) = &args.hdv {
+        match cpu.bus.iou.smartport.load_hdv(path) {
+            Ok(()) => {
+                println!("Hard drive 1: {} ({} blocks)", 
+                    path, cpu.bus.iou.smartport.devices[0].block_count);
+                // Register SmartPort hook for ProDOS MLI interception
+                cpu.hooks.register_smartport_hook();
+            }
+            Err(e) => {
+                eprintln!("Failed to load HDV '{}': {}", path, e);
+            }
+        }
+    }
+
+    if let Some(path) = &args.hdv2 {
+        match cpu.bus.iou.smartport.load_hdv2(path) {
+            Ok(()) => {
+                println!("Hard drive 2: {} ({} blocks)", 
+                    path, cpu.bus.iou.smartport.devices[1].block_count);
+            }
+            Err(e) => {
+                eprintln!("Failed to load HDV2 '{}': {}", path, e);
+            }
+        }
     }
 
     // Monitor mode
@@ -291,6 +341,7 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
             app.cpu.bus.iou.speaker.update(app.cpu.bus.iou.cycles);
             app.cpu.bus.iou.mockingboard.update(app.cpu.bus.iou.cycles);
             app.cpu.bus.iou.mockingboard2.update(app.cpu.bus.iou.cycles);
+            app.cpu.bus.iou.iwm.update_audio();
         }
 
         let status = event_loop.pump_app_events(timeout, &mut app);

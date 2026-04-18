@@ -74,6 +74,14 @@ pub struct Args {
     #[arg(long)]
     pub disk2: Option<String>,
 
+    /// Path to 3.5" disk image (.po/.2mg) for drive 3 (external 3.5"/SmartPort)
+    #[arg(long)]
+    pub disk35: Option<String>,
+
+    /// Path to second 3.5" disk image for drive 4
+    #[arg(long)]
+    pub disk35_2: Option<String>,
+
     /// Enable fast disk mode (skip rotational latency)
     #[arg(long)]
     pub fast_disk: bool,
@@ -105,4 +113,12 @@ pub struct Args {
     /// Enable second Mockingboard in slot 4 (disables memory expansion, for Ultima V etc.)
     #[arg(long)]
     pub mockingboard2: bool,
+
+    /// Path to HDV hard drive image (SmartPort device)
+    #[arg(long)]
+    pub hdv: Option<String>,
+
+    /// Path to second HDV hard drive image
+    #[arg(long)]
+    pub hdv2: Option<String>,
 }

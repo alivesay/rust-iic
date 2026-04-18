@@ -327,11 +327,9 @@ impl Bus {
         self.iou.scc.tick(cycles);
         self.iou.zip.tick();  // ZIP Chip slowdown counter
         
-        // Mockingboard ticks once per cycle
-        for _ in 0..cycles {
-            self.iou.mockingboard.tick();
-            self.iou.mockingboard2.tick();
-        }
+        // Mockingboard batch tick (much more efficient than per-cycle loop)
+        self.iou.mockingboard.tick_n(cycles as u32);
+        self.iou.mockingboard2.tick_n(cycles as u32);
         
         if self.iou.check_interrupts() {
             self.interrupts.request_irq();

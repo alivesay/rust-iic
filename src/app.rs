@@ -24,6 +24,7 @@ use winit::platform::macos::WindowExtMacOS;
 use crate::cli::ShaderType;
 use crate::cpu::CPU;
 use crate::cpu_monitor::{CpuMonitor, CpuState};
+use crate::device::drive_audio::DriveAudioParams;
 use crate::monitor::Monitor;
 use crate::render::{
     blit_scaled, hit_test_col_button, hit_test_drive_icon, hit_test_power_button,
@@ -54,6 +55,8 @@ pub struct App {
     pub egui_renderer: Option<egui_wgpu::Renderer>,
     pub shader_params: ShaderParams,
     pub show_shader_ui: bool,
+    pub show_drive_audio_ui: bool,
+    pub drive_audio_params: DriveAudioParams,
     pub cpu_monitor: CpuMonitor,
 }
 
@@ -82,6 +85,8 @@ impl App {
             egui_renderer: None,
             shader_params: ShaderParams::default(),
             show_shader_ui: false,
+            show_drive_audio_ui: false,
+            drive_audio_params: DriveAudioParams::default(),
             cpu_monitor: CpuMonitor::new(),
         }
     }
@@ -92,6 +97,109 @@ impl App {
         self.cpu.bus.iou.iwm.eject_disk(0);
         self.cpu.bus.iou.iwm.eject_disk(1);
     }
+
+    /// Apply drive audio params from UI to IWM
+    pub fn apply_drive_audio_params(&mut self) {
+        self.cpu.bus.iou.iwm.drive_audio.params = self.drive_audio_params.clone();
+        self.cpu.bus.iou.iwm.drive_audio.apply_params();
+    }
+}
+
+/// Render the drive audio parameter UI (standalone function for borrow checker)
+fn render_drive_audio_ui(ctx: &egui::Context, params: &mut DriveAudioParams, open: &mut bool) -> bool {
+    let mut changed = false;
+    let p = params;
+    
+    egui::Window::new("Drive Audio Settings")
+        .open(open)
+        .resizable(true)
+        .default_width(320.0)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("Master");
+                changed |= ui.add(egui::Slider::new(&mut p.master_volume, 0.0..=4.0).text("Master Volume")).changed();
+                changed |= ui.checkbox(&mut p.enabled, "Enabled").changed();
+
+                ui.separator();
+                ui.heading("Stepper Click");
+                changed |= ui.add(egui::Slider::new(&mut p.click_volume, 0.0..=1.0).text("Volume")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_noise_decay_ms, 1.0..=30.0).text("Noise Decay (ms)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_filter_freq, 500.0..=6000.0).text("Noise Filter (Hz)")).changed();
+                ui.label("Body Clack (multi-stage impact)");
+                changed |= ui.add(egui::Slider::new(&mut p.click_body_freq, 200.0..=1200.0).text("Body Freq (Hz)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_body_decay_ms, 2.0..=30.0).text("Body Decay (ms)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_body_mix, 0.0..=1.0).text("Body Mix")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_attack_mix, 0.0..=1.5).text("Attack Mix")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_attack_decay_ms, 0.3..=5.0).text("Attack Decay (ms)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_pitch_sweep, 1.0..=2.0).text("Pitch Sweep")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_pitch_sweep_ms, 1.0..=10.0).text("Sweep Time (ms)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_harmonic_mix, 0.0..=1.0).text("Harmonic Mix")).changed();
+                ui.label("Metallic Tick (~1500 Hz)");
+                changed |= ui.add(egui::Slider::new(&mut p.click_tick_freq, 800.0..=3000.0).text("Tick Freq (Hz)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_tick_decay_ms, 2.0..=20.0).text("Tick Decay (ms)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_tick_mix, 0.0..=1.0).text("Tick Mix")).changed();
+                ui.label("Crunch (high-freq grit)");
+                changed |= ui.add(egui::Slider::new(&mut p.click_crunch_decay_ms, 1.0..=15.0).text("Crunch Decay (ms)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_crunch_freq, 1000.0..=8000.0).text("Crunch Freq (Hz)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.click_crunch_mix, 0.0..=1.0).text("Crunch Mix")).changed();
+
+                ui.separator();
+                ui.heading("Motor Relay Click");
+                changed |= ui.add(egui::Slider::new(&mut p.relay_volume, 0.0..=1.0).text("Volume")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.relay_freq, 400.0..=1200.0).text("Freq (Hz)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.relay_decay_ms, 2.0..=15.0).text("Decay (ms)")).changed();
+
+                ui.separator();
+                ui.heading("Motor");
+                changed |= ui.add(egui::Slider::new(&mut p.motor_volume, 0.0..=0.1).text("Volume")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.motor_filter_freq, 50.0..=500.0).text("Filter (Hz)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.motor_cog_freq, 10.0..=100.0).text("Cog Freq (Hz)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.motor_cog_mix, 0.0..=1.0).text("Cog Mix")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.motor_spinup_ms, 50.0..=500.0).text("Spinup (ms)")).changed();
+                changed |= ui.add(egui::Slider::new(&mut p.motor_spindown_ms, 100.0..=800.0).text("Spindown (ms)")).changed();
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Reset Defaults").clicked() {
+                        *p = DriveAudioParams::default();
+                        changed = true;
+                    }
+                    if ui.button("Print Values").clicked() {
+                        println!("--- Drive Audio Parameters ---");
+                        println!("master_volume: {:.2}", p.master_volume);
+                        println!("click_volume: {:.2}", p.click_volume);
+                        println!("click_noise_decay_ms: {:.1}", p.click_noise_decay_ms);
+                        println!("click_filter_freq: {:.0}", p.click_filter_freq);
+                        println!("click_body_freq: {:.0}", p.click_body_freq);
+                        println!("click_body_decay_ms: {:.1}", p.click_body_decay_ms);
+                        println!("click_body_mix: {:.2}", p.click_body_mix);
+                        println!("click_attack_mix: {:.2}", p.click_attack_mix);
+                        println!("click_attack_decay_ms: {:.1}", p.click_attack_decay_ms);
+                        println!("click_pitch_sweep: {:.2}", p.click_pitch_sweep);
+                        println!("click_pitch_sweep_ms: {:.1}", p.click_pitch_sweep_ms);
+                        println!("click_harmonic_mix: {:.2}", p.click_harmonic_mix);
+                        println!("click_tick_freq: {:.0}", p.click_tick_freq);
+                        println!("click_tick_decay_ms: {:.1}", p.click_tick_decay_ms);
+                        println!("click_tick_mix: {:.2}", p.click_tick_mix);
+                        println!("click_crunch_decay_ms: {:.1}", p.click_crunch_decay_ms);
+                        println!("click_crunch_freq: {:.0}", p.click_crunch_freq);
+                        println!("click_crunch_mix: {:.2}", p.click_crunch_mix);
+                        println!("relay_volume: {:.2}", p.relay_volume);
+                        println!("relay_freq: {:.0}", p.relay_freq);
+                        println!("relay_decay_ms: {:.1}", p.relay_decay_ms);
+                        println!("motor_volume: {:.3}", p.motor_volume);
+                        println!("motor_filter_freq: {:.0}", p.motor_filter_freq);
+                        println!("motor_cog_freq: {:.0}", p.motor_cog_freq);
+                        println!("motor_cog_mix: {:.2}", p.motor_cog_mix);
+                        println!("motor_spinup_ms: {:.0}", p.motor_spinup_ms);
+                        println!("motor_spindown_ms: {:.0}", p.motor_spindown_ms);
+                        println!("------------------------------");
+                    }
+                });
+            });
+        });
+
+    changed
 }
 
 impl winit::application::ApplicationHandler for App {
@@ -200,8 +308,8 @@ impl winit::application::ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // Only forward events to egui when shader UI is visible
-        let egui_consumed = if self.show_shader_ui {
+        // Only forward events to egui when any UI is visible
+        let egui_consumed = if self.show_shader_ui || self.show_drive_audio_ui || self.cpu_monitor.visible {
             if let Some(egui_state) = self.egui_state.as_mut() {
                 if let Some(window) = self.window.as_ref() {
                     let response = egui_state.on_window_event(window.as_ref(), &event);
@@ -305,19 +413,31 @@ impl App {
         if let Some((drive, click_time)) = self.last_drive_click {
             if click_time.elapsed() >= Duration::from_millis(400) {
                 self.last_drive_click = None;
-                let file = rfd::FileDialog::new()
-                    .add_filter("WOZ Disk Image", &["woz"])
-                    .pick_file();
+                
+                // Select appropriate file filters based on drive type
+                let file = if drive < 2 {
+                    // 5.25" drives - WOZ format
+                    rfd::FileDialog::new()
+                        .add_filter("WOZ Disk Image", &["woz"])
+                        .pick_file()
+                } else {
+                    // 3.5" drives - ProDOS order or 2IMG
+                    rfd::FileDialog::new()
+                        .add_filter("3.5\" Disk Image", &["po", "2mg", "2img"])
+                        .pick_file()
+                };
+                
                 if let Some(path) = file {
                     println!("Loading disk into drive {}: {}", drive + 1, path.display());
-                    if drive == 0 {
-                        if let Err(e) = self.cpu.bus.iou.iwm.load_disk(&path) {
-                            println!("Error loading disk: {}", e);
-                        }
-                    } else {
-                        if let Err(e) = self.cpu.bus.iou.iwm.load_disk2(&path) {
-                            println!("Error loading disk: {}", e);
-                        }
+                    let result = match drive {
+                        0 => self.cpu.bus.iou.iwm.load_disk(&path),
+                        1 => self.cpu.bus.iou.iwm.load_disk2(&path),
+                        2 => self.cpu.bus.iou.iwm.load_disk35(&path),
+                        3 => self.cpu.bus.iou.iwm.load_disk35_2(&path),
+                        _ => Ok(()),
+                    };
+                    if let Err(e) = result {
+                        println!("Error loading disk: {}", e);
                     }
                 }
             }
@@ -389,7 +509,7 @@ impl App {
             }
 
             // Render status bar
-            let drive_status: [DriveStatusInfo; 2] = [
+            let drive_status: [DriveStatusInfo; 4] = [
                 {
                     let (has_disk, is_active, wp) = self.cpu.bus.iou.iwm.drive_status(0);
                     DriveStatusInfo {
@@ -400,6 +520,22 @@ impl App {
                 },
                 {
                     let (has_disk, is_active, wp) = self.cpu.bus.iou.iwm.drive_status(1);
+                    DriveStatusInfo {
+                        has_disk,
+                        is_active,
+                        is_write_protected: wp,
+                    }
+                },
+                {
+                    let (has_disk, is_active, wp) = self.cpu.bus.iou.iwm.drive_status_35(0);
+                    DriveStatusInfo {
+                        has_disk,
+                        is_active,
+                        is_write_protected: wp,
+                    }
+                },
+                {
+                    let (has_disk, is_active, wp) = self.cpu.bus.iou.iwm.drive_status_35(1);
                     DriveStatusInfo {
                         has_disk,
                         is_active,
@@ -451,8 +587,8 @@ impl App {
                 crt.update_monochrome(pixels.queue(), self.cpu.bus.video.monochrome);
                 crt.update_shader_params(pixels.queue(), &self.shader_params);
 
-                // Run egui UI (for shader UI and/or CPU monitor)
-                let egui_output = if self.show_shader_ui || self.cpu_monitor.visible {
+                // Run egui UI (for shader UI, drive audio UI, and/or CPU monitor)
+                let egui_output = if self.show_shader_ui || self.show_drive_audio_ui || self.cpu_monitor.visible {
                     if let Some(egui_state) = self.egui_state.as_mut() {
                         let window = self.window.as_ref().unwrap();
                         let raw_input = egui_state.take_egui_input(window.as_ref());
@@ -484,9 +620,13 @@ impl App {
                             memory_snapshot[256 + i] = self.cpu.bus.read_byte(page_base + i as u16);
                         }
                         
+                        let mut drive_audio_changed = false;
                         let output = self.egui_ctx.run(raw_input, |ctx| {
                             if self.show_shader_ui {
                                 shader_ui::render_shader_ui(ctx, &mut self.shader_params, &mut self.show_shader_ui);
+                            }
+                            if self.show_drive_audio_ui {
+                                drive_audio_changed = render_drive_audio_ui(ctx, &mut self.drive_audio_params, &mut self.show_drive_audio_ui);
                             }
                             if self.cpu_monitor.visible {
                                 // Memory reader from snapshot
@@ -505,6 +645,13 @@ impl App {
                             }
                         });
                         egui_state.handle_platform_output(window.as_ref(), output.platform_output.clone());
+                        
+                        // Apply drive audio param changes
+                        if drive_audio_changed {
+                            self.cpu.bus.iou.iwm.drive_audio.params = self.drive_audio_params.clone();
+                            self.cpu.bus.iou.iwm.drive_audio.apply_params();
+                        }
+                        
                         let ppp = output.pixels_per_point;
                         let jobs = self.egui_ctx.tessellate(output.shapes.clone(), ppp);
                         Some((output, jobs, ppp))
@@ -639,10 +786,23 @@ impl App {
                                 self.buffer_height,
                                 STATUS_BAR_HEIGHT,
                             ) {
-                                let (has_disk, _, _) = self.cpu.bus.iou.iwm.drive_status(drive);
+                                // Drives 0-1 are 5.25", drives 2-3 are 3.5"
+                                let (has_disk, _, _) = if drive < 2 {
+                                    self.cpu.bus.iou.iwm.drive_status(drive)
+                                } else {
+                                    self.cpu.bus.iou.iwm.drive_status_35(drive - 2)
+                                };
                                 if has_disk {
-                                    self.cpu.bus.iou.iwm.toggle_write_protect(drive);
-                                    let (_, _, wp) = self.cpu.bus.iou.iwm.drive_status(drive);
+                                    if drive < 2 {
+                                        self.cpu.bus.iou.iwm.toggle_write_protect(drive);
+                                    } else {
+                                        self.cpu.bus.iou.iwm.toggle_write_protect_35(drive - 2);
+                                    }
+                                    let (_, _, wp) = if drive < 2 {
+                                        self.cpu.bus.iou.iwm.drive_status(drive)
+                                    } else {
+                                        self.cpu.bus.iou.iwm.drive_status_35(drive - 2)
+                                    };
                                     println!(
                                         "Drive {}: write protect {}",
                                         drive + 1,
@@ -669,11 +829,19 @@ impl App {
                                                 < Duration::from_millis(400)
                                         {
                                             self.last_drive_click = None;
-                                            let (has_disk, _, _) =
-                                                self.cpu.bus.iou.iwm.drive_status(drive);
+                                            // Drives 0-1 are 5.25", drives 2-3 are 3.5"
+                                            let (has_disk, _, _) = if drive < 2 {
+                                                self.cpu.bus.iou.iwm.drive_status(drive)
+                                            } else {
+                                                self.cpu.bus.iou.iwm.drive_status_35(drive - 2)
+                                            };
                                             println!("Drive {}: double-click detected, has_disk={}", drive + 1, has_disk);
                                             if has_disk {
-                                                self.cpu.bus.iou.iwm.eject_disk(drive);
+                                                if drive < 2 {
+                                                    self.cpu.bus.iou.iwm.eject_disk(drive);
+                                                } else {
+                                                    self.cpu.bus.iou.iwm.eject_disk_35(drive - 2);
+                                                }
                                                 println!("Drive {}: ejected", drive + 1);
                                             }
                                             return;
@@ -683,10 +851,23 @@ impl App {
                                     return;
                                 }
                                 MouseButton::Right => {
-                                    let (has_disk, _, _) = self.cpu.bus.iou.iwm.drive_status(drive);
+                                    // Drives 0-1 are 5.25", drives 2-3 are 3.5"
+                                    let (has_disk, _, _) = if drive < 2 {
+                                        self.cpu.bus.iou.iwm.drive_status(drive)
+                                    } else {
+                                        self.cpu.bus.iou.iwm.drive_status_35(drive - 2)
+                                    };
                                     if has_disk {
-                                        self.cpu.bus.iou.iwm.toggle_write_protect(drive);
-                                        let (_, _, wp) = self.cpu.bus.iou.iwm.drive_status(drive);
+                                        if drive < 2 {
+                                            self.cpu.bus.iou.iwm.toggle_write_protect(drive);
+                                        } else {
+                                            self.cpu.bus.iou.iwm.toggle_write_protect_35(drive - 2);
+                                        }
+                                        let (_, _, wp) = if drive < 2 {
+                                            self.cpu.bus.iou.iwm.drive_status(drive)
+                                        } else {
+                                            self.cpu.bus.iou.iwm.drive_status_35(drive - 2)
+                                        };
                                         println!(
                                             "Drive {}: write protect {}",
                                             drive + 1,
@@ -725,6 +906,16 @@ impl App {
                     if self.show_shader_ui { "ON" } else { "OFF" }
                 );
             }
+            return;
+        }
+
+        // F8 toggles drive audio UI
+        if event.logical_key == Key::Named(NamedKey::F8) && event.state.is_pressed() {
+            self.show_drive_audio_ui = !self.show_drive_audio_ui;
+            println!(
+                "Drive Audio UI: {}",
+                if self.show_drive_audio_ui { "ON" } else { "OFF" }
+            );
             return;
         }
 

@@ -81,6 +81,11 @@ impl Speaker {
             cycle_cursor = end_cycle - max_catchup;
         }
 
+        // Pre-allocate sample buffer for batch pushing
+        // ~735 samples per frame at 44100Hz/60fps, give some headroom
+        let estimated_samples = ((end_cycle - cycle_cursor) / cycles_per_sample) as usize + 16;
+        let mut samples = Vec::with_capacity(estimated_samples.min(2048));
+
         while cycle_cursor < end_cycle {
             cycle_cursor += cycles_per_sample;
 
@@ -106,8 +111,11 @@ impl Speaker {
             // Low-pass filter to reduce aliasing
             self.filtered += alpha * (raw - self.filtered);
 
-            let _ = self.producer.try_push(self.filtered);
+            samples.push(self.filtered);
         }
+
+        // Batch push all samples at once
+        let _ = self.producer.push_slice(&samples);
 
         self.last_cycle = current_cycle;
     }

@@ -11,8 +11,9 @@
 //! References:
 //! - AY-3-8910 datasheet
 //! - MOS 6522 VIA datasheet
+//! - MAME ay8910.cpp (envelope timing, DAC model)
+//! - Matthew Westcott's AY-3-8910 voltage measurements (December 2001)
 //! - gyurco/apple2efpga FPGA implementation (LFSR algorithm)
-//! - Measured DAC levels from various sources
 
 use std::sync::Arc;
 use ringbuf::{HeapRb, traits::*};
@@ -90,9 +91,14 @@ struct Ay8910 {
     envelope_volume: u8,
     envelope_holding: bool,
     envelope_attack: bool,
+    envelope_prescaler: u8,  // AY-3-8910 envelope runs at half the rate of tones
     
     // Prescaler (AY runs at CLK/8)
     prescaler: u8,
+    
+    // Simple low-pass filter to simulate analog output circuitry
+    // This reduces harsh aliasing from square waves
+    filter_state: f32,
 }
 
 impl Default for Ay8910 {
@@ -112,7 +118,9 @@ impl Default for Ay8910 {
             envelope_volume: 15,
             envelope_holding: false,
             envelope_attack: false,
+            envelope_prescaler: 0,
             prescaler: 0,
+            filter_state: 0.0,
         }
     }
 }
@@ -155,7 +163,10 @@ impl Ay8910 {
             ay_reg::ENVELOPE_SHAPE => {
                 self.envelope_shape = value & 0x0F;
                 self.envelope_step = 0;
-                self.envelope_counter = 0;
+                // Initialize counter to period so we count down a full cycle before first step
+                // (if counter starts at 0, we immediately step which causes envelope glitches)
+                self.envelope_counter = self.envelope_period;
+                self.envelope_prescaler = 0;  // Reset prescaler for clean timing
                 self.envelope_holding = false;
                 self.envelope_attack = (value & 0x04) != 0;
                 self.envelope_volume = if self.envelope_attack { 0 } else { 15 };
@@ -178,86 +189,105 @@ impl Ay8910 {
         self.registers[ay_reg::MIXER as usize]
     }
     
-    /// Tick the PSG by one CPU cycle
-    fn tick(&mut self) {
+    /// Tick the PSG by N CPU cycles (batch processing for efficiency)
+    /// Returns the number of prescaler ticks that occurred
+    fn tick_n(&mut self, cycles: u32) -> u32 {
         // AY-3-8910 internal prescaler divides clock by 8
-        self.prescaler = self.prescaler.wrapping_add(1);
-        if self.prescaler < 8 {
-            return;
-        }
-        self.prescaler = 0;
+        // Instead of calling tick() N times, calculate how many prescaler
+        // overflows occur and only process those
+        let total_prescaler = self.prescaler as u32 + cycles;
+        let prescaler_ticks = total_prescaler / 8;
+        self.prescaler = (total_prescaler % 8) as u8;
         
-        // Update tone channels
-        for ch in &mut self.channels {
-            if ch.counter == 0 {
-                ch.counter = ch.period;
-                ch.output = !ch.output;
-            } else {
-                ch.counter -= 1;
-            }
+        if prescaler_ticks == 0 {
+            return 0;
         }
         
-        // Update noise generator
-        if self.noise_counter == 0 {
-            self.noise_counter = self.noise_period;
-            // 17-bit LFSR: taps at bits 0 and 2
-            let bit = ((self.rng >> 0) ^ (self.rng >> 2)) & 1;
-            self.rng = (self.rng >> 1) | (bit << 16);
-            self.noise_output = (self.rng & 1) != 0;
-        } else {
-            self.noise_counter -= 1;
-        }
-        
-        // Update envelope generator (runs at 1/16 of tone rate)
-        if !self.envelope_holding {
-            if self.envelope_counter == 0 {
-                self.envelope_counter = self.envelope_period.max(1);
-                self.envelope_step = self.envelope_step.wrapping_add(1);
-                
-                if self.envelope_step >= 16 {
-                    self.envelope_step = 0;
-                    
-                    // Check envelope shape bits
-                    let cont = (self.envelope_shape & 0x08) != 0;
-                    let alt = (self.envelope_shape & 0x02) != 0;
-                    let hold = (self.envelope_shape & 0x01) != 0;
-                    
-                    if !cont {
-                        // One-shot, decay to 0
-                        self.envelope_volume = 0;
-                        self.envelope_holding = true;
-                    } else if hold {
-                        // Hold at final value
-                        self.envelope_volume = if self.envelope_attack != alt { 15 } else { 0 };
-                        self.envelope_holding = true;
-                    } else if alt {
-                        // Alternate direction
-                        self.envelope_attack = !self.envelope_attack;
-                    }
+        // Process prescaler_ticks worth of PSG updates
+        for _ in 0..prescaler_ticks {
+            // Update tone channels
+            for ch in &mut self.channels {
+                if ch.counter == 0 {
+                    ch.counter = ch.period;
+                    ch.output = !ch.output;
+                } else {
+                    ch.counter -= 1;
                 }
+            }
+            
+            // Update noise generator
+            if self.noise_counter == 0 {
+                self.noise_counter = self.noise_period;
+                // 17-bit LFSR: taps at bits 0 and 2
+                let bit = ((self.rng >> 0) ^ (self.rng >> 2)) & 1;
+                self.rng = (self.rng >> 1) | (bit << 16);
+                self.noise_output = (self.rng & 1) != 0;
+            } else {
+                self.noise_counter -= 1;
+            }
+            
+            // Update envelope generator
+            // AY-3-8910 envelope runs at half the rate of tones (prescaler /2)
+            // Note: Unlike tone period, envelope period 0 runs at DOUBLE speed (half the period)
+            self.envelope_prescaler = self.envelope_prescaler.wrapping_add(1);
+            if self.envelope_prescaler >= 2 {
+                self.envelope_prescaler = 0;
                 
                 if !self.envelope_holding {
-                    self.envelope_volume = if self.envelope_attack {
-                        self.envelope_step
+                    if self.envelope_counter == 0 {
+                        // Period 0 = half period of 1, so we don't clamp to max(1) here
+                        self.envelope_counter = if self.envelope_period == 0 { 0 } else { self.envelope_period };
+                        self.envelope_step = self.envelope_step.wrapping_add(1);
+                        
+                        if self.envelope_step >= 16 {
+                            self.envelope_step = 0;
+                            
+                            let cont = (self.envelope_shape & 0x08) != 0;
+                            let alt = (self.envelope_shape & 0x02) != 0;
+                            let hold = (self.envelope_shape & 0x01) != 0;
+                            
+                            if !cont {
+                                self.envelope_volume = 0;
+                                self.envelope_holding = true;
+                            } else if hold {
+                                self.envelope_volume = if self.envelope_attack != alt { 15 } else { 0 };
+                                self.envelope_holding = true;
+                            } else if alt {
+                                self.envelope_attack = !self.envelope_attack;
+                            }
+                        }
+                        
+                        if !self.envelope_holding {
+                            self.envelope_volume = if self.envelope_attack {
+                                self.envelope_step
+                            } else {
+                                15 - self.envelope_step
+                            };
+                        }
                     } else {
-                        15 - self.envelope_step
-                    };
+                        self.envelope_counter -= 1;
+                    }
                 }
-            } else {
-                self.envelope_counter -= 1;
             }
         }
+        
+        prescaler_ticks
     }
     
-    /// Get the mixed output sample (-1.0 to 1.0)
-    fn output(&self) -> f32 {
+    /// Get the filtered output sample (-1.0 to 1.0)
+    /// Applies a simple low-pass filter to reduce aliasing from square waves
+    fn output(&mut self) -> f32 {
         let mixer = self.get_mixer();
         let mut sum = 0.0_f32;
         
-        // DAC levels: logarithmic curve based on YM2149/AY-3-8910 measurements
+        // DAC levels based on Matthew Westcott's measurements (December 2001)
+        // Posted to comp.sys.sinclair.
+        // Original measurements on real AY-3-8910 with RL=2000 ohm:
+        // Level 0: 1.147V, Level 15: 2.58V
+        // Values normalized to 0.0-1.0 range: (V - 1.147) / (2.58 - 1.147)
         const DAC_TABLE: [f32; 16] = [
-            0.0000, 0.0078, 0.0110, 0.0156, 0.0221, 0.0312, 0.0441, 0.0624,
-            0.0883, 0.1249, 0.1766, 0.2498, 0.3534, 0.4998, 0.7070, 1.0000
+            0.0000, 0.0105, 0.0154, 0.0216, 0.0314, 0.0461, 0.0635, 0.1061,
+            0.1319, 0.2164, 0.2973, 0.3908, 0.5129, 0.6371, 0.8186, 1.0000
         ];
         
         for (i, ch) in self.channels.iter().enumerate() {
@@ -283,8 +313,16 @@ impl Ay8910 {
             }
         }
         
-        // Convert to bipolar audio (-1.0 to 1.0)
-        (sum / 1.5) - 1.0
+        // Scale output to 0.0-1.0 range (silence = 0.0, max = 1.0)
+        // Don't center around 0 - silent MB should contribute nothing to the mix
+        let raw_output = sum / 3.0;
+        
+        // Apply simple one-pole low-pass filter to simulate analog output circuitry
+        // This reduces harsh aliasing from square waves
+        // Alpha ~0.4 gives roughly 10kHz cutoff at 44.1kHz sample rate
+        const FILTER_ALPHA: f32 = 0.4;
+        self.filter_state = FILTER_ALPHA * raw_output + (1.0 - FILTER_ALPHA) * self.filter_state;
+        self.filter_state
     }
 }
 
@@ -463,7 +501,8 @@ pub struct Mockingboard {
     producer: Option<AudioProducer>,
     sample_rate: u32,
     last_cycle: u64,
-    psg_tick_accum: f64,  // Fractional PSG tick accumulator for precise timing
+    sample_accum: u32,  // Integer accumulator for sample timing (in 1/256 cycle units)
+    cycles_per_sample_frac: u32,  // Pre-computed cycles/sample in 8.8 fixed point
     
     // For mixing with main speaker
     enabled: bool,
@@ -484,6 +523,9 @@ pub struct Mockingboard {
     use_hook_activation: bool,
 }
 
+// Pre-computed cycles per sample in 8.24 fixed point: (1022727 / 44100) * 256 ≈ 5942
+const DEFAULT_CYCLES_PER_SAMPLE_FRAC: u32 = ((CYCLES_PER_SECOND / 44100.0) * 256.0) as u32;
+
 impl Default for Mockingboard {
     fn default() -> Self {
         Self {
@@ -494,7 +536,8 @@ impl Default for Mockingboard {
             producer: None,
             sample_rate: 44100,
             last_cycle: 0,
-            psg_tick_accum: 0.0,
+            sample_accum: 0,
+            cycles_per_sample_frac: DEFAULT_CYCLES_PER_SAMPLE_FRAC,
             enabled: false,
             mb_type: MockingboardType::TypeA,  // Standard Mockingboard: 2 VIAs, each with 1 PSG
             activated: false,
@@ -515,9 +558,12 @@ impl Mockingboard {
     }
     
     pub fn with_audio(producer: AudioProducer, sample_rate: u32) -> Self {
+        // Pre-compute cycles per sample in 8.24 fixed point for integer arithmetic
+        let cycles_per_sample_frac = ((CYCLES_PER_SECOND / sample_rate as f64) * 256.0) as u32;
         Self {
             producer: Some(producer),
             sample_rate,
+            cycles_per_sample_frac,
             enabled: true,
             ..Default::default()
         }
@@ -703,60 +749,71 @@ impl Mockingboard {
         }
     }
     
-    /// Tick the Mockingboard by one CPU cycle
-    pub fn tick(&mut self) {
-        if !self.enabled {
+    /// Tick the Mockingboard by N CPU cycles (batch processing for efficiency)
+    /// This replaces the old per-cycle tick() with a more efficient batch approach
+    pub fn tick_n(&mut self, cycles: u32) {
+        if !self.enabled || cycles == 0 {
             return;
         }
         
-        // Handle activation: either wait for hook or countdown timer
+        // Handle activation countdown
         if !self.activated {
             if self.use_hook_activation {
-                // Hook-based activation: just wait for explicit activate() call
                 return;
             }
-            // Timer-based activation: countdown until ready
             if self.activation_countdown > 0 {
-                self.activation_countdown -= 1;
-                return;
-            } else {
+                let decrement = (cycles as u64).min(self.activation_countdown);
+                self.activation_countdown -= decrement;
+                if self.activation_countdown > 0 {
+                    return;
+                }
                 self.activated = true;
             }
         }
         
-        // Tick VIAs (for timer interrupts)
-        for via in &mut self.via {
-            via.tick();
+        // Tick VIAs (for timer interrupts) - VIA needs per-cycle accuracy for timers
+        for _ in 0..cycles {
+            for via in &mut self.via {
+                via.tick();
+            }
         }
         
-        // Tick PSGs at CPU rate (they have internal /8 prescaler)
-        self.psg[0].tick();
-        self.psg[1].tick();
+        // Tick PSGs by all incoming CPU cycles first
+        // This ensures proper waveform generation regardless of sample timing
+        self.psg[0].tick_n(cycles);
+        self.psg[1].tick_n(cycles);
         
-        // Generate audio samples at the correct rate
-        // cycles_per_sample = 1022727 / 44100 ≈ 23.19
-        self.psg_tick_accum += 1.0;
-        let cycles_per_sample = CYCLES_PER_SECOND / self.sample_rate as f64;
+        // Audio sample generation at the audio sample rate
+        // sample_accum is in 8.8 fixed-point (×256) for fractional cycle tracking
+        // cycles_per_sample_frac is also ×256 (e.g., 23.22 cycles → 5945)
+        self.sample_accum += cycles * 256;
         
-        if self.psg_tick_accum >= cycles_per_sample {
-            self.psg_tick_accum -= cycles_per_sample;
+        // Generate samples at audio rate by sampling current PSG state
+        let num_samples = self.sample_accum / self.cycles_per_sample_frac;
+        if num_samples > 0 && self.producer.is_some() {
+            self.sample_accum -= num_samples * self.cycles_per_sample_frac;
             
-            // Sample PSG outputs
-            let sample1 = self.psg[0].output();
-            let sample2 = self.psg[1].output();
-            let mixed = (sample1 + sample2) * 0.5 * AMPLITUDE;
+            // Stereo: 2 samples per frame (L, R)
+            let mut samples = Vec::with_capacity((num_samples * 2) as usize);
+            
+            // Sample each time to allow filter to process properly
+            for _ in 0..num_samples {
+                // PSG0 → Left channel, PSG1 → Right channel
+                let left = self.psg[0].output() * AMPLITUDE;
+                let right = self.psg[1].output() * AMPLITUDE;
+                samples.push(left);
+                samples.push(right);
+            }
             
             if let Some(producer) = &mut self.producer {
-                let _ = producer.try_push(mixed);
+                let _ = producer.push_slice(&samples);
             }
         }
     }
     
-    /// Called once per frame - audio is now generated in tick() instead
+    /// Called once per frame - just for bookkeeping, audio is in tick_n()
     pub fn update(&mut self, current_cycle: u64) {
         self.last_cycle = current_cycle;
-        // Audio samples are pushed directly from tick() now,
-        // so this function is just for bookkeeping
     }
     
     /// Check if any VIA is requesting an interrupt
@@ -771,7 +828,7 @@ impl Mockingboard {
         self.psg_bc1 = [false; 2];
         self.psg_bdir = [false; 2];
         self.last_cycle = 0;
-        self.psg_tick_accum = 0.0;
+        self.sample_accum = 0;
         self.activated = false;  // Require re-activation after reset
         // Preserve hook vs timer activation mode
         if self.use_hook_activation {
