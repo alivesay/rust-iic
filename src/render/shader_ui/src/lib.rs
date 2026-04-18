@@ -8,7 +8,7 @@ use bytemuck::{Pod, Zeroable};
 ///   group3: curvature_on, saturation, halation, rasterbloom
 ///   group4: blur_width, mask_type, vignette, phosphor
 ///   group5: glow, glow_width, vignette_opacity, flicker
-///   group6: chromatic_aberration, _pad1, _pad2, _pad3
+///   group6: chromatic_aberration, ntsc_filter, horizontal_blur, _pad
 #[derive(Clone, Debug)]
 pub struct ShaderParams {
     // group0
@@ -44,6 +44,7 @@ pub struct ShaderParams {
     // group6
     pub chromatic_aberration: f32,
     pub ntsc_filter: f32,
+    pub horizontal_blur: f32,
 }
 
 impl Default for ShaderParams {
@@ -76,6 +77,7 @@ impl Default for ShaderParams {
             flicker: 0.4,
             chromatic_aberration: 0.75,
             ntsc_filter: 0.5,  // NTSC notch filter strength (0=off, 1=full)
+            horizontal_blur: 1.0, // Gap fill - closes thin vertical black lines
         }
     }
 }
@@ -96,7 +98,7 @@ impl ShaderParams {
                 self.curvature, self.saturation, self.halation, self.rasterbloom,
                 self.blur_width, self.mask_type, self.vignette, self.phosphor,
                 self.glow, self.glow_width, self.vignette_opacity, self.flicker,  // group5
-                self.chromatic_aberration, self.ntsc_filter, 0.0, 0.0,  // group6
+                self.chromatic_aberration, self.ntsc_filter, self.horizontal_blur, 0.0,  // group6
             ],
         }
     }
@@ -153,6 +155,7 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
                 changed |= ui.add(egui::Slider::new(&mut params.flicker, 0.0..=1.0).text("CRT Flicker")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.chromatic_aberration, 0.0..=1.0).text("Chromatic Aberration")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.ntsc_filter, 0.0..=1.0).text("NTSC Filter")).changed();
+                changed |= ui.add(egui::Slider::new(&mut params.horizontal_blur, 0.0..=3.0).text("Gap Fill")).changed();
 
                 ui.separator();
                 ui.horizontal(|ui| {

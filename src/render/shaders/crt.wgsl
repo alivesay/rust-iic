@@ -13,7 +13,7 @@ struct ShaderParams {
     group3: vec4<f32>,  // curvature_on, saturation, halation, rasterbloom
     group4: vec4<f32>,  // blur_width, mask_type, vignette, phosphor
     group5: vec4<f32>,  // glow, glow_width, vignette_opacity, flicker
-    group6: vec4<f32>,  // chromatic_aberration, _pad1, _pad2, _pad3
+    group6: vec4<f32>,  // chromatic_aberration, ntsc_filter, horizontal_blur, _pad
 };
 
 struct VertexOutput {
@@ -128,6 +128,46 @@ fn tex2D_crt(uv: vec2<f32>, g: f32) -> vec4<f32> {
     return pow(max(raw, vec4<f32>(0.0)), vec4<f32>(g));
 }
 
+// Simple horizontal gap fill for thin dark lines between bright pixels
+// Works by detecting bright-dark-bright patterns and filling the dark gap
+fn tex2D_crt_blur(uv: vec2<f32>, g: f32, texel_dx: f32, screen_dx: f32, fill: f32) -> vec4<f32> {
+    let center = tex2D_crt(uv, g);
+    if fill <= 0.0 { return center; }
+    
+    // Sample at multiple distances to catch gaps of different sizes
+    // Half-texel for fine gaps, full texel for wider ones
+    let half_dx = texel_dx * 0.5;
+    
+    let left_near = tex2D_crt(vec2<f32>(uv.x - half_dx, uv.y), g);
+    let right_near = tex2D_crt(vec2<f32>(uv.x + half_dx, uv.y), g);
+    let left_far = tex2D_crt(vec2<f32>(uv.x - texel_dx, uv.y), g);
+    let right_far = tex2D_crt(vec2<f32>(uv.x + texel_dx, uv.y), g);
+    
+    // Use the brightest sample from each side
+    let left = max(left_near, left_far);
+    let right = max(right_near, right_far);
+    
+    let center_lum = dot(center.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let left_lum = dot(left.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let right_lum = dot(right.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    
+    // Detect gap: center is darker than BOTH neighbors
+    let left_brighter = left_lum - center_lum;
+    let right_brighter = right_lum - center_lum;
+    
+    // Both neighbors must be brighter than center for this to be a "gap"
+    if left_brighter <= 0.03 || right_brighter <= 0.03 { return center; }
+    
+    // Use the brighter of the two neighbors for fill color (not average)
+    let fill_color = select(left, right, right_lum > left_lum);
+    
+    // Fill aggressively - at fill=1.0 we want full replacement
+    let gap_strength = min(left_brighter, right_brighter);
+    let blend = min(gap_strength * fill * 20.0, fill);
+    
+    return mix(center, fill_color, blend);
+}
+
 // Convert emulator-space [0,1] coords to texture UV
 fn emu_to_tex(emu_xy: vec2<f32>, cr_l: f32, cr_t: f32, cs: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(cr_l + emu_xy.x * cs.x, cr_t + emu_xy.y * cs.y);
@@ -211,10 +251,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mask_type = params.group4.y;
     let vignette_amt = params.group4.z;
     let glow_amt  = params.group5.x;
+    let horiz_blur = params.group6.z;  // Horizontal pixel bleed
 
     let ovs = vec2<f32>(ovs_x, ovs_y);
     let input_size = vec2<f32>(src_w, src_h);
     let content_span = vec2<f32>(cr_right - cr_left, cr_bot - cr_top);
+    let texel_dx = content_span.x / src_w;  // Horizontal texel offset in UV space
 
     // Emulator-local [0,1]
     let emu_uv = vec2<f32>(
@@ -252,6 +294,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Oversample filter width for 3x beam oversampling
     // Approximate fwidth via content_span and output resolution
     let output_size = vec2<f32>(textureDimensions(r_texture));
+    let screen_dx = 1.0 / output_size.x;  // One screen pixel in UV space
     let dxy = 1.0 / (content_span.y * output_size.y);
     let oversample_filter = dxy * input_size.y;
 
@@ -280,10 +323,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let s3 = emu_to_tex(snapped + vec2<f32>(2.0 * one.x, 0.0), cr_left, cr_top, content_span);
 
     let col = clamp(
-        tex2D_crt(s0, CRTgamma) * coeffs.x +
-        tex2D_crt(s1, CRTgamma) * coeffs.y +
-        tex2D_crt(s2, CRTgamma) * coeffs.z +
-        tex2D_crt(s3, CRTgamma) * coeffs.w,
+        tex2D_crt_blur(s0, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.x +
+        tex2D_crt_blur(s1, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.y +
+        tex2D_crt_blur(s2, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.z +
+        tex2D_crt_blur(s3, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.w,
         vec4<f32>(0.0), vec4<f32>(1.0)
     );
 
@@ -293,10 +336,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let s3b = emu_to_tex(snapped + vec2<f32>(2.0 * one.x, one.y), cr_left, cr_top, content_span);
 
     let col2 = clamp(
-        tex2D_crt(s0b, CRTgamma) * coeffs.x +
-        tex2D_crt(s1b, CRTgamma) * coeffs.y +
-        tex2D_crt(s2b, CRTgamma) * coeffs.z +
-        tex2D_crt(s3b, CRTgamma) * coeffs.w,
+        tex2D_crt_blur(s0b, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.x +
+        tex2D_crt_blur(s1b, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.y +
+        tex2D_crt_blur(s2b, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.z +
+        tex2D_crt_blur(s3b, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.w,
         vec4<f32>(0.0), vec4<f32>(1.0)
     );
 
