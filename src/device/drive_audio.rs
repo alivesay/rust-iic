@@ -615,16 +615,6 @@ impl DriveAudio {
         self.eject35_noise_decay = Self::decay_from_ms(8.0, sr);
     }
 
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.params.enabled = enabled;
-        if !enabled {
-            self.motor_on = false;
-            self.motor_envelope = 0.0;
-            self.motor35_on = false;
-            self.motor35_envelope = 0.0;
-        }
-    }
-
     // TV-style channel change static click
     pub fn trigger_channel_static(&mut self) {
         let p = &self.params;

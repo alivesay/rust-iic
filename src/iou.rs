@@ -1,12 +1,6 @@
 use std::cell::Cell;
-use std::sync::OnceLock;
 
 use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, memexp::MemoryExpansion, mockingboard::Mockingboard, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::VideoModeMask};
-
-fn ultima_lc_trace_enabled() -> bool {
-  static ENABLED: OnceLock<bool> = OnceLock::new();
-  *ENABLED.get_or_init(|| std::env::var_os("RUSTIIC_ULTIMA_LC_TRACE").is_some())
-}
 
 /// Even $C08x access: apply mode (never includes WRITE).
 /// Also resets the consecutive-read tracking since any even access
