@@ -2,7 +2,7 @@ use crate::bus::Bus;
 use crate::cpu_monitor::CpuTraceEntry;
 use crate::device::speaker::AudioProducer;
 use crate::disassembler::{Disassembler, SymbolTable};
-use crate::hooks::{HookContext, HookManager, check_mli_calls, check_custom_command_mli};
+use crate::hooks::{HookContext, HookManager};
 use crate::interrupts::InterruptType;
 use crate::rom::ROM;
 use bitflags::bitflags;
@@ -133,6 +133,7 @@ pub struct CPU {
     pub pc: u16,
     pub p: Flags,
     pub cycles: u64,
+    prev_pc: u16,
 
     symbol_table: SymbolTable,
 
@@ -159,7 +160,7 @@ impl CPU {
             bus: Bus::new(system_type, cpu_type, self_test, audio_producer, sample_rate),
             pc: 0,
             cycles: 0,
-            // target_hz,
+            prev_pc: 0,
             p: Flags::from_bits_truncate(0b00110110),
             regs: Registers::default(),
             entry_point_override: None,
@@ -204,8 +205,6 @@ impl CPU {
         println!("CPU INIT: Performing cold boot...");
 
         self.symbol_table.load_symbols();
-
-        self.bus.init_mmu();
 
         self.bus.interrupts.clear_all();
 
@@ -317,26 +316,20 @@ impl CPU {
     fn initialize_soft_switches(&mut self) {
         println!("Apple IIc: Initializing soft switches...");
 
-        // Reset Soft Switches to Apple IIc Default State
-        self.bus.handle_iic_write(0xC000, 0); // 80STORE OFF (Default)
-        self.bus.handle_iic_write(0xC054, 0); // Page2 OFF (Default)
+        self.bus.handle_iic_write(0xC000, 0); // 80STORE OFF
+        self.bus.handle_iic_write(0xC054, 0); // Page2 OFF
         self.bus.handle_iic_write(0xC051, 0); // TEXT ON
-                                              //self.bus.handle_iic_write(0xC052, 0); // MIXED OFF
-                                              //self.bus.handle_iic_write(0xC057, 0); // PAGE1 OFF
 
-        // self.bus.handle_iic_write(0xC028, 0); // ROM Bank 0 (Removed? C028 is a toggle, and we start at Bank 0...)
         self.bus.handle_iic_write(0xC008, 0); // Ensure ZP/Main Stack is active
-
-        println!("Apple IIc Soft Switches Initialized");
     }
 
     fn handle_interrupt(&mut self) -> bool {
-        // Optimization: if any interrupt is pending before reading vectors
+        // if any interrupt is pending before reading vectors
         if !self.bus.interrupts.nmi && !self.bus.interrupts.reset && !self.bus.interrupts.brk && !self.bus.interrupts.irq {
             return false;
         }
 
-        // Optimization: if only IRQ is pending and it is masked, return immediately
+        // if only IRQ is pending and it is masked, return immediately
         if self.bus.interrupts.irq && !self.bus.interrupts.nmi && !self.bus.interrupts.reset && !self.bus.interrupts.brk && self.p.contains(Flags::IRQ_DISABLE) {
             return false;
         }
@@ -546,11 +539,9 @@ impl CPU {
             self.bus.iou.mockingboard2.activate();
             println!("==> Mockingboard slot 5 activated");
         }
-        
-        // Legacy custom command check - now uses MLI hooking instead
-        // (pending_custom_command_check is no longer used)
 
         let pc = self.pc;
+        self.bus.iou.current_pc.set(pc);
 
         let instruction = if self.debug {
             Disassembler::disassemble(&mut self.bus, pc)
@@ -582,15 +573,14 @@ impl CPU {
             };
         }
 
-        // Tick base cycles BEFORE execution so that iou.cycles is accurate
-        // when softswitch handlers (e.g. speaker toggle) read it
+        // tick base cycles *before* execution so that iou.cycles is accurate
         let base_cycles = CYCLE_TABLE[opcode as usize] as u64;
         self.bus.tick(base_cycles);
 
         self.extra_cycles = 0;
         self.decode_execute(opcode);
 
-        // Tick any extra cycles from branches/page crosses
+        // tick any extra cycles from branches/page crosses
         if self.extra_cycles > 0 {
             self.bus.tick(self.extra_cycles);
         }
@@ -614,6 +604,7 @@ impl CPU {
                 self.symbol_table.append_symbol(instruction.clone()),
             );
         }
+        self.prev_pc = pc;
         cycles
     }
 

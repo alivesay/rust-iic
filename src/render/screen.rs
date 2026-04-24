@@ -1,9 +1,3 @@
-//! Post-processing screen renderer abstraction.
-//!
-//! Provides a common trait for CRT and LCD shader renderers with display-specific
-//! implementations that handle different visual characteristics and aspect ratios.
-
-/// Common interface for post-processing screen shaders.
 pub trait PostProcessor {
     /// Returns the intermediate texture view to render emulator output into.
     fn intermediate_view(&self) -> &wgpu::TextureView;
@@ -37,6 +31,12 @@ pub trait PostProcessor {
 
     /// Update the monochrome flag.
     fn update_monochrome(&self, queue: &wgpu::Queue, monochrome: bool);
+
+    /// Update text-only mode (disables NTSC color processing like real CRT auto-detect).
+    fn update_text_mode(&self, queue: &wgpu::Queue, text_only: bool);
+
+    /// Update power-on elapsed time for CRT startup sync effect.
+    fn update_power_on_time(&self, queue: &wgpu::Queue, elapsed_secs: f32);
 
     /// Update shader-specific parameters.
     fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams);

@@ -8,4 +8,5 @@ pub mod mouse;
 pub mod scc;
 pub mod smartport;
 pub mod speaker;
+pub mod unidisk;
 pub mod zip;

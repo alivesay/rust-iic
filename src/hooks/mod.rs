@@ -6,7 +6,6 @@
 //! - Hook filters (ProDOS, DOS 3.3, memory signatures)
 //! - ProDOS MLI call interception and logging
 //! - Custom command support (RUSTIIC, DEBUG, etc.)
-//! - SmartPort interception for HDV hard drive support
 
 mod manager;
 mod custom_commands;
@@ -20,7 +19,6 @@ pub use manager::{
     HookManager,
     HookMode,
     HookResult,
-    SmartPortCall,
     TimedHook,
 };
 

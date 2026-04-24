@@ -1,158 +1,12 @@
 use std::path::Path;
 use std::time::Instant;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use a2kit::img::DiskImage;
 
 use super::drive_audio::{DriveAudio, DriveEvent, AudioProducer};
+use super::smartport::SmartPort;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum WozFormat { Woz1, Woz2, Unknown }
-
-/// 3.5" disk geometry - sectors per track varies by zone
-const SECTORS_PER_TRACK_35: [u8; 5] = [12, 11, 10, 9, 8];
-
-/// GCR 6-and-2 encoding table for 3.5" disks (maps 6-bit value to disk byte)
-const TO_DISK_BYTE_35: [u8; 64] = [
-    0x96, 0x97, 0x9A, 0x9B, 0x9D, 0x9E, 0x9F, 0xA6,
-    0xA7, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB2, 0xB3,
-    0xB4, 0xB5, 0xB6, 0xB7, 0xB9, 0xBA, 0xBB, 0xBC,
-    0xBD, 0xBE, 0xBF, 0xCB, 0xCD, 0xCE, 0xCF, 0xD3,
-    0xD6, 0xD7, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE,
-    0xDF, 0xE5, 0xE6, 0xE7, 0xE9, 0xEA, 0xEB, 0xEC,
-    0xED, 0xEE, 0xEF, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6,
-    0xF7, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
-];
-
-/// Track zone boundaries (tracks 0-15 = zone 0, 16-31 = zone 1, etc.)
-fn track_zone_35(track: u8) -> usize {
-    match track {
-        0..=15 => 0,
-        16..=31 => 1,
-        32..=47 => 2,
-        48..=63 => 3,
-        _ => 4,
-    }
-}
-
-/// Get sectors per track for 3.5" disk
-fn sectors_for_track_35(track: u8) -> u8 {
-    SECTORS_PER_TRACK_35[track_zone_35(track)]
-}
-
-/// 3.5" drive state (UniDisk 3.5 / Apple 3.5 Drive)
-struct Drive35State {
-    /// Path to loaded disk image
-    disk_path: Option<String>,
-    /// File handle for block I/O
-    file: Option<File>,
-    /// Number of tracks (80 for 800K, 160 for double-sided addressing)
-    num_tracks: u16,
-    /// Current track (0-79) * 2 + side (0-1)
-    cur_qtr_track: u16,
-    /// Write protect status
-    write_prot: bool,
-    /// Disk was just ejected (for disk-switched detection)  
-    just_ejected: bool,
-    /// Motor state for 3.5" (separate from 5.25")
-    motor_on: bool,
-    /// Step direction: false = inward (higher tracks), true = outward (lower)
-    step_direction: bool,
-    /// Current head: 0 = lower (side 0), 1 = upper (side 1)
-    head: u8,
-    /// Track data buffer for nibblized data
-    track_data: Vec<u8>,
-    /// Current position in track
-    nib_pos: usize,
-    /// Track length in bytes
-    track_len: usize,
-    /// Dirty flag
-    dirty: bool,
-    /// Loaded track number (-1 if none)
-    loaded_track: i16,
-}
-
-impl Drive35State {
-    fn new() -> Self {
-        Self {
-            disk_path: None,
-            file: None,
-            num_tracks: 0,
-            cur_qtr_track: 0,
-            write_prot: false,
-            just_ejected: false,
-            motor_on: false,
-            step_direction: false,
-            head: 0,
-            track_data: Vec::new(),
-            nib_pos: 0,
-            track_len: 0,
-            dirty: false,
-            loaded_track: -1,
-        }
-    }
-
-    fn has_disk(&self) -> bool {
-        self.num_tracks > 0
-    }
-
-    /// Load a ProDOS-order (.po) or 2IMG disk image
-    fn load(&mut self, path: &str) -> Result<(), String> {
-        let mut file = File::open(path)
-            .map_err(|e| format!("Failed to open 3.5\" disk image: {}", e))?;
-
-        let metadata = file.metadata()
-            .map_err(|e| format!("Failed to get file metadata: {}", e))?;
-
-        let file_size = metadata.len();
-
-        // Detect format by size
-        // 800K = 819200 bytes (ProDOS order)
-        // 2IMG has 64-byte header
-        let data_offset;
-        let data_size;
-
-        if file_size == 819200 {
-            // Raw ProDOS order
-            data_offset = 0;
-            data_size = 819200;
-        } else if file_size == 819200 + 64 {
-            // 2IMG with header
-            let mut header = [0u8; 64];
-            file.read_exact(&mut header)
-                .map_err(|e| format!("Failed to read 2IMG header: {}", e))?;
-            // Verify 2IMG magic
-            if &header[0..4] != b"2IMG" {
-                return Err("Invalid 2IMG header".to_string());
-            }
-            data_offset = 64;
-            data_size = 819200;
-        } else if file_size >= 819200 {
-            // Assume raw with possible extra data
-            data_offset = 0;
-            data_size = 819200;
-        } else {
-            return Err(format!("Invalid 3.5\" disk image size: {} bytes", file_size));
-        }
-
-        // Verify we have enough data
-        if file_size < data_offset + data_size {
-            return Err("Disk image too small".to_string());
-        }
-
-        self.disk_path = Some(path.to_string());
-        self.file = Some(file);
-        self.num_tracks = 160; // 80 tracks * 2 sides
-        self.cur_qtr_track = 0;
-        self.write_prot = metadata.permissions().readonly();
-        self.just_ejected = false;
-        self.dirty = false;
-        self.loaded_track = -1;
-
-        log::info!("Loaded 3.5\" disk: {} ({} bytes)", path, data_size);
-        Ok(())
-    }
-}
 
 /// Per-drive state
 struct DriveState {
@@ -165,7 +19,7 @@ struct DriveState {
     dirty: bool,
     last_save: Instant,
 
-    head_pos: u8, // 0-160 quarter tracks (track = head_pos / 4)
+    head_pos: u16, // Quarter tracks (track = head_pos / 4)
 
     track_data: Vec<u8>,
     track_bit_count: usize, // Actual valid bits in track_data (may be less than track_data.len()*8 due to block-alignment padding)
@@ -178,14 +32,6 @@ struct DriveState {
 
     write_protect: bool,
 
-    // Pre-decoded latch state at each bit position for O(1) reads
-    // (Currently unused - prepared for future optimization)
-    #[allow(dead_code)]
-    nibble_latch: Vec<u8>,
-    #[allow(dead_code)]
-    nibble_epoch: Vec<u16>,
-    #[allow(dead_code)]
-    next_epoch_bit: Vec<u32>,
     nibbles_valid: bool,
     consumed_epoch: u16,
     data_ready: bool,
@@ -220,9 +66,6 @@ impl DriveState {
             data_latch: 0,
             bit_cycle: 0,
             write_protect: false,
-            nibble_latch: Vec::new(),
-            nibble_epoch: Vec::new(),
-            next_epoch_bit: Vec::new(),
             nibbles_valid: false,
             consumed_epoch: 0,
             data_ready: false,
@@ -237,6 +80,10 @@ impl DriveState {
 
     fn has_disk(&self) -> bool {
         !self.woz_raw.is_empty()
+    }
+
+    fn max_head_pos(&self) -> u16 {
+        34 * 4
     }
 }
 
@@ -260,12 +107,18 @@ pub struct Iwm {
     motor_on_cycles: u64,          // Cycles since motor turned on (for MZ status bit)
 
     drives: [DriveState; 2],       // 5.25" drives (internal + external)
-    drives35: [Drive35State; 2],   // 3.5" drives (SmartPort devices)
     
-    // 3.5" drive specific state
-    head35: u8,                    // Current head for 3.5" drives: 0=lower, 1=upper
-    motor_on35: bool,              // Motor state for 3.5" drives (separate from 5.25")
-    step_direction35: bool,        // Step direction for 3.5": false=inward, true=outward
+    // SmartPort bus controller (wire protocol + device chain: floppy, HDV)
+    pub smartport: SmartPort,
+
+    // 3.5" drive motor state (for audio events)
+    motor_on35: bool,
+    // 3.5" head selection (from $C031 bit 7, used by IOU)
+    head35: u8,
+
+    // SmartPort wire protocol state (only timing/cooldown state needed by IWM)
+    smartport_idle_counter: u8,         // Counter for idle state timeout simulation
+    smartport_response_cooldown: u16,   // Cooldown cycles after response to avoid phantom reads
 
     // Drive audio synthesis
     pub drive_audio: DriveAudio,
@@ -291,7 +144,7 @@ impl Iwm {
 
             mode: 0,
             drive_select: false,
-            fast_disk: true,
+            fast_disk: false,
             writes_enabled: true,
             cycles_since_last_read: 0,
             motor_off_pending: false,
@@ -299,13 +152,17 @@ impl Iwm {
             motor_on_cycles: 0,
 
             drives: [DriveState::new(), DriveState::new()],
-            drives35: [Drive35State::new(), Drive35State::new()],
             
-            head35: 0,
+            smartport: SmartPort::new(),
+            
             motor_on35: false,
-            step_direction35: false,
+            head35: 0,
+
+            smartport_idle_counter: 0,
+            smartport_response_cooldown: 0,
 
             drive_audio: DriveAudio::new(),
+
             audio_cycle: 0,
 
             bytes_read_counter: 0,
@@ -328,11 +185,6 @@ impl Iwm {
     /// Initialize drive audio with an audio producer
     pub fn init_audio(&mut self, producer: AudioProducer, sample_rate: u32) {
         self.drive_audio = DriveAudio::with_audio(producer, sample_rate);
-    }
-
-    /// Enable or disable drive audio
-    pub fn set_drive_audio_enabled(&mut self, enabled: bool) {
-        self.drive_audio.set_enabled(enabled);
     }
 
     /// Update drive audio synthesis (call once per frame)
@@ -365,24 +217,124 @@ impl Iwm {
             drive.consumed_epoch = 0;
         }
         // Reset 3.5" drive state
-        self.head35 = 0;
-        self.motor_on35 = false;
-        self.step_direction35 = false;
-        for drive in &mut self.drives35 {
-            drive.motor_on = false;
-            drive.just_ejected = false;
+        if self.motor_on35 {
+            self.drive_audio.queue_event(self.audio_cycle, DriveEvent::MotorOff35);
         }
+        self.motor_on35 = false;
+        self.head35 = 0;
+        // Reset SmartPort timing state
+        self.smartport_idle_counter = 0;
+    }
+
+    fn has_smartport_device(&self) -> bool {
+        self.smartport.has_any_device()
+    }
+
+    fn smartport_route_reason(&self, disk35_mode: bool) -> &'static str {
+        if disk35_mode {
+            "disk35_mode"
+        } else if self.smartport.is_wire_active() {
+            "wire_active"
+        } else if self.has_smartport_device() {
+            "device_present_idle"
+        } else {
+            "no_device"
+        }
+    }
+
+    /// True when IWM reads should expose SmartPort semantics instead of the
+    /// legacy 5.25" controller path.
+    ///
+    /// A present device is not enough on its own. Otherwise any attached
+    /// SmartPort device alters ordinary C0Ex probing even when the guest is
+    /// not in an active SmartPort exchange.
+    fn is_smartport_data_active(&self, disk35_mode: bool) -> bool {
+        disk35_mode || self.smartport.is_wire_active()
+    }
+
+    fn is_smartport_control_visible(&self, disk35_mode: bool) -> bool {
+        disk35_mode || self.smartport.is_wire_active()
+    }
+
+    fn is_smartport_write_routed(&self, disk35_mode: bool) -> bool {
+        disk35_mode || self.smartport.is_wire_active() || self.has_smartport_device()
+    }
+
+    fn is_smartport_bootstrap_visible(&self) -> bool {
+        self.has_smartport_device()
+    }
+
+    fn log_route_decision(&self, op: &str, addr: u16, disk35_mode: bool) {
+        if !self.debug {
+            return;
+        }
+
+        log::debug!(
+            "IWM route {} @{:04X}: smartport_active={} reason={} has_device={} disk35_mode={} wire_active={} q6={} q7={} motor={} motor35={}",
+            op,
+            addr,
+            self.is_smartport_data_active(disk35_mode),
+            self.smartport_route_reason(disk35_mode),
+            self.has_smartport_device(),
+            disk35_mode,
+            self.smartport.is_wire_active(),
+            self.q6,
+            self.q7,
+            self.motor_on,
+            self.motor_on35,
+        );
+    }
+
+    /// Process a byte written to SmartPort device
+    fn smartport_write_byte(&mut self, val: u8) {
+        if !self.has_smartport_device() {
+            return;
+        }
+
+        self.smartport.write_byte(val);
+
+        // Drain audio events generated by UniDisk35 command execution
+        let events = self.smartport.drain_audio_events();
+        for event in events {
+            self.drive_audio.queue_event(self.audio_cycle, event);
+        }
+    }
+    
+    /// Get next byte from SmartPort response with ACK handling
+    fn smartport_read_byte(&mut self) -> Option<u8> {
+        self.smartport.read_byte()
+    }
+
+    fn read_smartport_data(&mut self, floating_bus: u8) -> u8 {
+        if let Some(byte) = self.smartport_read_byte() {
+            if self.debug {
+                log::debug!("IWM SmartPort read_data byte={:02X}", byte);
+            }
+            return byte;
+        }
+
+        if self.smartport.take_response_done() {
+            self.smartport_response_cooldown = 1;
+        }
+
+        if self.smartport_response_cooldown > 0 {
+            self.smartport_response_cooldown -= 1;
+            if self.debug {
+                log::debug!("IWM SmartPort read_data cooldown -> 00");
+            }
+            return 0x00;
+        }
+
+        if self.debug {
+            log::debug!("IWM SmartPort read_data idle -> floating_bus {:02X}", floating_bus);
+        }
+        floating_bus
     }
 
     /// Index of the currently selected drive (0 or 1).
     #[inline]
     fn di(&self) -> usize {
         self.drive_select as usize
-    }
-    
-    /// Check if any 3.5" drive has a disk loaded
-    pub fn has_35_disk(&self) -> bool {
-        self.drives35[0].has_disk() || self.drives35[1].has_disk()
     }
 
     pub fn get_and_reset_metrics(&mut self) -> (u64, bool, u8, u64, u64) {
@@ -393,7 +345,7 @@ impl Iwm {
         self.revolutions_counter = 0;
         self.data_overrun_counter = 0;
         let d = self.di();
-        (bytes, self.motor_on, self.drives[d].head_pos / 2, revs, overruns)
+        (bytes, self.motor_on, (self.drives[d].head_pos / 2) as u8, revs, overruns)
     }
 
     /// Drive UI status for rendering the status bar.
@@ -411,7 +363,6 @@ impl Iwm {
     }
 
     /// Eject the disk from the given drive.
-    #[allow(dead_code)]
     pub fn eject_disk(&mut self, drive: usize) {
         if self.drives[drive].dirty {
             self.flush_track(drive);
@@ -428,7 +379,7 @@ impl Iwm {
         self.drives[drive].loaded_track = None;
         self.drives[drive].nibbles_valid = false;
         self.drives[drive].dirty = false;
-        // NOTE: Do NOT reset head_pos - real Apple IIc preserves head position
+        // NOTE: Do NOT reset head_pos, real Apple IIc preserves head position
         // across disk changes, and some programs (like disk copiers) rely on this
         self.drives[drive].bit_index = 0;
         self.drives[drive].shift_register = 0;
@@ -448,40 +399,30 @@ impl Iwm {
     /// Load a 3.5" disk image (.po, .2mg) into drive 3 (first SmartPort/3.5" drive)
     pub fn load_disk35<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?;
-        self.drives35[0].load(path_str).map_err(|e| anyhow::anyhow!(e))
-    }
-    
-    /// Load a 3.5" disk image (.po, .2mg) into drive 4 (second SmartPort/3.5" drive)
-    pub fn load_disk35_2<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
-        let path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?;
-        self.drives35[1].load(path_str).map_err(|e| anyhow::anyhow!(e))
+        eprintln!("DISK35 LOADER: mode=smartport path={}", path_str);
+        self.smartport.load_disk(path_str).map_err(|e| anyhow::anyhow!(e))
     }
     
     /// Returns (has_disk, is_active, is_write_protected) for the given 3.5" drive (0 or 1).
     pub fn drive_status_35(&self, drive: usize) -> (bool, bool, bool) {
-        let has_disk = self.drives35[drive].has_disk();
-        let is_active = self.drives35[drive].motor_on;
-        let wp = self.drives35[drive].write_prot;
-        (has_disk, is_active, wp)
+        match drive {
+            0 => self.smartport.floppy.drive_status(),
+            _ => (false, false, false),
+        }
     }
     
     /// Toggle write protect for the given 3.5" drive.
     pub fn toggle_write_protect_35(&mut self, drive: usize) {
-        self.drives35[drive].write_prot = !self.drives35[drive].write_prot;
+        if drive == 0 {
+            self.smartport.floppy.toggle_write_protect();
+        }
     }
-    
+
     /// Eject the disk from the given 3.5" drive.
     pub fn eject_disk_35(&mut self, drive: usize) {
-        // TODO: Flush dirty data if needed
-        self.drives35[drive].disk_path = None;
-        self.drives35[drive].file = None;
-        self.drives35[drive].num_tracks = 0;
-        self.drives35[drive].track_data.clear();
-        self.drives35[drive].nib_pos = 0;
-        self.drives35[drive].track_len = 0;
-        self.drives35[drive].loaded_track = -1;
-        self.drives35[drive].dirty = false;
-        self.drives35[drive].just_ejected = true;
+        if drive == 0 {
+            self.smartport.floppy.eject();
+        }
     }
 
     fn load_disk_drive<P: AsRef<Path>>(&mut self, drive: usize, path: P) -> anyhow::Result<()> {
@@ -550,8 +491,7 @@ impl Iwm {
             }
         }
 
-        // BOOT_DIAG: Print WOZ format detection result
-        println!("IWM: Loaded drive {} disk '{}' woz_format={:?} woz_raw_len={}", 
+        log::debug!("IWM: Loaded drive {} disk '{}' woz_format={:?} woz_raw_len={}", 
             drive + 1, path_str, self.drives[drive].woz_format, self.drives[drive].woz_raw.len());
 
         self.drives[drive].disk = Some(a2kit::create_img_from_file(path_str).map_err(|e| anyhow::anyhow!(e.to_string()))?);
@@ -559,8 +499,6 @@ impl Iwm {
         self.drives[drive].dirty = false;
         
         // Clear stale track data so new disk is read fresh
-        // NOTE: Do NOT reset head_pos - real Apple IIc preserves head position
-        // across disk changes, and some programs (like disk copiers) rely on this
         self.drives[drive].loaded_track = None;
         self.drives[drive].track_data.clear();
         self.drives[drive].track_bit_count = 0;
@@ -580,7 +518,7 @@ impl Iwm {
             if !self.motor_on {
                 let d = self.di();
                 if self.debug {
-                    println!("IWM MOTOR ON: drive={} has_disk={} woz_format={:?} head_pos={} loaded_track={:?}",
+                    log::debug!("IWM MOTOR ON: drive={} has_disk={} woz_format={:?} head_pos={} loaded_track={:?}",
                         d + 1, self.drives[d].has_disk(), self.drives[d].woz_format, 
                         self.drives[d].head_pos, self.drives[d].loaded_track);
                 }
@@ -591,7 +529,7 @@ impl Iwm {
             self.motor_on = true;
             self.cycles_since_last_read = 0;
         } else if self.motor_on {
-            // Motor OFF request — check mode bit 2 for delay behavior
+            // Motor OFF request, check mode bit 2 for delay behavior
             if (self.mode & 0x04) != 0 {
                 // Mode bit 2 set: immediate motor off (no timer)
                 let d = self.di();
@@ -636,9 +574,6 @@ impl Iwm {
 
         if let Some(target) = target_angle {
             // On real Apple IIc hardware, phase signals are connected to BOTH drives.
-            // Both heads move in response to phase changes, not just the selected drive.
-            // This is critical for proper disk I/O: when ProDOS seeks drive 1 to track N,
-            // then switches to drive 2, it expects drive 2 to also be at track N.
             for d in 0..2 {
                 let current_angle = (self.drives[d].head_pos % 8) as i32;
                 let mut delta = target - current_angle;
@@ -648,15 +583,16 @@ impl Iwm {
 
                 if delta != 0 {
                     let new_pos = self.drives[d].head_pos as i32 + delta;
-                    if new_pos >= 0 && new_pos <= 160 {
-                        if self.drives[d].head_pos != new_pos as u8 {
+                    let max_head_pos = self.drives[d].max_head_pos() as i32;
+                    if new_pos >= 0 && new_pos <= max_head_pos {
+                        if self.drives[d].head_pos != new_pos as u16 {
                             // Flush dirty track before changing tracks
                             if self.drives[d].dirty {
                                 self.flush_track(d);
                                 self.save_disk(d);
                                 self.drives[d].was_writing = false;
                             }
-                            self.drives[d].head_pos = new_pos as u8;
+                            self.drives[d].head_pos = new_pos as u16;
                             self.current_track_revolutions = 0;
                             
                             // Queue stepper audio event only for selected drive
@@ -668,14 +604,14 @@ impl Iwm {
                             }
                             
                             if self.debug {
-                                println!("IWM: Drive {} head moved to {} (Delta: {})", d + 1, self.drives[d].head_pos, delta);
+                                log::debug!("IWM: Drive {} head moved to {} (Delta: {})", d + 1, self.drives[d].head_pos, delta);
                             }
                         }
                     } else if new_pos < 0 && self.drives[d].head_pos > 0 {
                         // Trying to step below track 0
                         self.drives[d].head_pos = 0;
                         if self.debug {
-                            println!("IWM: Drive {} hit track 0 stop", d + 1);
+                            log::debug!("IWM: Drive {} hit track 0 stop", d + 1);
                         }
                     } else if new_pos < 0 {
                         // Already at track 0, just clamp
@@ -689,6 +625,10 @@ impl Iwm {
     pub fn tick(&mut self, cycles: u64) {
         // Update audio cycle counter
         self.audio_cycle += cycles;
+
+        if self.has_smartport_device() {
+            self.smartport.tick(cycles);
+        }
 
         // Process motor-off timer even if motor appears on
         if self.motor_off_pending {
@@ -726,47 +666,47 @@ impl Iwm {
 
         // Check if we need to load track
         if self.drives[d].head_pos % 4 == 0 {
-            let track_num = self.drives[d].head_pos / 4;
+            let track_num = (self.drives[d].head_pos / 4) as u16;
 
-            if track_num < 35 && self.drives[d].loaded_track != Some(track_num) {
+            if track_num < 35 && self.drives[d].loaded_track != Some(track_num as u8) {
                 if self.drives[d].dirty {
                     self.flush_track(d);
                     self.save_disk(d);
                 }
 
-                // Load track directly from woz_raw
-                if let Some(data) = self.load_track_from_raw(d, track_num) {
+                if let Some((data, bit_count)) = self.load_track_data(d, track_num as u8) {
                     let bit_count = {
-                        let woz_bc = self.drives[d].woz_bit_counts[track_num as usize] as usize;
+                        let woz_bc = if (track_num as usize) < self.drives[d].woz_bit_counts.len() {
+                            self.drives[d].woz_bit_counts[track_num as usize] as usize
+                        } else {
+                            0
+                        };
                         if woz_bc > 0 && woz_bc <= data.len() * 8 {
                             woz_bc
                         } else {
-                            data.iter().rposition(|&b| b != 0)
-                                .map(|pos| (pos + 1) * 8)
-                                .unwrap_or(data.len() * 8)
+                            bit_count
                         }
                     };
                     self.drives[d].track_data = data;
                     self.drives[d].track_bit_count = bit_count;
                     self.drives[d].bit_index = 0;
-                    self.drives[d].loaded_track = Some(track_num);
+                    self.drives[d].loaded_track = Some(track_num as u8);
                     self.drives[d].dirty = false;
                     self.drives[d].nibbles_valid = false;
                     if self.debug {
-                        println!("IWM: Drive {} loaded track {} (buf_len={}, bit_count={})",
+                        log::debug!("IWM: Drive {} loaded track {} (buf_len={}, bit_count={})",
                             d + 1, track_num, self.drives[d].track_data.len(), self.drives[d].track_bit_count);
                         // Dump first 32 bytes of track data for debugging
                         let dump_len = std::cmp::min(32, self.drives[d].track_data.len());
                         let hex: String = self.drives[d].track_data[..dump_len].iter()
                             .map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
-                        println!("IWM: Track {} first {} bytes: {}", track_num, dump_len, hex);
+                        log::debug!("IWM: Track {} first {} bytes: {}", track_num, dump_len, hex);
                     }
                 } else {
-                    // BOOT_DIAG: Track load failed - print diagnostic info
                     if self.debug {
                         let qt = (track_num * 4) as usize;
                         let tmap_idx = if qt < 160 { self.drives[d].woz_tmap[qt] } else { 0xFF };
-                        println!("IWM BOOT_DIAG: Track {} load FAILED! drive={} woz_format={:?} woz_raw_len={} tmap[{}]={:02X}",
+                        log::debug!("IWM BOOT_DIAG: Track {} load FAILED! drive={} woz_format={:?} woz_raw_len={} tmap[{}]={:02X}",
                             track_num, d + 1, self.drives[d].woz_format, self.drives[d].woz_raw.len(), qt, tmap_idx);
                     }
                 }
@@ -797,7 +737,7 @@ impl Iwm {
             }
         }
 
-        // === BIT-LEVEL PROCESSING ===
+        // BIT-LEVEL PROCESSING
         // Process bits continuously as cycles elapse (4 cycles = 1 bit for 5.25" drives)
         // IWM spec: 4µs per bit in slow mode = ~4 CPU cycles at 1.023 MHz
         let cycles_per_bit: u64 = 4;
@@ -870,7 +810,7 @@ impl Iwm {
                     let bit = (self.drives[d].track_data[byte_idx] >> bit_offset) & 1;
                     self.drives[d].shift_register = (self.drives[d].shift_register << 1) | bit;
                     
-                    // When MSB is set, we have a complete nibble - latch it
+                    // When MSB is set, we have a complete nibble: latch it
                     if self.drives[d].shift_register & 0x80 != 0 {
                         self.drives[d].data_latch = self.drives[d].shift_register;
                         self.drives[d].shift_register = 0;
@@ -889,7 +829,16 @@ impl Iwm {
         }
     }
 
-    /// Load track data directly from woz_raw bytes (avoids a2kit's stale FluxCells cache).
+    fn load_track_data(&self, d: usize, track_num: u8) -> Option<(Vec<u8>, usize)> {
+        self.load_track_from_raw(d, track_num).map(|data| {
+            let bit_count = data.iter().rposition(|&b| b != 0)
+                .map(|pos| (pos + 1) * 8)
+                .unwrap_or(data.len() * 8);
+            (data, bit_count)
+        })
+    }
+
+    /// Load track data directly from woz_raw bytes
     fn load_track_from_raw(&self, d: usize, track_num: u8) -> Option<Vec<u8>> {
         let qt = (track_num * 4) as usize;
         if qt >= 160 { return None; }
@@ -931,7 +880,6 @@ impl Iwm {
     }
 
     /// Decode and verify all sectors on the current track from the raw bitstream.
-    /// Prints detailed status for each sector found — useful for diagnosing write corruption.
     fn verify_track_sectors(&self, d: usize) {
         let track_data = &self.drives[d].track_data;
         let total_bits = self.drives[d].track_bit_count;
@@ -1081,7 +1029,7 @@ impl Iwm {
                         self.drives[d].woz_raw[trk_offset..trk_offset + data_len]
                             .copy_from_slice(&self.drives[d].track_data[..data_len]);
                         if self.debug {
-                            println!("IWM: Flushed track {} to WOZ1 ({} bytes)", track_num, data_len);
+                            log::debug!("IWM: Flushed track {} to WOZ1 ({} bytes)", track_num, data_len);
                         }
                     }
                 },
@@ -1099,17 +1047,17 @@ impl Iwm {
                             self.drives[d].woz_raw[data_offset..data_offset + data_len]
                                 .copy_from_slice(&self.drives[d].track_data);
                             if self.debug {
-                                println!("IWM: Flushed track {} to WOZ2 ({} bytes)", track_num, data_len);
+                                log::debug!("IWM: Flushed track {} to WOZ2 ({} bytes)", track_num, data_len);
                             }
                         }
                     }
                 },
                 WozFormat::Unknown => {
-                    eprintln!("IWM Error: Cannot flush track {} - unknown WOZ format", track_num);
+                    log::warn!("IWM Error: Cannot flush track {} - unknown WOZ format", track_num);
                 }
             }
 
-            // Verify all sectors on the flushed track (debug only - expensive scan)
+            // Verify all sectors on the flushed track
             if self.debug {
                 self.verify_track_sectors(d);
             }
@@ -1123,9 +1071,9 @@ impl Iwm {
                 let crc = crc32fast::hash(&self.drives[d].woz_raw[12..]);
                 self.drives[d].woz_raw[8..12].copy_from_slice(&crc.to_le_bytes());
                 if let Err(e) = std::fs::write(path, &self.drives[d].woz_raw) {
-                    eprintln!("IWM Error: Failed to save disk: {}", e);
+                    log::warn!("IWM Error: Failed to save disk: {}", e);
                 } else if self.debug {
-                    println!("IWM: Saved drive {} disk to {}", d + 1, path);
+                    log::debug!("IWM: Saved drive {} disk to {}", d + 1, path);
                 }
             }
         }
@@ -1133,90 +1081,7 @@ impl Iwm {
         self.drives[d].dirty = false;
     }
 
-    /// Pre-decode the bitstream into lookup tables for O(1) reads.
-    /// 
-    /// Builds three tables:
-    /// - nibble_latch[i]: the last complete byte (bit 7 set) at or before position i
-    /// - nibble_epoch[i]: monotonic counter that increments each time a byte completes
-    /// - next_epoch_bit[i]: bit position where the NEXT byte after position i completes
-    ///
-    /// The epoch table enables the IWM handshake: the CPU only sees a new byte
-    /// (bit 7 set) when the epoch at the current position exceeds the last consumed
-    /// epoch. The next_epoch_bit table enables fast-disk mode by allowing O(1) skip
-    /// to the next complete byte.
-    #[allow(dead_code)]
-    fn ensure_nibbles(&mut self) {
-        let d = self.di();
-        if self.drives[d].nibbles_valid { return; }
-        
-        let total_bits = self.drives[d].track_bit_count;
-        if total_bits == 0 {
-            self.drives[d].nibble_latch.clear();
-            self.drives[d].nibble_epoch.clear();
-            self.drives[d].next_epoch_bit.clear();
-            self.drives[d].nibbles_valid = true;
-            return;
-        }
-        
-        self.drives[d].nibble_latch.resize(total_bits, 0);
-        self.drives[d].nibble_epoch.resize(total_bits, 0);
-        self.drives[d].next_epoch_bit.resize(total_bits, 0);
-        let mut shift_reg: u8 = 0;
-        let mut latch: u8 = 0;
-        let mut epoch: u16 = 0;
-        
-        for rev in 0..2u8 {
-            if rev == 1 { epoch = 0; }
-            for i in 0..total_bits {
-                let bit = (self.drives[d].track_data[i >> 3] >> (7 - (i & 7))) & 1;
-                
-                shift_reg = (shift_reg << 1) | bit;
-                if shift_reg & 0x80 != 0 {
-                    latch = shift_reg;
-                    shift_reg = 0;
-                    if rev == 1 {
-                        epoch = epoch.wrapping_add(1);
-                    }
-                }
-                
-                if rev == 1 {
-                    self.drives[d].nibble_latch[i] = latch;
-                    self.drives[d].nibble_epoch[i] = epoch;
-                }
-            }
-        }
-        
-        let wrap_boundary = {
-            let mut b = 0u32;
-            for i in 0..total_bits {
-                if i > 0 && self.drives[d].nibble_epoch[i] != self.drives[d].nibble_epoch[i - 1] {
-                    b = i as u32;
-                    break;
-                }
-            }
-            b
-        };
-        let mut next_boundary = wrap_boundary;
-        for i in (0..total_bits).rev() {
-            self.drives[d].next_epoch_bit[i] = next_boundary;
-            if i > 0 && self.drives[d].nibble_epoch[i] != self.drives[d].nibble_epoch[i - 1] {
-                next_boundary = i as u32;
-            }
-        }
-        
-        self.drives[d].nibbles_valid = true;
-        // Sync consumed_epoch to current bit position so we don't
-        // immediately see a stale nibble as "new data"
-        let bi = self.drives[d].bit_index;
-        self.drives[d].consumed_epoch = if bi < self.drives[d].nibble_epoch.len() {
-            self.drives[d].nibble_epoch[bi]
-        } else {
-            0
-        };
-        self.drives[d].data_ready = false;
-    }
-
-    fn write_load(&mut self, val: u8) {
+    fn disk_write_load(&mut self, val: u8) {
         let d = self.di();
         if self.drives[d].write_protect { return; }
         if !self.writes_enabled { return; }
@@ -1249,37 +1114,23 @@ impl Iwm {
         self.drives[d].nibbles_valid = false;
     }
 
-    #[allow(dead_code)]
-    fn fast_forward_zeros(&mut self) {
-        let d = self.di();
-        if self.drives[d].track_data.is_empty() { return; }
-
-        let mut bits_checked = 0;
-        while bits_checked < 10000 {
-            let byte_index = self.drives[d].bit_index / 8;
-            let bit_offset = 7 - (self.drives[d].bit_index % 8);
-            
-            if byte_index >= self.drives[d].track_data.len() {
-                self.drives[d].bit_index = 0;
-                self.revolutions_counter += 1;
-                self.current_track_revolutions += 1;
-                continue;
-            }
-
-            let bit = (self.drives[d].track_data[byte_index] >> bit_offset) & 1;
-            
-            if bit == 1 {
-                self.drives[d].shift_register = (self.drives[d].shift_register << 1) | 1;
-                self.drives[d].bit_index += 1;
-                return;
-            }
-
-            self.drives[d].bit_index += 1;
-            bits_checked += 1;
+    fn smartport_write_load(&mut self, val: u8) {
+        if !self.has_smartport_device() {
+            return;
         }
+
+        self.log_route_decision("smartport_write_load", 0xC0EF, true);
+        self.latch = val;
+        self.smartport_write_byte(val);
     }
 
-    pub fn read_data(&mut self, floating_bus: u8) -> u8 {
+    pub fn read_data(&mut self, floating_bus: u8, disk35_mode: bool) -> u8 {
+        // SmartPort wire protocol: intercept reads when 3.5" disk is in external slot
+        if self.is_smartport_data_active(disk35_mode) {
+            self.log_route_decision("read_data", 0xC0EC, disk35_mode);
+            return self.read_smartport_data(floating_bus);
+        }
+        
         let d = self.di();
         if !self.drives[d].has_disk() {
             // No disk: return floating bus value (video RAM data at current scan position).
@@ -1326,7 +1177,7 @@ impl Iwm {
             } else {
                 // BOOT_DIAG: Track data not loaded - this would cause boot to hang!
                 if self.debug && self.drives[d].track_data.is_empty() && self.bytes_read_counter < 100 {
-                    println!("IWM BOOT_DIAG: read_data() with EMPTY track_data! drive={} head_pos={} loaded_track={:?} fast_disk={}",
+                    log::debug!("IWM BOOT_DIAG: read_data() with EMPTY track_data! drive={} head_pos={} loaded_track={:?} fast_disk={}",
                         d + 1, self.drives[d].head_pos, self.drives[d].loaded_track, self.fast_disk);
                 }
                 // No new data ready yet - return shift register with MSB cleared.
@@ -1348,7 +1199,13 @@ impl Iwm {
         let loc = addr & 0xF;
         let on = (loc & 1) != 0;
         
-        // Handle phase changes - in 3.5" mode these encode status/commands
+        // Log 3.5" mode accesses (first time only per session to avoid spam)
+        static LOGGED_35_ACCESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED_35_ACCESS.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::debug!("*** IWM: Entering 3.5\" mode access (addr={:04X})", addr);
+        }
+        
+        // Handle phase changes, in 3.5" mode these encode status/commands
         if loc < 8 {
             let phase = (loc >> 1) as u8;
             if on {
@@ -1357,15 +1214,32 @@ impl Iwm {
                 self.phases &= !(1 << phase);
             }
             
-            // Phase 3 going ON triggers an action (if motor is on)
-            if phase == 3 && on && self.motor_on {
-                self.do_action_35();
+            // Phase 0 = REQ signal for SmartPort wire protocol
+            if phase == 0 && self.is_smartport_bootstrap_visible() {
+                self.smartport.notify_req_change(on);
+            }
+
+            // SmartPort bus reset: ph0=1 ph2=1 (phases = 0x05)
+            if self.is_smartport_bootstrap_visible() && (self.phases & 0x0F) == 0x05 {
+                self.smartport.bus_reset();
             }
         } else {
             // Non-phase switches (motor, drive select, Q6/Q7) work the same
             match loc {
-                0x8 => self.set_motor(false),
-                0x9 => self.set_motor(true),
+                0x8 => {
+                    self.set_motor(false);
+                    if self.motor_on35 {
+                        self.drive_audio.queue_event(self.audio_cycle, DriveEvent::MotorOff35);
+                    }
+                    self.motor_on35 = false;  // Also update 3.5" motor state
+                },
+                0x9 => {
+                    self.set_motor(true);
+                    if !self.motor_on35 {
+                        self.drive_audio.queue_event(self.audio_cycle, DriveEvent::MotorOn35);
+                    }
+                    self.motor_on35 = true;   // Also update 3.5" motor state
+                },
                 0xA => self.drive_select = false,
                 0xB => self.drive_select = true,
                 0xC => self.q6 = false,
@@ -1373,7 +1247,7 @@ impl Iwm {
                     self.q6 = true;
                     if write && self.q7 {
                         if self.motor_on {
-                            self.write_load(val);
+                            self.smartport_write_load(val);
                         } else {
                             self.mode = val;
                         }
@@ -1387,7 +1261,7 @@ impl Iwm {
                     self.q7 = true;
                     if write && self.q6 {
                         if self.motor_on {
-                            self.write_load(val);
+                            self.smartport_write_load(val);
                         } else {
                             self.mode = val;
                         }
@@ -1409,305 +1283,64 @@ impl Iwm {
         
         match (self.q7, self.q6) {
             (false, false) => {
-                if self.motor_on {
-                    // In 3.5" mode, return data from disk
-                    self.read_data_35()
-                } else {
-                    floating_bus
-                }
+                // SmartPort wire protocol: use same data path as 5.25" mode
+                // which handles response bytes, cooldown after response,
+                // and idle patterns between commands
+                self.read_smartport_data(floating_bus)
             },
             (false, true) => {
-                // Status register - includes 3.5" status in bit 7
-                let status = self.read_status_35();
-                (status << 7) | (self.motor_on as u8) << 5 | (self.mode & 0x1F)
+                // Status register - bit 7 is SENSE input
+                // During SmartPort wire protocol, SENSE reflects BSY from the device:
+                //   BSY LOW (bit 7 = 0) after send = device acknowledged command
+                //   BSY HIGH (bit 7 = 1) after ack = device ready to send response
+                let bsy = if self.is_smartport_control_visible(true) {
+                    self.smartport.get_bsy()
+                } else {
+                    true
+                };
+                (bsy as u8) << 7 | (self.motor_on as u8) << 5 | (self.mode & 0x1F)
             },
             (true, false) => {
-                // Write handshake - same as 5.25"
-                0xC0  // Ready to write
+                // Write handshake register: bit 7 = underrun (ready), bit 6 = data register full
+                // SmartPort consumes bytes immediately, so always ready
+                0x80  // bit 7=1 (ready), bit 6=0 (buffer empty)
             },
             (true, true) => {
                 0xFF
             },
         }
     }
-    
-    /// Read 3.5" drive status based on phase encoding
-    /// State is encoded as: phase1<<3 | phase0<<2 | head35<<1 | phase2
-    fn read_status_35(&self) -> u8 {
-        let drive = self.drive_select as usize;
-        let dsk = &self.drives35[drive];
-        
-        // Encode state from phases and head
-        let state = ((self.phases >> 1) & 0x8)  // phase1 -> bit 3
-                  | ((self.phases << 2) & 0x4)  // phase0 -> bit 2  
-                  | ((self.head35 as u8) << 1)  // head -> bit 1
-                  | ((self.phases >> 2) & 0x1); // phase2 -> bit 0
-        
-        if !self.motor_on {
-            return 1;  // Drive not ready
-        }
-        
-        match state {
-            0x00 => self.step_direction35 as u8,           // Step direction
-            0x01 => 0,                                      // Lower head activate (return data bit)
-            0x02 => (!dsk.has_disk()) as u8,               // Disk in place (0=disk, 1=no disk)
-            0x03 => 0,                                      // Upper head activate (return data bit)
-            0x04 => 1,                                      // Disk stepping (1=not stepping)
-            0x05 => 1,                                      // Unknown (ROM 03 function)
-            0x06 => (!dsk.write_prot) as u8,               // Disk locked (0=locked, 1=unlocked)
-            0x08 => (!self.motor_on35) as u8,              // Motor on (0=on, 1=off)
-            0x09 => 1,                                      // Number of sides (1=two sides)
-            0x0A => (dsk.cur_qtr_track != 0) as u8,        // At track 0 (0=at track 0)
-            0x0B => (!self.motor_on35) as u8,              // Disk ready (0=ready)
-            0x0C => dsk.just_ejected as u8,                // Disk switched (1=switched)
-            0x0D => 1,                                      // Ejecting (always 1)
-            0x0E => 0,                                      // Tachometer (random bit)
-            0x0F => if drive == 0 { 0 } else { 1 },        // Drive installed (0=yes)
-            _ => 1,
-        }
-    }
-    
-    /// Perform 3.5" drive action based on phase encoding
-    fn do_action_35(&mut self) {
-        let drive = self.drive_select as usize;
-        
-        // Encode state from phases and head
-        let state = ((self.phases >> 1) & 0x8)  // phase1 -> bit 3
-                  | ((self.phases << 2) & 0x4)  // phase0 -> bit 2  
-                  | ((self.head35 as u8) << 1)  // head -> bit 1
-                  | ((self.phases >> 2) & 0x1); // phase2 -> bit 0
-        
-        if self.debug {
-            println!("IWM 3.5: action state={:02X} drive={}", state, drive);
-        }
-        
-        match state {
-            0x00 => {
-                // Set step direction inward (towards higher tracks)
-                self.step_direction35 = false;
-            },
-            0x01 => {
-                // Set step direction outward (towards lower tracks)
-                self.step_direction35 = true;
-            },
-            0x03 => {
-                // Reset disk-switched flag
-                self.drives35[drive].just_ejected = false;
-            },
-            0x04 => {
-                // Step disk
-                let dsk = &mut self.drives35[drive];
-                if dsk.has_disk() {
-                    if self.step_direction35 {
-                        // Step outward (towards track 0)
-                        if dsk.cur_qtr_track >= 2 {
-                            dsk.cur_qtr_track -= 2;
-                        } else {
-                            dsk.cur_qtr_track = 0;
-                        }
-                    } else {
-                        // Step inward (towards higher tracks)
-                        if dsk.cur_qtr_track < dsk.num_tracks - 2 {
-                            dsk.cur_qtr_track += 2;
-                        }
-                    }
-                    dsk.loaded_track = -1; // Force track reload
-                    if self.debug {
-                        println!("IWM 3.5: stepped to qtr_track {}", dsk.cur_qtr_track);
-                    }
-                }
-            },
-            0x08 => {
-                // Turn motor on
-                self.motor_on35 = true;
-                self.drives35[drive].motor_on = true;
-            },
-            0x09 => {
-                // Turn motor off
-                self.motor_on35 = false;
-                self.drives35[drive].motor_on = false;
-            },
-            0x0D => {
-                // Eject disk
-                self.drives35[drive].just_ejected = true;
-                // Note: actual ejection would clear the disk
-                if self.debug {
-                    println!("IWM 3.5: eject requested for drive {}", drive);
-                }
-            },
-            _ => {
-                // Ignore unknown actions
-            }
-        }
-    }
-    
-    /// Load and nibblize a track for 3.5" drive
-    fn load_track_35(&mut self, drive: usize) {
-        let dsk = &mut self.drives35[drive];
-        
-        if !dsk.has_disk() || dsk.file.is_none() {
-            return;
-        }
-        
-        let track = (dsk.cur_qtr_track >> 1) as u8;  // Physical track (0-79)
-        let side = (dsk.cur_qtr_track & 1) as u8;    // Side (0 or 1)
-        
-        // Check if track is already loaded
-        let qtr_track = dsk.cur_qtr_track as i16;
-        if dsk.loaded_track == qtr_track && !dsk.track_data.is_empty() {
-            return;
-        }
-        
-        let num_sectors = sectors_for_track_35(track) as usize;
-        
-        // Calculate starting block for this track
-        // 3.5" disks have variable sectors per track based on zone
-        let mut block_offset = 0u32;
-        for t in 0..track {
-            let spt = sectors_for_track_35(t) as u32;
-            block_offset += spt * 2; // 2 sides
-        }
-        block_offset += (side as u32) * (num_sectors as u32);
-        
-        // Read sector data from file
-        let mut sector_data = vec![0u8; num_sectors * 512];
-        if let Some(ref mut file) = dsk.file {
-            let offset = (block_offset as u64) * 512;
-            if file.seek(SeekFrom::Start(offset)).is_err() {
-                return;
-            }
-            if file.read_exact(&mut sector_data).is_err() {
-                // Partial read is OK for short tracks
-                let _ = file.read(&mut sector_data);
-            }
-        }
-        
-        // Build nibblized track
-        // Each sector becomes: sync + address + gap + data + gap
-        // Approximate size: 800-1000 bytes per sector
-        let mut nib = Vec::with_capacity(num_sectors * 1000);
-        
-        // 2:1 interleave table
-        let mut phys_to_log = vec![-1i32; num_sectors];
-        let mut phys_sec = 0usize;
-        for log_sec in 0..num_sectors {
-            while phys_to_log[phys_sec] >= 0 {
-                phys_sec = (phys_sec + 1) % num_sectors;
-            }
-            phys_to_log[phys_sec] = log_sec as i32;
-            phys_sec = (phys_sec + 2) % num_sectors;
-        }
-        
-        for phys_sec in 0..num_sectors {
-            let log_sec = phys_to_log[phys_sec] as usize;
-            
-            // Sync bytes
-            let num_sync = if phys_sec == 0 { 100 } else { 20 };
-            for _ in 0..num_sync {
-                nib.push(0xFF);
-            }
-            
-            // Address field
-            nib.push(0xD5); // Prolog
-            nib.push(0xAA);
-            nib.push(0x96);
-            
-            let phys_track = track & 0x3F;
-            let phys_side = (side << 5) | (track >> 6);
-            let capacity = 0x22u8;
-            let cksum = (phys_track ^ (log_sec as u8) ^ phys_side ^ capacity) & 0x3F;
-            
-            nib.push(TO_DISK_BYTE_35[(phys_track & 0x3F) as usize]);
-            nib.push(TO_DISK_BYTE_35[(log_sec & 0x3F) as usize]);
-            nib.push(TO_DISK_BYTE_35[(phys_side & 0x3F) as usize]);
-            nib.push(TO_DISK_BYTE_35[(capacity & 0x3F) as usize]);
-            nib.push(TO_DISK_BYTE_35[(cksum & 0x3F) as usize]);
-            
-            nib.push(0xDE); // Epilog
-            nib.push(0xAA);
-            
-            // Gap
-            for _ in 0..6 {
-                nib.push(0xFF);
-            }
-            
-            // Data field
-            nib.push(0xD5); // Prolog
-            nib.push(0xAA);
-            nib.push(0xAD);
-            nib.push(TO_DISK_BYTE_35[(log_sec & 0x3F) as usize]); // Sector again
-            
-            // Encode 512 bytes of sector data using 3.5" GCR
-            // This is simplified - real encoding is more complex
-            let sector_start = log_sec * 512;
-            let sector_end = sector_start + 512;
-            let data = &sector_data[sector_start..sector_end.min(sector_data.len())];
-            
-            // Simple encoding: split bytes into 6-bit groups
-            // Real 3.5" encoding is more complex (uses 3 buffers), but this works for reading
-            let mut checksum = 0u8;
-            for &byte in data.iter().take(512) {
-                let val = byte ^ checksum;
-                checksum = byte;
-                nib.push(TO_DISK_BYTE_35[(val & 0x3F) as usize]);
-                nib.push(TO_DISK_BYTE_35[((val >> 2) & 0x3F) as usize]);
-            }
-            
-            // Checksum bytes
-            nib.push(TO_DISK_BYTE_35[(checksum & 0x3F) as usize]);
-            
-            // Data epilog
-            nib.push(0xDE);
-            nib.push(0xAA);
-            
-            // Gap
-            for _ in 0..6 {
-                nib.push(0xFF);
-            }
-        }
-        
-        dsk.track_data = nib;
-        dsk.track_len = dsk.track_data.len();
-        dsk.nib_pos = 0;
-        dsk.loaded_track = qtr_track;
-        
-        if self.debug {
-            println!("IWM 3.5: Loaded track {}.{} ({} sectors, {} nibbles)",
-                track, side, num_sectors, dsk.track_len);
-        }
-    }
-    
-    /// Read data from 3.5" drive
-    fn read_data_35(&mut self) -> u8 {
-        let drive = self.drive_select as usize;
-        
-        // Make sure track is loaded
-        self.load_track_35(drive);
-        
-        let dsk = &mut self.drives35[drive];
-        
-        if dsk.track_data.is_empty() {
-            return 0;  // No disk or no data
-        }
-        
-        // Return next byte from track with MSB set (data valid)
-        let byte = dsk.track_data[dsk.nib_pos];
-        dsk.nib_pos = (dsk.nib_pos + 1) % dsk.track_len;
-        
-        byte | 0x80  // Set MSB to indicate valid data
-    }
 
     pub fn access(&mut self, addr: u16, val: u8, write: bool, floating_bus: u8, disk35_mode: bool) -> u8 {
         self.cycles_since_last_read = 0;
+
+        // Use disk35_mode only when explicitly enabled via $C031 bit 6.
+        // Auto-detection was breaking normal 5.25" boot.
+        let effective_disk35_mode = disk35_mode;
+
+        if self.debug && (0xC0E0..=0xC0EF).contains(&addr) {
+            self.log_route_decision(if write { "access-write" } else { "access-read" }, addr, effective_disk35_mode);
+        }
         
         // In 3.5"/SmartPort mode, phase signals have different meanings
-        if disk35_mode {
+        if effective_disk35_mode {
             return self.access_35(addr, val, write, floating_bus);
         }
 
         match addr & 0xF {
-            0x0 => self.set_phase(0, false),
-            0x1 => self.set_phase(0, true),
+            0x0 => {
+                self.set_phase(0, false);
+                // SmartPort: phase 0 = REQ line
+                if self.is_smartport_bootstrap_visible() {
+                    self.smartport.notify_req_change(false);
+                }
+            },
+            0x1 => {
+                self.set_phase(0, true);
+                if self.is_smartport_bootstrap_visible() {
+                    self.smartport.notify_req_change(true);
+                }
+            },
             0x2 => self.set_phase(1, false),
             0x3 => self.set_phase(1, true),
             0x4 => self.set_phase(2, false),
@@ -1740,7 +1373,11 @@ impl Iwm {
                     if self.q7 {
                         if self.motor_on {
                             // Write Load: load data into write buffer
-                            self.write_load(val);
+                            if self.is_smartport_write_routed(effective_disk35_mode) {
+                                self.smartport_write_load(val);
+                            } else {
+                                self.disk_write_load(val);
+                            }
                         } else {
                             // Mode Set: write mode register
                             self.mode = val;
@@ -1802,7 +1439,11 @@ impl Iwm {
                 if write && self.q6 {
                     if self.motor_on {
                         // Write Load: load data into write buffer
-                        self.write_load(val);
+                        if self.is_smartport_write_routed(effective_disk35_mode) {
+                            self.smartport_write_load(val);
+                        } else {
+                            self.disk_write_load(val);
+                        }
                     } else {
                         // Mode Set: write mode register 
                         self.mode = val;
@@ -1829,33 +1470,32 @@ impl Iwm {
                  0xE => "Q7 OFF", 0xF => "Q7 ON",
                  _ => "UNKNOWN"
              };
-             println!("IWM Write: {} ({:04X}) = {:02X}", reg_name, addr, val);
+             log::debug!("IWM Write: {} ({:04X}) = {:02X}", reg_name, addr, val);
         }
 
-        if write {
-             // Write register operations handled in match arms above:
-             // 0xD/0xF with L6=1+L7=1: Mode Set (motor off) or Write Load (motor on)
-             0
+        let result = if write {
+            // Write register operations handled in match arms above:
+            // 0xD/0xF with L6=1+L7=1: Mode Set (motor off) or Write Load (motor on)
+            0
         } else if (addr & 0xF) < 0xC {
-             // Addresses 0x0-0xB (phases, motor, drive select) don't return IWM data
-             // Return floating bus value
-             floating_bus
+            // Addresses 0x0-0xB (phases, motor, drive select) don't return IWM data
+            // Return floating bus value
+            floating_bus
         } else {
-             // Read register based on current L7, L6, Motor-On per IWM spec page 7:
-             //   L7=0, L6=0, Motor=0  →  floating bus
-             //   L7=0, L6=0, Motor=1  →  data register (Read)
-             //   L7=0, L6=1, x        →  status register (Write-Protect Sense)
-             //   L7=1, L6=0, x        →  write-handshake register (Write)
-             //   L7=1, L6=1, Motor=0  →  (mode set state, not a normal read)
-             //   L7=1, L6=1, Motor=1  →  (write load state, return buffer for verify)
-             match (self.q7, self.q6) {
-                 (false, false) => {
-                     if self.motor_on {
-                         let result = self.read_data(floating_bus);
-                         if self.debug { println!("IWM DATA READ: q6=0 q7=0 motor=1 drive={} result={:02X} has_disk={}", d+1, result, self.drives[d].has_disk()); }
-                         result
+            // Read register based on current L7, L6, Motor-On per IWM spec page 7:
+            //   L7=0, L6=0, Motor=0  →  floating bus
+            //   L7=0, L6=0, Motor=1  →  data register (Read)
+            //   L7=0, L6=1, x        →  status register (Write-Protect Sense)
+            //   L7=1, L6=0, x        →  write-handshake register (Write)
+            //   L7=1, L6=1, Motor=0  →  (mode set state, not a normal read)
+            //   L7=1, L6=1, Motor=1  →  (write load state, return buffer for verify)
+            match (self.q7, self.q6) {
+                (false, false) => {
+                     if self.is_smartport_data_active(effective_disk35_mode) {
+                         self.read_data(floating_bus, effective_disk35_mode)
+                     } else if self.motor_on {
+                         self.read_data(floating_bus, effective_disk35_mode)
                      } else {
-                         if self.debug { println!("IWM DATA READ: q6=0 q7=0 motor=0 -> floating_bus {:02X}", floating_bus); }
                          floating_bus  // Motor off returns floating bus
                      }
                  },
@@ -1872,17 +1512,29 @@ impl Iwm {
                          status |= 0x20;
                      }
                      // Bit 6 (MZ) stays 0 - "reserved for future products, should always be read as zero"
-                     // Bit 7: SENSE input
+                     // Bit 7: SENSE input / SmartPort BSY
                      //   - For a drive with a disk: reflects write-protect sensor (1 = protected)
-                     //   - For an EMPTY drive (no disk): set to 1 to signal "no drive/no disk"
-                     //     This allows the Apple IIc boot ROM to detect empty Drive 2 and
-                     //     fallback to Drive 1 for booting.
-                     if !self.drives[d].has_disk() || self.drives[d].write_protect {
+                     //   - For SmartPort: bit 7 = BSY line state
+                     //     BSY HIGH (1) = device idle/ready or ready to send response
+                     //     BSY LOW  (0) = device acknowledges command / transfer complete
+                     //
+                     // ROM checks:
+                     //   ubsy1:  BMI = wait for BSY HIGH (bit 7 = 1) before sending
+                     //   sd9:    BMI → loop while HIGH, exits when LOW (command ack)
+                     //   rdh1:   BPL → loop while LOW, exits when HIGH (ready to send)
+                     //   rdh45:  BMI → loop while HIGH, exits when LOW (transfer done)
+                    let smartport_active = self.is_smartport_control_visible(effective_disk35_mode);
+                    if smartport_active {
+                         let bsy = self.smartport.get_bsy();
+                         if bsy {
+                             status |= 0x80;
+                         }
+                     } else if !self.drives[d].has_disk() {
+                         // No disk at all, signal "no device"
                          status |= 0x80;
-                     }
-                     if self.debug { 
-                         println!("IWM Read Status: {:02X} (drive={}, has_disk={}, wp={})", 
-                             status, d+1, self.drives[d].has_disk(), self.drives[d].write_protect); 
+                     } else if self.drives[d].write_protect {
+                         // Has disk and write protected
+                         status |= 0x80;
                      }
                      status
                  },
@@ -1892,26 +1544,27 @@ impl Iwm {
                      // bit 6: 1 = write state active (0 if underrun)
                      // bit 7: 1 = ready to accept next byte from CPU
                      //
-                     // With double-buffering: CPU can write if data register is empty.
-                     // The data register will hold the byte until shift register empties.
-                     // NOTE: Old code returned just 0x80, reserving bits 0-5 as 0.
-                     // For compatibility, keep bits 0-5 as 0 for now.
-                     let in_write_state = self.drives[d].was_writing;
-                     // Ready when EITHER shift register is empty OR data register is empty (can buffer)
-                     let ready = self.drives[d].write_bits_left == 0 || !self.drives[d].write_data_pending;
-                     let mut handshake: u8 = 0x00;
-                     if in_write_state { handshake |= 0x40; }
-                     if ready { handshake |= 0x80; }
-                     if self.debug { println!("IWM Read Handshake: {:02X} (bits_left={}, pending={})", 
-                         handshake, self.drives[d].write_bits_left, self.drives[d].write_data_pending); }
-                     handshake
+                     // SmartPort: ROM's sendbyte ($CA50) reads l6clr,X (Q6=0,Q7=1)
+                     // and loops while bit 7 = 0. Return 0x80 = always ready.
+                     if self.is_smartport_control_visible(effective_disk35_mode) {
+                         0x80
+                     } else {
+                         let in_write_state = self.drives[d].was_writing;
+                         let ready = self.drives[d].write_bits_left == 0 || !self.drives[d].write_data_pending;
+                         let mut handshake: u8 = 0x00;
+                         if in_write_state { handshake |= 0x40; }
+                         if ready { handshake |= 0x80; }
+                         handshake
+                     }
                  },
                  (true, true) => {
-                     // Write load/mode set state read - return buffer value
+                     // Write load/mode set state read, return buffer value
                      if self.debug { println!("IWM Read Write Buffer: {:02X}", self.latch); }
                      self.latch
                  }
-             }
-        }
+            }
+        };
+
+        result
     }
 }

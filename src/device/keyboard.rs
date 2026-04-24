@@ -1,33 +1,20 @@
-//! Apple IIc Keyboard Emulation
-//!
-//! The Apple IIc keyboard uses a simple interface:
-//! - $C000: Read key data with strobe (bit 7 = key available)
-//! - $C010: Clear strobe, read AKD (Any Key Down) status
-//!
-//! Key features implemented:
-//! - Physical key tracking (independent of modifier state)
-//! - Hardware auto-repeat (500ms initial, 66.7ms subsequent)
-//! - Key queue for rapid keypresses
-//! - AKD tracking for games that poll key state
-
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 
-/// Apple IIc keyboard controller
 pub struct Keyboard {
-    /// Last key code (Apple II ASCII, 0-127)
+    // Last key code (Apple II ASCII, 0-127)
     last_key: Cell<u8>,
-    /// Strobe flag - set when new key pressed, cleared by reading $C010
+    // Strobe flag, set when new key pressed, cleared by reading $C010
     strobe: Cell<bool>,
-    /// True if $C000 was read while strobe was set
+    // True if $C000 was read while strobe was set
     strobe_read: Cell<bool>,
-    /// Physical keys currently held: physical_key_id -> apple_ii_code
+    // Physical keys currently held: physical_key_id -> apple_ii_code
     held_keys: RefCell<HashMap<u16, u8>>,
-    /// Queue of pending keypresses (for rapid taps between game frames)
+    // Queue of pending keypresses (for rapid taps between game frames)
     key_queue: RefCell<VecDeque<u8>>,
-    /// Cycle count when strobe was last cleared (for auto-repeat timing)
+    // Cycle count when strobe was last cleared (for auto-repeat timing)
     repeat_cycle: Cell<u64>,
-    /// True after first auto-repeat fires (then use faster rate)
+    // True after first auto-repeat fires (then use faster rate)
     first_repeat_done: Cell<bool>,
 }
 
@@ -44,7 +31,7 @@ impl Keyboard {
         }
     }
 
-    /// Reset keyboard state
+    // Reset keyboard state
     pub fn reset(&self) {
         self.last_key.set(0);
         self.strobe.set(false);
@@ -55,12 +42,12 @@ impl Keyboard {
         self.first_repeat_done.set(false);
     }
 
-    /// Handle key press event
-    /// 
-    /// # Arguments
-    /// * `physical_key` - Physical key identifier (scancode), unchanged by modifiers
-    /// * `apple_code` - Apple II ASCII code for this key
-    /// * `cycles` - Current CPU cycle count
+    // Handle key press event
+    // 
+    // # Arguments
+    // * `physical_key` - Physical key identifier (scancode), unchanged by modifiers
+    // * `apple_code` - Apple II ASCII code for this key
+    // * `cycles` - Current CPU cycle count
     pub fn key_down(&self, physical_key: u16, apple_code: u8, cycles: u64) {
         let mut held = self.held_keys.borrow_mut();
         
@@ -77,10 +64,10 @@ impl Keyboard {
         let strobe_pending = self.strobe.get() && !self.strobe_read.get();
         
         if strobe_pending {
-            // Queue this keypress - will be dequeued when game clears strobe
+            // Queue this keypress, will be dequeued when game clears strobe
             self.key_queue.borrow_mut().push_back(apple_code);
         } else {
-            // No pending strobe - set this key immediately
+            // No pending strobe, set this key immediately
             self.last_key.set(apple_code);
             self.strobe.set(true);
             self.strobe_read.set(false);
@@ -95,11 +82,11 @@ impl Keyboard {
         }
     }
 
-    /// Handle key release event
-    ///
-    /// # Arguments
-    /// * `physical_key` - Physical key identifier that was released
-    /// * `cycles` - Current CPU cycle count
+    // Handle key release event
+    //
+    // # Arguments
+    // * `physical_key` - Physical key identifier that was released
+    // * `cycles` - Current CPU cycle count
     pub fn key_up(&self, physical_key: u16, cycles: u64) {
         let mut held = self.held_keys.borrow_mut();
         
@@ -114,8 +101,7 @@ impl Keyboard {
         let strobe_pending = self.strobe.get() && !self.strobe_read.get();
         
         // If the released key was the current last_key and another key is still held,
-        // we may need to switch. But NOT if strobe is pending - that would make the
-        // game see the wrong key!
+        // we may need to switch, but NOT if strobe is pending!
         if self.last_key.get() == released_code && !held.is_empty() && !strobe_pending {
             // Safe to switch - strobe has been consumed
             if let Some((&_phys, &other_code)) = held.iter().next() {
@@ -127,10 +113,10 @@ impl Keyboard {
         }
     }
 
-    /// Read $C000 - keyboard data with strobe
-    ///
-    /// Returns key code in bits 0-6, strobe in bit 7.
-    /// Also handles auto-repeat timing.
+    // Read $C000: keyboard data with strobe
+    //
+    // Returns key code in bits 0-6, strobe in bit 7.
+    // Also handles auto-repeat timing.
     pub fn read_data(&self, cycles: u64) -> u8 {
         // Check for auto-repeat if no strobe pending
         if !self.strobe.get() {
@@ -172,10 +158,10 @@ impl Keyboard {
         key
     }
 
-    /// Read $C010 - clear strobe, return AKD status
-    ///
-    /// Returns key code in bits 0-6, AKD (Any Key Down) in bit 7.
-    /// Clears the strobe flag and may dequeue next key.
+    // Read $C010: clear strobe, return AKD status
+    //
+    // Returns key code in bits 0-6, AKD (Any Key Down) in bit 7.
+    // Clears the strobe flag and may dequeue next key.
     pub fn read_strobe(&self, cycles: u64) -> u8 {
         self.strobe.set(false);
         self.strobe_read.set(false);
@@ -220,12 +206,12 @@ impl Keyboard {
         if akd { last | 0x80 } else { last & 0x7F }
     }
 
-    /// Write to $C010 - also clears strobe
+    // Write to $C010, also clears strobe
     pub fn write_strobe(&self) {
         self.strobe.set(false);
     }
 
-    /// Check if any key is currently held (for AKD)
+    // Check if any key is currently held (for AKD)
     #[allow(dead_code)]
     pub fn any_key_down(&self) -> bool {
         !self.held_keys.borrow().is_empty()

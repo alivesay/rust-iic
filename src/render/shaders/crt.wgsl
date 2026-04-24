@@ -13,7 +13,8 @@ struct ShaderParams {
     group3: vec4<f32>,  // curvature_on, saturation, halation, rasterbloom
     group4: vec4<f32>,  // blur_width, mask_type, vignette, phosphor
     group5: vec4<f32>,  // glow, glow_width, vignette_opacity, flicker
-    group6: vec4<f32>,  // chromatic_aberration, ntsc_filter, horizontal_blur, _pad
+    group6: vec4<f32>,  // chromatic_aberration, unused, unused, v_roll
+    group7: vec4<f32>,  // unused, unused, unused, unused
 };
 
 struct VertexOutput {
@@ -128,49 +129,23 @@ fn tex2D_crt(uv: vec2<f32>, g: f32) -> vec4<f32> {
     return pow(max(raw, vec4<f32>(0.0)), vec4<f32>(g));
 }
 
-// Simple horizontal gap fill for thin dark lines between bright pixels
-// Works by detecting bright-dark-bright patterns and filling the dark gap
-fn tex2D_crt_blur(uv: vec2<f32>, g: f32, texel_dx: f32, screen_dx: f32, fill: f32) -> vec4<f32> {
-    let center = tex2D_crt(uv, g);
-    if fill <= 0.0 { return center; }
-    
-    // Sample at multiple distances to catch gaps of different sizes
-    // Half-texel for fine gaps, full texel for wider ones
-    let half_dx = texel_dx * 0.5;
-    
-    let left_near = tex2D_crt(vec2<f32>(uv.x - half_dx, uv.y), g);
-    let right_near = tex2D_crt(vec2<f32>(uv.x + half_dx, uv.y), g);
-    let left_far = tex2D_crt(vec2<f32>(uv.x - texel_dx, uv.y), g);
-    let right_far = tex2D_crt(vec2<f32>(uv.x + texel_dx, uv.y), g);
-    
-    // Use the brightest sample from each side
-    let left = max(left_near, left_far);
-    let right = max(right_near, right_far);
-    
-    let center_lum = dot(center.rgb, vec3<f32>(0.299, 0.587, 0.114));
-    let left_lum = dot(left.rgb, vec3<f32>(0.299, 0.587, 0.114));
-    let right_lum = dot(right.rgb, vec3<f32>(0.299, 0.587, 0.114));
-    
-    // Detect gap: center is darker than BOTH neighbors
-    let left_brighter = left_lum - center_lum;
-    let right_brighter = right_lum - center_lum;
-    
-    // Both neighbors must be brighter than center for this to be a "gap"
-    if left_brighter <= 0.03 || right_brighter <= 0.03 { return center; }
-    
-    // Use the brighter of the two neighbors for fill color (not average)
-    let fill_color = select(left, right, right_lum > left_lum);
-    
-    // Fill aggressively - at fill=1.0 we want full replacement
-    let gap_strength = min(left_brighter, right_brighter);
-    let blend = min(gap_strength * fill * 20.0, fill);
-    
-    return mix(center, fill_color, blend);
-}
-
 // Convert emulator-space [0,1] coords to texture UV
 fn emu_to_tex(emu_xy: vec2<f32>, cr_l: f32, cr_t: f32, cs: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(cr_l + emu_xy.x * cs.x, cr_t + emu_xy.y * cs.y);
+}
+
+// Convert emulator-space [0,1] coords to texture UV with clamping to content bounds
+// half_texel_margin prevents bilinear sampling from bleeding in letterbox black
+fn emu_to_tex_clamped(emu_xy: vec2<f32>, cr_l: f32, cr_t: f32, cr_r: f32, cr_b: f32, cs: vec2<f32>, margin: vec2<f32>) -> vec2<f32> {
+    let uv = vec2<f32>(cr_l + emu_xy.x * cs.x, cr_t + emu_xy.y * cs.y);
+    return clamp(uv, vec2<f32>(cr_l + margin.x, cr_t + margin.y), vec2<f32>(cr_r - margin.x, cr_b - margin.y));
+}
+
+// Sample with clamping to prevent letterbox bleed
+fn tex2D_crt_clamped(uv: vec2<f32>, g: f32, cr_l: f32, cr_t: f32, cr_r: f32, cr_b: f32, margin: vec2<f32>) -> vec4<f32> {
+    let clamped_uv = clamp(uv, vec2<f32>(cr_l + margin.x, cr_t + margin.y), vec2<f32>(cr_r - margin.x, cr_b - margin.y));
+    let raw = textureSampleLevel(r_texture, r_sampler, clamped_uv, 0.0);
+    return pow(max(raw, vec4<f32>(0.0)), vec4<f32>(g));
 }
 
 // --- Procedural shadow masks ---
@@ -240,6 +215,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ap_boost  = params.group2.y;  // aperture_brightboost
     // Disable shadow mask in monochrome mode (no phosphor triad on mono CRTs)
     let is_mono   = uniforms.extra.x;
+    let text_only = uniforms.extra.y;  // Full-screen text mode (no color burst)
     let ap_str    = select(ap_str_raw, 0.0, is_mono > 0.5);
     let sw        = params.group2.z;  // scanline_weight
     let lum       = params.group2.w;  // luminance / geom_lum
@@ -251,18 +227,99 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mask_type = params.group4.y;
     let vignette_amt = params.group4.z;
     let glow_amt  = params.group5.x;
-    let horiz_blur = params.group6.z;  // Horizontal pixel bleed
+    let v_roll    = params.group6.w;  // V-Roll rolling band effect speed
 
     let ovs = vec2<f32>(ovs_x, ovs_y);
     let input_size = vec2<f32>(src_w, src_h);
     let content_span = vec2<f32>(cr_right - cr_left, cr_bot - cr_top);
-    let texel_dx = content_span.x / src_w;  // Horizontal texel offset in UV space
+
+    // Time uniform for animated effects
+    let time = uniforms.params.z;
+    let power_on_time = uniforms.extra.z;  // Time since power on
 
     // Emulator-local [0,1]
-    let emu_uv = vec2<f32>(
+    var emu_uv = vec2<f32>(
         (uv.x - cr_left) / content_span.x,
         (uv.y - cr_top) / content_span.y,
     );
+    
+    // --- CRT Channel Change Effect ---
+    // Quick effect: ~0.8 seconds total
+    // Phase 1 (0-0.1s): Collapse to center line
+    // Phase 2 (0.1-0.3s): Vertical expand + H-sync waves
+    // Phase 3 (0.3-0.8s): V-roll + H-sync settling
+    
+    var power_on_brightness = 1.0;
+    var power_on_v_collapse = 0.0;  // 1.0 = collapsed to line, 0.0 = full
+    var power_on_roll = 0.0;
+    var power_on_h_wave = 0.0;  // Horizontal wave distortion amount
+    var channel_change_active = false;
+    
+    if power_on_time < 0.8 {
+        channel_change_active = true;
+        
+        // Brightness animates smoothly across entire effect
+        // Quick dip then recover: 1.0 -> 0.3 -> 1.0
+        let bright_phase = power_on_time / 0.8;
+        // Sine curve: dips in middle, returns to 1.0 at end
+        power_on_brightness = 1.0 - 0.7 * sin(bright_phase * 3.14159);
+        
+        if power_on_time < 0.1 {
+            // Phase 1: Collapse to line
+            let phase = power_on_time / 0.1;
+            power_on_v_collapse = phase;  // Collapse
+        } else if power_on_time < 0.3 {
+            // Phase 2: Vertical expand + strong H-sync waves
+            let phase = (power_on_time - 0.1) / 0.2;
+            power_on_v_collapse = 1.0 - phase;  // Expand from line
+            power_on_h_wave = (1.0 - phase) * 0.8;  // Strong waves, fading
+        } else {
+            // Phase 3: V-roll + H-sync settling
+            let phase = min((power_on_time - 0.3) / 0.5, 1.0);  // Clamp to 1.0
+            // Quick roll that decelerates: starts rolling, snaps to sync
+            let roll_progress = 1.0 - pow(phase, 0.3);  // Fast start, slow end (snap)
+            power_on_roll = roll_progress * 0.6;  // ~60% of a full roll
+            // H-wave continues but settling down
+            power_on_h_wave = (1.0 - phase) * 0.3;  // Weaker waves, settling
+        }
+    }
+    
+    // Apply horizontal wave distortion (H-sync loss simulation)
+    // Multiple sine waves at different frequencies create chaotic "seeking" look
+    if power_on_h_wave > 0.01 {
+        // Primary wave - slow diagonal bands
+        let wave1 = sin(emu_uv.y * 25.0 + power_on_time * 15.0) * 0.015;
+        // Secondary wave - faster, creates interference pattern  
+        let wave2 = sin(emu_uv.y * 60.0 - power_on_time * 25.0) * 0.018;
+        // Tertiary wave - high frequency jitter
+        let wave3 = sin(emu_uv.y * 150.0 + power_on_time * 40.0) * 0.004;
+        
+        // Combine waves and apply decay
+        let h_offset = (wave1 + wave2 + wave3) * power_on_h_wave;
+        emu_uv.x = emu_uv.x + h_offset;
+        
+        // Vertical wave - wider, slower wobble on Y axis
+        let v_wave1 = sin(emu_uv.x * 8.0 + power_on_time * 12.0) * 0.012;
+        let v_wave2 = sin(emu_uv.x * 3.0 - power_on_time * 8.0) * 0.018;
+        let v_offset = (v_wave1 + v_wave2) * power_on_h_wave;
+        emu_uv.y = emu_uv.y + v_offset;
+    }
+    
+    // Apply vertical collapse (squeeze toward center line)
+    if power_on_v_collapse > 0.01 {
+        let center_dist = abs(emu_uv.y - 0.5);
+        let squeeze = 1.0 - power_on_v_collapse * 0.98;  // Don't go to zero
+        emu_uv.y = 0.5 + (emu_uv.y - 0.5) * squeeze;
+        // Black out areas outside the collapsed raster
+        if center_dist > 0.5 * squeeze + 0.02 {
+            power_on_brightness = 0.0;
+        }
+    }
+    
+    // Apply V-roll
+    if power_on_roll > 0.01 {
+        emu_uv.y = fract(emu_uv.y + power_on_roll);
+    }
 
     // Curvature
     let sa = vec2<f32>(0.001, 0.001);
@@ -278,11 +335,37 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let cval = corner_mask(xy, ovs, csize, csmooth);
 
+    // --- V-Roll bar: compute displacement for horizontal "pull" effect ---
+    var v_roll_intensity = 0.0;
+    var v_roll_x_offset = 0.0;
+    if v_roll > 0.01 {
+        // Bar position cycles slowly up the screen
+        let roll_speed = v_roll * 0.15;  // Slow roll, ~6 seconds per cycle at v_roll=1.0
+        let bar_pos = fract(time * roll_speed);
+        
+        // Distance from the rolling bar center (with wrapping)
+        let dist_from_bar = abs(emu_uv.y - bar_pos);
+        let wrapped_dist = min(dist_from_bar, 1.0 - dist_from_bar);
+        
+        // Rolling bar: ~12% of screen height, very soft edges
+        let bar_width = 0.06;
+        v_roll_intensity = smoothstep(bar_width * 2.0, 0.0, wrapped_dist);
+        
+        // Horizontal displacement: curved "pull" to the right
+        // Strongest at center of bar, uses sine curve for smooth shape
+        let pull_shape = sin(v_roll_intensity * 3.14159);  // Bell curve shape
+        v_roll_x_offset = pull_shape * v_roll * 0.015;  // Max ~1.5% horizontal shift
+    }
+
     // --- Raster bloom: expand/contract based on average brightness ---
     // Sample from intermediate texture (has full mip chain) not blur (no mipmaps)
     let avgbright = dot(textureSampleLevel(r_texture, r_sampler, vec2<f32>(0.5, 0.5), 9.0).rgb, vec3<f32>(1.0)) / 3.0;
     let rbloom = 1.0 - rbloom_amt * (avgbright - 0.5);
-    let xy_bloomed = (xy - vec2<f32>(0.5)) * rbloom + vec2<f32>(0.5);
+    var xy_bloomed = (xy - vec2<f32>(0.5)) * rbloom + vec2<f32>(0.5);
+    
+    // Apply V-roll horizontal displacement
+    xy_bloomed.x = xy_bloomed.x + v_roll_x_offset;
+    
     let xy0 = xy_bloomed;  // save for halation sampling
 
     // Apple II: non-interlaced
@@ -294,54 +377,79 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Oversample filter width for 3x beam oversampling
     // Approximate fwidth via content_span and output resolution
     let output_size = vec2<f32>(textureDimensions(r_texture));
-    let screen_dx = 1.0 / output_size.x;  // One screen pixel in UV space
     let dxy = 1.0 / (content_span.y * output_size.y);
     let oversample_filter = dxy * input_size.y;
 
-    let uv_ratio = fract(ratio_scale);
+    var uv_ratio = fract(ratio_scale);
 
-    // Snap to texel center
+    // Snap to texel center for sampling
     let snapped = (floor(ratio_scale) * ilfac + vec2<f32>(0.5)) / input_size;
+    
+    // No clamping needed - source buffer has black border that curvature can sample from
+    // xy_bloomed can extend slightly outside [0,1] due to curvature; emu_to_tex will
+    // map these to UV coords in the border region of the intermediate texture
 
     // Convert snapped emu-space coords to texture UV for sampling
 
-    // --- Lanczos2 horizontal filtering (4-tap) ---
-    let coeffs_raw = vec4<f32>(
-        1.0 + uv_ratio.x,
-        uv_ratio.x,
-        1.0 - uv_ratio.x,
-        2.0 - uv_ratio.x,
-    ) * PI;
-    let coeffs_fix = max(abs(coeffs_raw), vec4<f32>(1e-5));
-    let lanczos = 2.0 * sin(coeffs_fix) * sin(coeffs_fix / 2.0) / (coeffs_fix * coeffs_fix);
-    let coeffs = lanczos / dot(lanczos, vec4<f32>(1.0));
+    // Color and mono mode use different sampling strategies:
+    // - Color: 4-tap Lanczos for sharpness
+    // - Mono: Direct bilinear sampling - no floor() to avoid banding at non-integer scales
+    var col: vec4<f32>;
+    var col2: vec4<f32>;
+    
+    if is_mono > 0.5 {
+        // Mono mode: use same Y sampling as color mode, but bilinear for X
+        // Use `snapped` (computed above) for consistency with color mode
+        
+        // Sample at scanline centers (using snapped.y from color mode calculation)
+        let uv_curr = emu_to_tex(vec2<f32>(xy_bloomed.x, snapped.y), cr_left, cr_top, content_span);
+        col = tex2D_crt(uv_curr, CRTgamma);
+        
+        // Next scanline center (snapped.y + one.y)
+        let uv_next = emu_to_tex(vec2<f32>(xy_bloomed.x, snapped.y + one.y), cr_left, cr_top, content_span);
+        col2 = tex2D_crt(uv_next, CRTgamma);
+        
+        // uv_ratio.y is already set correctly from fract(ratio_scale)
+    } else {
+        // Color mode: 4-tap Lanczos horizontal filtering for sharpness
+        let coeffs_raw = vec4<f32>(
+            1.0 + uv_ratio.x,
+            uv_ratio.x,
+            1.0 - uv_ratio.x,
+            2.0 - uv_ratio.x,
+        ) * PI;
+        let coeffs_fix = max(abs(coeffs_raw), vec4<f32>(1e-5));
+        let lanczos = 2.0 * sin(coeffs_fix) * sin(coeffs_fix / 2.0) / (coeffs_fix * coeffs_fix);
+        let coeffs = lanczos / dot(lanczos, vec4<f32>(1.0));
 
-    // Sample 4 horizontal texels for current and next scanline
-    let s0 = emu_to_tex(snapped + vec2<f32>(-one.x, 0.0), cr_left, cr_top, content_span);
-    let s1 = emu_to_tex(snapped, cr_left, cr_top, content_span);
-    let s2 = emu_to_tex(snapped + vec2<f32>(one.x, 0.0), cr_left, cr_top, content_span);
-    let s3 = emu_to_tex(snapped + vec2<f32>(2.0 * one.x, 0.0), cr_left, cr_top, content_span);
+        // Sample 4 horizontal texels for current and next scanline
+        // No clamping needed - source buffer has black border
+        let s0 = emu_to_tex(snapped + vec2<f32>(-one.x, 0.0), cr_left, cr_top, content_span);
+        let s1 = emu_to_tex(snapped, cr_left, cr_top, content_span);
+        let s2 = emu_to_tex(snapped + vec2<f32>(one.x, 0.0), cr_left, cr_top, content_span);
+        let s3 = emu_to_tex(snapped + vec2<f32>(2.0 * one.x, 0.0), cr_left, cr_top, content_span);
 
-    let col = clamp(
-        tex2D_crt_blur(s0, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.x +
-        tex2D_crt_blur(s1, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.y +
-        tex2D_crt_blur(s2, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.z +
-        tex2D_crt_blur(s3, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.w,
-        vec4<f32>(0.0), vec4<f32>(1.0)
-    );
+        col = clamp(
+            tex2D_crt(s0, CRTgamma) * coeffs.x +
+            tex2D_crt(s1, CRTgamma) * coeffs.y +
+            tex2D_crt(s2, CRTgamma) * coeffs.z +
+            tex2D_crt(s3, CRTgamma) * coeffs.w,
+            vec4<f32>(0.0), vec4<f32>(1.0)
+        );
 
-    let s0b = emu_to_tex(snapped + vec2<f32>(-one.x, one.y), cr_left, cr_top, content_span);
-    let s1b = emu_to_tex(snapped + vec2<f32>(0.0, one.y), cr_left, cr_top, content_span);
-    let s2b = emu_to_tex(snapped + vec2<f32>(one.x, one.y), cr_left, cr_top, content_span);
-    let s3b = emu_to_tex(snapped + vec2<f32>(2.0 * one.x, one.y), cr_left, cr_top, content_span);
+        let s0b = emu_to_tex(snapped + vec2<f32>(-one.x, one.y), cr_left, cr_top, content_span);
+        let s1b = emu_to_tex(snapped + vec2<f32>(0.0, one.y), cr_left, cr_top, content_span);
+        let s2b = emu_to_tex(snapped + vec2<f32>(one.x, one.y), cr_left, cr_top, content_span);
+        let s3b = emu_to_tex(snapped + vec2<f32>(2.0 * one.x, one.y), cr_left, cr_top, content_span);
 
-    let col2 = clamp(
-        tex2D_crt_blur(s0b, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.x +
-        tex2D_crt_blur(s1b, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.y +
-        tex2D_crt_blur(s2b, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.z +
-        tex2D_crt_blur(s3b, CRTgamma, texel_dx, screen_dx, horiz_blur) * coeffs.w,
-        vec4<f32>(0.0), vec4<f32>(1.0)
-    );
+        col2 = clamp(
+            tex2D_crt(s0b, CRTgamma) * coeffs.x +
+            tex2D_crt(s1b, CRTgamma) * coeffs.y +
+            tex2D_crt(s2b, CRTgamma) * coeffs.z +
+            tex2D_crt(s3b, CRTgamma) * coeffs.w,
+            vec4<f32>(0.0), vec4<f32>(1.0)
+        );
+    }
 
     // --- 3x oversampled beam profile ---
     var uv_y = uv_ratio.y;
@@ -359,7 +467,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var mul_res = (col * w1 + col2 * w2).rgb;
 
     // --- Halation: ADDITIVE blend of pre-blurred glow ---
-    let blur_uv = emu_to_tex(xy0, cr_left, cr_top, content_span);
+    // Disable during channel change effect (blur texture doesn't follow v-roll)
+    var effective_halation = halation_amt;
+    if channel_change_active {
+        effective_halation = 0.0;
+    }
+    
+    // Use xy_bloomed coords for blur/glow - border handles edge sampling
+    let blur_uv = emu_to_tex(xy_bloomed, cr_left, cr_top, content_span);
     let blur_raw = textureSampleLevel(r_blur, r_sampler, blur_uv, 0.0).rgb;
     let blur = pow(max(blur_raw, vec3<f32>(0.0)), vec3<f32>(CRTgamma));
 
@@ -382,7 +497,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Add halation to base image (halation goes through shadow mask)
     // Glow is added AFTER shadow mask to avoid mask pattern in the soft bloom
-    mul_res = (mul_res + blur * halation_amt) * vec3<f32>(cval * rbloom);
+    mul_res = (mul_res + blur * effective_halation) * vec3<f32>(cval * rbloom);
 
     // --- Energy-conserving shadow mask (from deluxe) ---
     // Halve position for HiDPI/Retina (physical pixels are 2x logical)
@@ -441,10 +556,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         result = result * vig;
     }
 
+    // V-Roll - apply brightness/contrast effect using pre-computed intensity
+    // (Horizontal displacement was already applied to xy_bloomed above)
+    if v_roll > 0.01 {
+        // Darken the bar region (sync loss effect)
+        let darken = 0.2 * v_roll_intensity * v_roll;
+        result = result * (1.0 - darken);
+        
+        // Slight desaturation in the bar (simulates signal degradation)
+        let luma = dot(result, vec3<f32>(0.299, 0.587, 0.114));
+        let desat_amt = 0.3 * v_roll_intensity * v_roll;
+        result = mix(result, vec3<f32>(luma), desat_amt);
+        
+        // Subtle brightness variation (smoother than noise)
+        let wave = sin(emu_uv.y * 150.0 + time * 5.0) * 0.5 + 0.5;
+        let wave_amt = 0.02 * v_roll_intensity * v_roll;
+        result = result * (1.0 - wave_amt + wave * wave_amt * 2.0);
+    }
+
+    // Channel change V-roll - black out near seam to hide wrap artifacts
+    if power_on_roll > 0.01 {
+        // The seam is where emu_uv.y wraps from 0 to 1
+        // Black out a band near the seam to hide the wrap artifact
+        let seam_y = fract(power_on_roll);
+        let dist_from_seam = abs(emu_uv.y - seam_y);
+        let wrapped_dist = min(dist_from_seam, 1.0 - dist_from_seam);
+        
+        // Dark band at the seam (hides the wrap artifact)
+        let seam_band = 0.04;  // 4% of screen
+        let seam_fade = smoothstep(0.0, seam_band, wrapped_dist);
+        result = result * seam_fade;
+    }
+    
+    // Apply channel change brightness
+    if power_on_time < 0.8 {
+        result = result * power_on_brightness;
+    }
+
     // CRT Flicker effect - subtle brightness variation simulating refresh rate instability
     let flicker_amt = params.group5.w;
     if flicker_amt > 0.0 {
-        let time = uniforms.params.z;  // time is in params
         // 60Hz base flicker (refresh rate) - primary component
         let flicker_60hz = sin(time * 376.99112) * 0.5 + 0.5; // 60 * 2 * PI
         // Slower "power supply hum" component at ~8Hz

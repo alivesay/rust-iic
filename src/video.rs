@@ -1,12 +1,56 @@
-use std::cell::Cell;
-
 use crate::{iou::IOU, mmu::MMU, util::apple_iic_font_index};
 
 const CHAR_ROM: &[u8; 1024] = include_bytes!("../assets/font.bin");
 
-/// Apple IIc Monitor G2 (P1 phosphor) green — paler than pure green
-const MONO_GREEN: (u8, u8, u8) = (51, 255, 51);
+const MONO_GREEN: (u8, u8, u8) = (118, 247, 211);
 const MONO_GREEN_RGBA: [u8; 4] = [MONO_GREEN.0, MONO_GREEN.1, MONO_GREEN.2, 255];
+const MONO_BLACK_RGBA: [u8; 4] = [15, 23, 23, 255];
+
+/// NTSC 16-color palette
+/// Source: R. Munafo (mrob.com/pub/xapple2/colors.html)
+#[rustfmt::skip]
+const NTSC_PALETTE: [[u8; 4]; 16] = [
+    [  0,   0,   0, 255], // 0x0: Black
+    [227,  30,  96, 255], // 0x1: Deep Red       (phase  90°, chroma 60)
+    [ 96,  78, 189, 255], // 0x2: Dark Blue      (phase   0°, chroma 60)
+    [255,  68, 253, 255], // 0x3: Purple/Violet  (phase  45°, chroma 100) HiRes: Violet
+    [  0, 163,  96, 255], // 0x4: Dark Green     (phase 270°, chroma 60)
+    [156, 156, 156, 255], // 0x5: Gray 1
+    [  0, 180, 255, 255], // 0x6: Medium Blue    (phase 315°, chroma 100) HiRes: Blue
+    [208, 195, 255, 255], // 0x7: Light Blue     (phase   0°, chroma 60)
+    [ 96, 114,   3, 255], // 0x8: Brown          (phase 180°, chroma 60)
+    [255, 106,  60, 255], // 0x9: Orange         (phase 135°, chroma 100) HiRes: Orange
+    [156, 156, 156, 255], // 0xA: Gray 2
+    [255, 160, 208, 255], // 0xB: Pink           (phase  90°, chroma 60)
+    [ 20, 245,  60, 255], // 0xC: Light Green    (phase 225°, chroma 100) HiRes: Green
+    [210, 212,  26, 255], // 0xD: Yellow         (phase 180°, chroma 60)
+    [114, 255, 208, 255], // 0xE: Aqua           (phase 270°, chroma 60)
+    [255, 255, 255, 255], // 0xF: White
+];
+
+/// DHIRES extracts 4-bit color from a sliding window across the 560-bit scanline.
+/// The bit-to-nibble phase rotation means nibble values map to different colors
+/// than the LoRes palette: entries 2<-8, 3<-9, 6<-C, 7<-D are swapped.
+/// Source: mii_emu (buserror/mii_emu) DHIRES CLUT
+#[rustfmt::skip]
+const DHIRES_PALETTE: [[u8; 4]; 16] = [
+    [  0,   0,   0, 255], // 0x0: Black
+    [227,  30,  96, 255], // 0x1: Magenta/Deep Red
+    [ 96, 114,   3, 255], // 0x2: Brown          (LoRes 0x8)
+    [255, 106,  60, 255], // 0x3: Orange         (LoRes 0x9)
+    [  0, 163,  96, 255], // 0x4: Dark Green
+    [156, 156, 156, 255], // 0x5: Gray 1
+    [ 20, 245,  60, 255], // 0x6: Green          (LoRes 0xC)
+    [210, 212,  26, 255], // 0x7: Yellow         (LoRes 0xD)
+    [ 96,  78, 189, 255], // 0x8: Dark Blue      (LoRes 0x2)
+    [255,  68, 253, 255], // 0x9: Purple         (LoRes 0x3)
+    [156, 156, 156, 255], // 0xA: Gray 2
+    [255, 160, 208, 255], // 0xB: Pink
+    [  0, 180, 255, 255], // 0xC: Blue           (LoRes 0x6)
+    [208, 195, 255, 255], // 0xD: Light Blue     (LoRes 0x7)
+    [114, 255, 208, 255], // 0xE: Aqua
+    [255, 255, 255, 255], // 0xF: White
+];
 
 pub const TEXT_MODE_BASE_ADDRESSES: [u16; 24] = [
     0x0400, 0x0480, 0x0500, 0x0580, 0x0600, 0x0680, 0x0700, 0x0780, 0x0428, 0x04A8, 0x0528, 0x05A8,
@@ -26,60 +70,37 @@ impl VideoModeMask {
     pub const ALTCHAR: u8  = 0b1000_0000; // Alternate Character Set
 }
 
-pub struct VideoMode;
-#[rustfmt::skip]
-#[allow(dead_code)]
-impl VideoMode {
-    pub const TEXT: u8       = VideoModeMask::TEXT;
-    pub const LORES: u8      = VideoModeMask::LORES;
-    pub const HIRES: u8      = VideoModeMask::HIRES;
-    pub const DHIRES: u8     = VideoModeMask::DHIRES | VideoModeMask::COL80; // DHiRes requires 80-Col
-    pub const MIXED_TEXT: u8 = VideoModeMask::TEXT | VideoModeMask::MIXED;
-    pub const MIXED_HIRES: u8 = VideoModeMask::HIRES | VideoModeMask::MIXED;
-    pub const MIXED_DHIRES: u8 = VideoModeMask::DHIRES | VideoModeMask::MIXED;
-    pub const LORES_PAGE2: u8 = VideoModeMask::LORES | VideoModeMask::PAGE2;
-    pub const HIRES_PAGE2: u8 = VideoModeMask::HIRES | VideoModeMask::PAGE2;
-}
-
-// macro_rules! set_video_mode {
-//     ($video_state:expr, $mode:expr) => {{
-//         let current = $video_state.get();
-//         $video_state.set(current | $mode);
-//         0x00
-//     }};
-// }
 
 pub struct Video {
-    framebuffer: Vec<u8>, // RGBA
+    framebuffer: Vec<u8>,
     width: usize,
     height: usize,
-    // Active area dimensions (without border)
     active_width: usize,
     active_height: usize,
-    //  video_mode: Cell<u8>,
-    extra: Cell<u8>,
     frame_count: usize,
     pub monochrome: bool,
-    pub shader_enabled: bool,  // True if using CRT/LCD shader (disables software scanlines)
-    pub scanline_intensity: f32, // 0.0 = full black gap, 1.0 = no scanlines
-    pub border_size: usize,     // Black border in pixels around active area
+    pub shader_enabled: bool,
+    pub scanline_intensity: f32,
+    pub border_size: usize,
 }
 
 impl Video {
     pub fn new() -> Self {
         let border = 16;
         let active_width = 560;
-        let active_height = 192;
+        let active_height = 384;
         let width = active_width + border * 2;
         let height = active_height + border * 2;
+        let mut framebuffer = vec![0u8; width * height * 4];
+        for i in (3..framebuffer.len()).step_by(4) {
+            framebuffer[i] = 255;
+        }
         Self {
-            framebuffer: vec![0; width * height * 4],
+            framebuffer,
             width,
             height,
             active_width,
             active_height,
-            //  video_mode: Cell::new(VideoMode::TEXT),
-            extra: Cell::new(0),
             frame_count: 0,
             monochrome: false,
             shader_enabled: false,
@@ -92,41 +113,6 @@ impl Video {
         self.monochrome = enabled;
     }
 
-    #[allow(dead_code)]
-    fn get_display_address(&self, video_mode: u8, is_80store: bool, addr: u16) -> u16 {
-        let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
-        let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
-        let is_dhires = check_bits_u8!(video_mode, VideoModeMask::DHIRES);
-
-        match addr {
-            0x0400..=0x07FF => {
-                if is_80store || is_page2 {
-                    addr.wrapping_add(0x0400) // Page2 offset
-                } else {
-                    addr
-                }
-            }
-            0x0800..=0x0BFF => addr,
-            0x2000..=0x3FFF => {
-                if is_80store || is_page2 {
-                    addr.wrapping_add(0x2000)
-                } else {
-                    addr
-                }
-            }
-            _ if is_dhires && addr & 0x200 != 0 => addr.wrapping_add(0x200),
-            _ if is_80col && (0x0400..=0x07FF).contains(&addr) => {
-                let col = (addr.wrapping_sub(0x0400)) % 40;
-                if col % 2 == 0 {
-                    addr
-                } else {
-                    addr.wrapping_add(0x200)
-                }
-            }
-            _ => addr,
-        }
-    }
-
     pub fn update(&mut self, iou: &IOU, mmu: &MMU) -> bool {
         self.frame_count = self.frame_count.wrapping_add(1);
         
@@ -134,10 +120,6 @@ impl Video {
         self.framebuffer.fill(0);
 
         let video_mode = iou.video_mode.get();
-        
-        if self.extra.get() != video_mode {
-             self.extra.set(video_mode);
-        }
 
         let _is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
         let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
@@ -159,6 +141,8 @@ impl Video {
             self.resize_framebuffer(new_width, new_height);
         }
 
+        let is_graphics = !text_mode && (is_hires || lo_res_mode);
+
         if text_mode {
             self.render_text_mode(iou, mmu);
         } else if is_hires {
@@ -179,8 +163,11 @@ impl Video {
             self.render_text_mode(iou, mmu);
         }
 
-        // Apply scanline effect: black out every odd row (the 2nd row of each doubled pair)
-        // Shaders (CRT/LCD) handle scanlines themselves via beam profile or pixel grid
+        if is_graphics && !self.monochrome {
+            self.apply_chroma_blur(0, 192 * 2);
+            self.apply_comb_filter();
+        }
+
         if !self.shader_enabled && self.scanline_intensity < 1.0 {
             self.apply_scanlines();
         }
@@ -192,19 +179,64 @@ impl Video {
         self.width = new_width;
         self.height = new_height;
         self.framebuffer = vec![0; new_width * new_height * 4];
+        for i in (3..self.framebuffer.len()).step_by(4) {
+            self.framebuffer[i] = 255;
+        }
     }
 
-    /// Convert active-area (x, y) to framebuffer byte index, accounting for border
     #[inline(always)]
     fn fb_index(&self, x: usize, y: usize) -> usize {
         ((y + self.border_size) * self.width + (x + self.border_size)) * 4
     }
 
+    fn apply_comb_filter(&mut self) {
+        let original = self.framebuffer.clone();
+        const BLEND: f32 = 0.1;
+
+        for src_line in 0..192_usize {
+            let y_cur = src_line * 2;
+
+            for x in 0..self.active_width {
+                let idx_cur = self.fb_index(x, y_cur);
+                if idx_cur + 4 > original.len() { continue; }
+
+                let cr = original[idx_cur] as f32;
+                let cg = original[idx_cur + 1] as f32;
+                let cb = original[idx_cur + 2] as f32;
+
+                let mut blend_r = cr;
+                let mut blend_g = cg;
+                let mut blend_b = cb;
+
+                if src_line > 0 {
+                    let idx = self.fb_index(x, (src_line - 1) * 2);
+                    blend_r += (original[idx] as f32 - cr) * BLEND;
+                    blend_g += (original[idx + 1] as f32 - cg) * BLEND;
+                    blend_b += (original[idx + 2] as f32 - cb) * BLEND;
+                }
+
+                if src_line < 191 {
+                    let idx = self.fb_index(x, (src_line + 1) * 2);
+                    blend_r += (original[idx] as f32 - cr) * BLEND;
+                    blend_g += (original[idx + 1] as f32 - cg) * BLEND;
+                    blend_b += (original[idx + 2] as f32 - cb) * BLEND;
+                }
+
+                for dy in 0..2_usize {
+                    let idx = self.fb_index(x, y_cur + dy);
+                    if idx + 4 <= self.framebuffer.len() {
+                        self.framebuffer[idx] = blend_r as u8;
+                        self.framebuffer[idx + 1] = blend_g as u8;
+                        self.framebuffer[idx + 2] = blend_b as u8;
+                    }
+                }
+            }
+        }
+    }
+
     fn apply_scanlines(&mut self) {
         let intensity = self.scanline_intensity.clamp(0.0, 1.0);
-        // Black out every odd row (row 1, 3, 5, ...) within the active area.
-        // Each source line is rendered to 2 rows: row 0 = pixel data, row 1 = scanline gap.
-        // The gap is the space between beam traces, not an overlay on pixel data.
+
         for y in (1..self.active_height).step_by(2) {
             let abs_y = y + self.border_size;
             let row_start = (abs_y * self.width + self.border_size) * 4;
@@ -218,8 +250,6 @@ impl Video {
             }
         }
     }
-
-
 
     fn read_hires_memory(&self, iou: &IOU, mmu: &MMU, addr: u16) -> u8 {
         let video_mode = iou.video_mode.get();
@@ -246,11 +276,9 @@ impl Video {
         self.render_text_rows(iou, mmu, 0..24);
     }
 
-    #[allow(dead_code)]
     pub fn render_text_mode_overlay(&mut self, iou: &IOU, mmu: &MMU) {
         self.render_text_rows(iou, mmu, 20..24);
-        // In mixed mode, color burst stays active on text lines,
-        // so text shows NTSC color fringing on white→black edges.
+
         if !self.monochrome {
             self.apply_mixed_mode_text_fringing(20);
         }
@@ -263,8 +291,6 @@ impl Video {
         let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
         let is_80store = iou.is_80store.get();
 
-        // In 80-column mode, we draw single-width characters (7 pixels).
-        // In 40-column mode, we draw double-width characters (14 pixels).
         let double_width = !is_80col;
 
         for row in rows {
@@ -305,23 +331,14 @@ impl Video {
     }
 
     fn draw_char(&mut self, row: u16, col: u16, char_code: u8, is_altchar: bool, double_width: bool) {
-        let mut vram_code = char_code;
-        // 0x00 as 0xA0 (blank space)
-        if vram_code == 0x00 {
-            vram_code = 0xA0;
-        }
+        let (font_offset, mut invert) = apple_iic_font_index(char_code, is_altchar);
 
-        let (font_offset, mut invert) = apple_iic_font_index(vram_code, is_altchar);
-
-        // Handle Hardware Flashing
-        // Flashing characters are mapped to Inverse by apple_iic_font_index.
-        // We toggle the 'invert' flag based on frame count to simulate flashing.
-        // Flashing range in VRAM: 0x40-0x7F (when not in AltChar/MouseText mode)
-        if !is_altchar && (vram_code >= 0x40 && vram_code <= 0x7F) {
+       // Flashing range in VRAM: 0x40-0x7F (when not in AltChar/MouseText mode)
+        if !is_altchar && (char_code >= 0x40 && char_code <= 0x7F) {
             // Flash rate: approx 2Hz. 60fps / 32 = ~1.8Hz
             let flash_on = (self.frame_count / 16) % 2 == 0;
             if !flash_on {
-                invert = false; // Render as Normal
+                invert = false;
             }
         }
 
@@ -334,11 +351,10 @@ impl Video {
                 font_byte = !font_byte;
             }
 
-            // Scale Y by 2 because we are now using 384 height for everything
             let y = (row * 8 + char_row) * 2;
             let x = col * char_width; 
 
-            let mut rgba_row = [0u8; 14 * 4]; // Max width 14
+            let mut rgba_row = [0u8; 14 * 4];
 
             for bit in 0..7 {
                 let pixel_on = (font_byte >> bit) & 1 != 0;
@@ -351,11 +367,9 @@ impl Video {
                 } else {
                     (0, 0, 0)
                 };
-                // if !pixel_on { continue; }
-                // let color = 255;
 
                 if double_width {
-                    // Draw 2 pixels for each font bit
+                    // draw 2 pixels for each font bit
                     let base_index = bit * 8; // bit * 2 pixels * 4 bytes
                     
                     // Pixel 1
@@ -370,7 +384,7 @@ impl Video {
                     rgba_row[base_index + 6] = b;
                     rgba_row[base_index + 7] = 255;
                 } else {
-                    // Draw 1 pixel for each font bit
+                    // draw 1 pixel for each font bit
                     let base_index = bit * 4; // bit * 1 pixel * 4 bytes
                     
                     rgba_row[base_index] = r;
@@ -380,7 +394,6 @@ impl Video {
                 }
             }
 
-            // Draw 2 rows for each font row (vertical scaling is always 2x)
             for dy in 0..2 {
                 let start_index = self.fb_index(x as usize, y as usize + dy);
                 let end_index = start_index + (char_width as usize) * 4;
@@ -392,12 +405,8 @@ impl Video {
         }
     }
 
-    /// Apply subtle NTSC color fringing to text rows in mixed mode.
-    /// In mixed mode the color burst is active, so white pixels show
-    /// artifact color at transitions to black, just like hires pixels.
     fn apply_mixed_mode_text_fringing(&mut self, start_text_row: usize) {
-        let fringe_strength: u16 = 60; // subtle — about 24% intensity
-        // Scan the text area: rows start_text_row..24, each 8 font rows * 2 (doubled)
+        let fringe_alpha: f32 = 0.25; // blend strength (~25%)
         let y_start = start_text_row * 8 * 2;
         let y_end = 24 * 8 * 2;
 
@@ -409,59 +418,108 @@ impl Video {
                 let r = self.framebuffer[idx] as u16;
                 let g = self.framebuffer[idx + 1] as u16;
                 let b = self.framebuffer[idx + 2] as u16;
-                let is_bright = r + g + b > 400; // white-ish
+                let is_bright = r + g + b > 400;
 
                 if !is_bright { continue; }
 
-                // Check right neighbor — if it's dark, add right fringe
+                // right neighbor
                 let ridx = self.fb_index(x + 1, y);
                 if ridx + 4 <= self.framebuffer.len() {
                     let rr = self.framebuffer[ridx] as u16;
                     let rg = self.framebuffer[ridx + 1] as u16;
                     let rb = self.framebuffer[ridx + 2] as u16;
                     if rr + rg + rb < 100 {
-                        // Fringe color depends on pixel phase (x position mod 4)
-                        let fringe = match x % 4 {
-                            0 => [0, fringe_strength, 0],           // green tint
-                            1 => [fringe_strength, 0, fringe_strength], // violet tint
-                            2 => [0, 0, fringe_strength],           // blue tint
-                            _ => [fringe_strength, fringe_strength / 2, 0], // orange tint
-                        };
+                        // phase-based fringe
+                        let fringe = Self::ntsc_fringe_color((x + 1) % 4);
                         for dy in 0..2 {
                             let fi = self.fb_index(x + 1, y + dy);
                             if fi + 4 <= self.framebuffer.len() {
-                                self.framebuffer[fi] = fringe[0] as u8;
-                                self.framebuffer[fi + 1] = fringe[1] as u8;
-                                self.framebuffer[fi + 2] = fringe[2] as u8;
+                                self.framebuffer[fi]     = (fringe[0] as f32 * fringe_alpha) as u8;
+                                self.framebuffer[fi + 1] = (fringe[1] as f32 * fringe_alpha) as u8;
+                                self.framebuffer[fi + 2] = (fringe[2] as f32 * fringe_alpha) as u8;
                             }
                         }
                     }
                 }
 
-                // Check left neighbor — if it's dark, add left fringe
+                // left neighbor
                 let lidx = self.fb_index(x - 1, y);
                 if lidx + 4 <= self.framebuffer.len() {
                     let lr = self.framebuffer[lidx] as u16;
                     let lg = self.framebuffer[lidx + 1] as u16;
                     let lb = self.framebuffer[lidx + 2] as u16;
                     if lr + lg + lb < 100 {
-                        let fringe = match (x - 1) % 4 {
-                            0 => [0, fringe_strength, 0],
-                            1 => [fringe_strength, 0, fringe_strength],
-                            2 => [0, 0, fringe_strength],
-                            _ => [fringe_strength, fringe_strength / 2, 0],
-                        };
+                        let fringe = Self::ntsc_fringe_color((x - 1) % 4);
                         for dy in 0..2 {
                             let fi = self.fb_index(x - 1, y + dy);
                             if fi + 4 <= self.framebuffer.len() {
-                                self.framebuffer[fi] = fringe[0] as u8;
-                                self.framebuffer[fi + 1] = fringe[1] as u8;
-                                self.framebuffer[fi + 2] = fringe[2] as u8;
+                                self.framebuffer[fi]     = (fringe[0] as f32 * fringe_alpha) as u8;
+                                self.framebuffer[fi + 1] = (fringe[1] as f32 * fringe_alpha) as u8;
+                                self.framebuffer[fi + 2] = (fringe[2] as f32 * fringe_alpha) as u8;
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    #[inline]
+    fn ntsc_fringe_color(phase: usize) -> [u8; 4] {
+        match phase % 4 {
+            0 => NTSC_PALETTE[2],  // Dark Blue   (phase   0°)
+            1 => NTSC_PALETTE[1],  // Red         (phase  90°)
+            2 => NTSC_PALETTE[8],  // Brown       (phase 180°)
+            3 => NTSC_PALETTE[4],  // Dark Green  (phase 270°)
+            _ => unreachable!()
+        }
+    }
+
+    /// Palette 0 (bit 7=0): even->Violet (3), odd->Green (12)
+    /// Palette 1 (bit 7=1): even->Blue (6), odd->Orange (9)
+    #[inline]
+    fn ntsc_hires_artifact_color(
+        cur: bool, prev: bool, next: bool,
+        phase_column: usize, palette: bool,
+    ) -> [u8; 4] {
+        if cur {
+            if prev || next {
+                // adjacent ON pixels cancel chroma
+                NTSC_PALETTE[15]
+            } else {
+                if palette {
+                    if phase_column % 2 == 0 { NTSC_PALETTE[6] } else { NTSC_PALETTE[9] }
+                } else {
+                    if phase_column % 2 == 0 { NTSC_PALETTE[3] } else { NTSC_PALETTE[12] }
+                }
+            }
+        } else if prev && next {
+            // between two ON pixels
+            if palette {
+                if phase_column % 2 == 0 { NTSC_PALETTE[9] } else { NTSC_PALETTE[6] }
+            } else {
+                if phase_column % 2 == 0 { NTSC_PALETTE[12] } else { NTSC_PALETTE[3] }
+            }
+        } else if prev || next {
+            // Edge of a colored region, uminance-weighted bleed...
+            // bright colors (orange, green) get visible spread (~0.4-0.5),
+            // dark colors (blue) get minimal spread (~0.15).
+            let base = if palette {
+                if phase_column % 2 == 0 { NTSC_PALETTE[9] } else { NTSC_PALETTE[6] }
+            } else {
+                if phase_column % 2 == 0 { NTSC_PALETTE[12] } else { NTSC_PALETTE[3] }
+            };
+            let luma = (0.299 * base[0] as f32 + 0.587 * base[1] as f32
+                + 0.114 * base[2] as f32) / 255.0;
+            let factor = luma; // linear
+            [
+                (base[0] as f32 * factor) as u8,
+                (base[1] as f32 * factor) as u8,
+                (base[2] as f32 * factor) as u8,
+                255,
+            ]
+        } else {
+            NTSC_PALETTE[0] // black
         }
     }
 
@@ -581,132 +639,182 @@ impl Video {
         }
     }
 
-    #[allow(dead_code)]
-    fn render_mixed_mode(&mut self, iou: &IOU, mmu: &MMU) {
-        self.render_hires_mode(iou, mmu);
-        self.render_text_mode(iou, mmu);
-    }
-
-    #[allow(dead_code)]
+    /// Render HiRes mode using direct NTSC artifact color palette lookup.
+    /// HiRes only has 4 possible artifact colors per palette — violet/green
+    /// (palette 0) and blue/orange (palette 1) — so a lookup from Munafo's
+    /// calibrated palette is more accurate than a full composite decode.
     fn render_hires_mode(&mut self, iou: &IOU, mmu: &MMU) {
         let base_vram: u16 = 0x0000;
 
         for group in 0..24_u16 {
             for row in 0..8_u16 {
-                // Apple II Hi-Res Interleaving:
-                // Row Offset = (row * 1024) + (group % 8) * 128 + (group / 8) * 40
                 let row_base = base_vram
                     .wrapping_add(row.wrapping_mul(1024))
                     .wrapping_add((group % 8).wrapping_mul(128))
                     .wrapping_add((group / 8).wrapping_mul(40));
 
-                for col in 0..40_u16 {
-                    let addr = row_base.wrapping_add(col);
-                    let byte = self.read_hires_memory(iou, mmu, addr);
-                    let palette_flag = (byte & 0x80) != 0;
+                let y = ((group as usize) * 8 + (row as usize)) * 2;
 
-                    // read adjacent bytes for artifacting
-                    let prev_byte = if col > 0 {
-                        self.read_hires_memory(iou, mmu, addr - 1)
-                    } else {
-                        0
-                    };
-                    
-                    let next_byte = if col < 39 {
-                        self.read_hires_memory(iou, mmu, addr + 1)
-                    } else {
-                        0
-                    };
-
-                    for bit in 0..7_u16 {
-                        let pixel_on = (byte >> bit) & 1 != 0;
-                        let x_logical = (col as usize) * 7 + (bit as usize);
-                        let mut x = x_logical * 2; // scale horizontally to 560 width
-                        
-                        // shift by half-pixel (1 unit in 560 mode) if palette bit is set
-                        if palette_flag {
-                            x += 1;
-                        }
-
-                        let y = ((group as usize) * 8 + (row as usize)) * 2; // double height
-
-                        // check neighbors for artifacting (White = adjacent pixels on)
-                        let prev_on = if bit > 0 {
-                            (byte >> (bit - 1)) & 1 != 0
-                        } else {
-                            (prev_byte >> 6) & 1 != 0
-                        };
-                        
-                        let next_on = if bit < 6 {
-                            (byte >> (bit + 1)) & 1 != 0
-                        } else {
-                            (next_byte >> 0) & 1 != 0
-                        };
-
-                        // Apple II Hi-Res Color Logic
-                        if pixel_on {
-                            if self.monochrome {
-                                let color = MONO_GREEN_RGBA;
-                                for dy in 0..2 {
-                                    for dx in 0..2_usize {
-                                        if x + dx < self.active_width {
-                                            let index = self.fb_index(x + dx, y + dy);
-                                            if index + 4 <= self.framebuffer.len() {
-                                                self.framebuffer[index..index + 4]
-                                                    .copy_from_slice(&color);
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                // NTSC artifact colors
-                                // Phase determines color: even columns vs odd columns
-                                // Palette bit (bit 7) shifts the phase, selecting color pair
-                                let artifact_color = if palette_flag {
-                                    // Palette 1: Blue/Orange
-                                    if x_logical % 2 == 0 { [100, 140, 255, 255] }   // Blue (Even)
-                                    else { [255, 180, 80, 255] }                      // Orange (Odd)
-                                } else {
-                                    // Palette 0: Violet/Green
-                                    if x_logical % 2 == 0 { [180, 100, 255, 255] }   // Violet (Even)
-                                    else { [100, 255, 100, 255] }                     // Green (Odd)
-                                };
-
-                                // NTSC color cancellation: adjacent ON pixels at opposite phases
-                                // cancel their chroma component, resulting in white
-                                // Adjacent bits are always opposite phase, so any neighbor ON = white
-                                let is_white = prev_on || next_on;
-                                
-                                let color = if is_white {
-                                    // Adjacent ON pixels cancel to white
-                                    [240, 240, 240, 255]
-                                } else {
-                                    // Isolated pixel = full artifact color
-                                    artifact_color
-                                };
-
-                                // Draw pixel at standard 2x2 size
-                                for dy in 0..2 {
-                                    for dx in 0..2_usize {
-                                        if x + dx < self.active_width {
-                                            let index = self.fb_index(x + dx, y + dy);
-                                            if index + 4 <= self.framebuffer.len() {
-                                                self.framebuffer[index..index + 4]
-                                                    .copy_from_slice(&color);
-                                            }
+                if self.monochrome {
+                    for col in 0..40_u16 {
+                        let addr = row_base.wrapping_add(col);
+                        let byte = self.read_hires_memory(iou, mmu, addr);
+                        for bit in 0..7_usize {
+                            let pixel_on = (byte >> bit) & 1 != 0;
+                            let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
+                            let x = col as usize * 14 + bit * 2;
+                            for dy in 0..2_usize {
+                                for dx in 0..2_usize {
+                                    if x + dx < self.active_width {
+                                        let index = self.fb_index(x + dx, y + dy);
+                                        if index + 4 <= self.framebuffer.len() {
+                                            self.framebuffer[index..index + 4]
+                                                .copy_from_slice(&color);
                                         }
                                     }
                                 }
                             }
                         }
-                        // if pixel is OFF, do nothing
+                    }
+                    continue;
+                }
+
+                // Color HiRes: direct palette lookup from pixel context
+                let mut prev_byte: u8 = 0;
+                for col in 0..40_usize {
+                    let addr = row_base.wrapping_add(col as u16);
+                    let byte = self.read_hires_memory(iou, mmu, addr);
+                    let next_byte = if col < 39 {
+                        self.read_hires_memory(iou, mmu, row_base.wrapping_add(col as u16 + 1))
+                    } else {
+                        0
+                    };
+
+                    let palette = (byte & 0x80) != 0;
+
+                    for bit in 0..7_usize {
+                        let cur = (byte >> bit) & 1 != 0;
+                        let prev = if bit == 0 {
+                            (prev_byte >> 6) & 1 != 0
+                        } else {
+                            (byte >> (bit - 1)) & 1 != 0
+                        };
+                        let next = if bit == 6 {
+                            (next_byte >> 0) & 1 != 0
+                        } else {
+                            (byte >> (bit + 1)) & 1 != 0
+                        };
+
+                        let phase_column = col * 7 + bit;
+                        let color = Self::ntsc_hires_artifact_color(
+                            cur, prev, next, phase_column, palette,
+                        );
+
+                        let x = col * 14 + bit * 2;
+                        for dy in 0..2_usize {
+                            for dx in 0..2_usize {
+                                if x + dx < self.active_width {
+                                    let index = self.fb_index(x + dx, y + dy);
+                                    if index + 4 <= self.framebuffer.len() {
+                                        self.framebuffer[index..index + 4]
+                                            .copy_from_slice(&color);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    prev_byte = byte;
+                }
+            }
+        }
+
+    }
+
+    /// Blur I and Q channels independently in YIQ space.
+    /// Simulates analog chroma bandwidth limiting: I (~1.3 MHz, 7-tap)
+    /// and Q (~0.5 MHz, 11-tap) blur at different widths. Luma (Y)
+    /// is left sharp. At color-to-black edges, chroma fades gradually
+    /// producing desaturated pixels at the correct hue.
+    fn apply_chroma_blur(&mut self, y_start: usize, y_end: usize) {
+        const I_KERNEL: [f32; 3] = [0.25, 0.5, 0.25];
+        const Q_KERNEL: [f32; 3] = [0.25, 0.5, 0.25];
+
+        #[inline]
+        fn rgb_to_yiq(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+            let r = r as f32 / 255.0;
+            let g = g as f32 / 255.0;
+            let b = b as f32 / 255.0;
+            (
+                0.299 * r + 0.587 * g + 0.114 * b,
+                0.5959 * r - 0.2746 * g - 0.3213 * b,
+                0.2115 * r - 0.5227 * g + 0.3112 * b,
+            )
+        }
+
+        #[inline]
+        fn yiq_to_rgb(y: f32, i: f32, q: f32) -> (u8, u8, u8) {
+            (
+                ((y + 0.9563 * i + 0.6210 * q).clamp(0.0, 1.0) * 255.0) as u8,
+                ((y - 0.2721 * i - 0.6474 * q).clamp(0.0, 1.0) * 255.0) as u8,
+                ((y - 1.1070 * i + 1.7046 * q).clamp(0.0, 1.0) * 255.0) as u8,
+            )
+        }
+
+        let aw = self.active_width;
+        let i_half = I_KERNEL.len() / 2;
+        let q_half = Q_KERNEL.len() / 2;
+
+        for y in (y_start..y_end).step_by(2) {
+            let row_yiq: Vec<(f32, f32, f32)> = (0..aw)
+                .map(|x| {
+                    let idx = self.fb_index(x, y);
+                    rgb_to_yiq(
+                        self.framebuffer[idx],
+                        self.framebuffer[idx + 1],
+                        self.framebuffer[idx + 2],
+                    )
+                })
+                .collect();
+
+            for x in 0..aw {
+                let y_val = row_yiq[x].0;
+
+                let mut bi = 0.0f32;
+                let mut bw_i = 0.0f32;
+                for (k, &w) in I_KERNEL.iter().enumerate() {
+                    let sx = x as i32 - i_half as i32 + k as i32;
+                    if sx >= 0 && sx < aw as i32 {
+                        bi += row_yiq[sx as usize].1 * w;
+                        bw_i += w;
+                    }
+                }
+                let i_val = bi / bw_i;
+
+                let mut bq = 0.0f32;
+                let mut bw_q = 0.0f32;
+                for (k, &w) in Q_KERNEL.iter().enumerate() {
+                    let sx = x as i32 - q_half as i32 + k as i32;
+                    if sx >= 0 && sx < aw as i32 {
+                        bq += row_yiq[sx as usize].2 * w;
+                        bw_q += w;
+                    }
+                }
+                let q_val = bq / bw_q;
+
+                let (r, g, b) = yiq_to_rgb(y_val, i_val, q_val);
+
+                for dy in 0..2_usize {
+                    let idx = self.fb_index(x, y + dy);
+                    if idx + 4 <= self.framebuffer.len() {
+                        self.framebuffer[idx] = r;
+                        self.framebuffer[idx + 1] = g;
+                        self.framebuffer[idx + 2] = b;
                     }
                 }
             }
         }
     }
 
-    #[allow(dead_code)]
     fn render_double_hires_mode(&mut self, _iou: &IOU, mmu: &MMU) {
         let base_vram: u16 = 0x2000;
 
@@ -728,7 +836,7 @@ impl Video {
 
                         for bit in 0..7_u16 {
                             let pixel_on = (aux_byte >> bit) & 1 != 0;
-                            let color = if pixel_on { MONO_GREEN_RGBA } else { [0, 0, 0, 255] };
+                            let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
                             let x = col as usize * 14 + bit as usize;
                             for dy in 0..2 {
                                 let index = self.fb_index(x, y as usize + dy);
@@ -739,7 +847,7 @@ impl Video {
                         }
                         for bit in 0..7_u16 {
                             let pixel_on = (main_byte >> bit) & 1 != 0;
-                            let color = if pixel_on { MONO_GREEN_RGBA } else { [0, 0, 0, 255] };
+                            let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
                             let x = col as usize * 14 + 7 + bit as usize;
                             for dy in 0..2 {
                                 let index = self.fb_index(x, y as usize + dy);
@@ -750,37 +858,42 @@ impl Video {
                         }
                     }
                 } else {
-                    // Color: 140 pixels (4-bit nibbles from sliding window across aux/main pairs)
-                    // Process 2 columns at a time: 4 bytes = 28 bits = 7 color pixels
-                    for col_pair in 0..20_u16 {
-                        let col0 = col_pair * 2;
-                        let col1 = col0 + 1;
+                    // Color DHIRES: sliding-window 4-bit color extraction.
+                    // Each of 560 output pixels gets its own 4-bit color nibble
+                    // from a phase-rotated window of 4 bits in the scanline.
+                    // This matches how an NTSC decoder extracts color from the
+                    // composite signal: the 4 bits map to different nibble
+                    // positions depending on their phase in the color clock.
 
-                        let aux0 = mmu.read_aux_byte(row_base.wrapping_add(col0)) as u32;
-                        let main0 = mmu.read_main_byte(row_base.wrapping_add(col0)) as u32;
-                        let aux1 = mmu.read_aux_byte(row_base.wrapping_add(col1)) as u32;
-                        let main1 = mmu.read_main_byte(row_base.wrapping_add(col1)) as u32;
+                    // Build 560-bit scanline from interleaved aux/main bytes
+                    let mut scanline_bits = [false; 564]; // +4 for sliding window
+                    for col in 0..40_usize {
+                        let addr = row_base.wrapping_add(col as u16);
+                        let aux_byte = mmu.read_aux_byte(addr);
+                        let main_byte = mmu.read_main_byte(addr);
+                        for bit in 0..7_usize {
+                            scanline_bits[col * 14 + bit] = (aux_byte >> bit) & 1 != 0;
+                            scanline_bits[col * 14 + 7 + bit] = (main_byte >> bit) & 1 != 0;
+                        }
+                    }
 
-                        // Build 28-bit stream: aux0[0:6], main0[0:6], aux1[0:6], main1[0:6]
-                        let bits = (aux0 & 0x7F)
-                                 | ((main0 & 0x7F) << 7)
-                                 | ((aux1 & 0x7F) << 14)
-                                 | ((main1 & 0x7F) << 21);
+                    // Extract 4-bit color using aligned 4-pixel groups.
+                    // Each group of 4 pixels shares one color.
+                    for i in 0..560_usize {
+                        let group_start = i - (i % 4);
+                        let mut nibble: u8 = 0;
+                        for j in 0..4_usize {
+                            if scanline_bits[group_start + j] {
+                                nibble |= 1 << j; // LSB-first
+                            }
+                        }
 
-                        // Extract 7 nibbles, each is a 4-bit color index
-                        for nib in 0..7_u32 {
-                            let color_idx = ((bits >> (nib * 4)) & 0x0F) as u8;
-                            let rgba = self.lores_color_lookup(color_idx);
+                        let rgba = DHIRES_PALETTE[nibble as usize];
 
-                            let base_x = (col_pair as usize * 7 + nib as usize) * 4;
-                            for px in 0..4 {
-                                let x = base_x + px;
-                                for dy in 0..2 {
-                                    let index = self.fb_index(x, y as usize + dy);
-                                    if index + 4 <= self.framebuffer.len() {
-                                        self.framebuffer[index..index + 4].copy_from_slice(&rgba);
-                                    }
-                                }
+                        for dy in 0..2 {
+                            let index = self.fb_index(i, y as usize + dy);
+                            if index + 4 <= self.framebuffer.len() {
+                                self.framebuffer[index..index + 4].copy_from_slice(&rgba);
                             }
                         }
                     }
@@ -789,10 +902,16 @@ impl Video {
         }
     }
 
-
-
     pub fn get_dimensions(&self) -> (u32, u32) {
         (self.width as u32, self.height as u32)
+    }
+
+    pub fn get_active_dimensions(&self) -> (u32, u32) {
+        (self.active_width as u32, self.active_height as u32)
+    }
+
+    pub fn get_border_size(&self) -> u32 {
+        self.border_size as u32
     }
 
     pub fn get_pixels(&self) -> &[u8] {
@@ -800,29 +919,15 @@ impl Video {
     }
 
     fn lores_color_lookup(&self, color: u8) -> [u8; 4] {
-        let rgba = match color & 0x0F {
-            0x0 => [32, 8, 32, 255],       // Black
-            0x1 => [128, 34, 34, 255],     // Deep Red
-            0x2 => [34, 34, 128, 255],     // Dark Blue
-            0x3 => [73, 0, 128, 255],      // Purple
-            0x4 => [39, 84, 18, 255],      // Dark Green
-            0x5 => [99, 99, 99, 255],      // Gray 1
-            0x6 => [64, 99, 255, 255],     // Medium Blue
-            0x7 => [74, 219, 255, 255],    // Light Blue
-            0x8 => [123, 69, 19, 255],     // Brown
-            0x9 => [255, 140, 0, 255],     // Orange
-            0xA => [129, 129, 129, 255],   // Gray 2
-            0xB => [248, 126, 252, 255],   // Pink
-            0xC => [34, 255, 34, 255],     // Green
-            0xD => [255, 255, 34, 255],    // Yellow
-            0xE => [173, 255, 241, 255],   // Aqua
-            0xF => [240, 240, 240, 255],   // White
-            _ => [0, 0, 0, 255],
-        };
+        let rgba = NTSC_PALETTE[(color & 0x0F) as usize];
 
         if self.monochrome {
             let y = (0.299 * rgba[0] as f32 + 0.587 * rgba[1] as f32 + 0.114 * rgba[2] as f32) as u8;
-            [MONO_GREEN.0.min(20), y, MONO_GREEN.2.min(20), 255]
+            if y < 24 {
+                MONO_BLACK_RGBA
+            } else {
+                [MONO_GREEN.0.min(20), y, MONO_GREEN.2.min(20), 255]
+            }
         } else {
             rgba
         }

@@ -1,14 +1,15 @@
 use bytemuck::{Pod, Zeroable};
 
-/// CRT-Geom-Deluxe shader parameters.
-/// GPU layout: 7 × vec4<f32> = 28 floats.
-///   group0: crt_gamma, monitor_gamma, distance, radius
-///   group1: corner_size, corner_smooth, overscan_x, overscan_y
-///   group2: aperture_strength, aperture_brightboost, scanline_weight, luminance
-///   group3: curvature_on, saturation, halation, rasterbloom
-///   group4: blur_width, mask_type, vignette, phosphor
-///   group5: glow, glow_width, vignette_opacity, flicker
-///   group6: chromatic_aberration, ntsc_filter, horizontal_blur, _pad
+// CRT-Geom-Deluxe shader parameters.
+// GPU layout: 7 × vec4<f32> = 28 floats.
+//   group0: crt_gamma, monitor_gamma, distance, radius
+//   group1: corner_size, corner_smooth, overscan_x, overscan_y
+//   group2: aperture_strength, aperture_brightboost, scanline_weight, luminance
+//   group3: curvature_on, saturation, halation, rasterbloom
+//   group4: blur_width, mask_type, vignette, phosphor
+//   group5: glow, glow_width, vignette_opacity, flicker
+//   group6: chromatic_aberration, unused, unused, v_roll
+//   group7: unused, unused, unused, unused
 #[derive(Clone, Debug)]
 pub struct ShaderParams {
     // group0
@@ -43,8 +44,7 @@ pub struct ShaderParams {
     pub flicker: f32,
     // group6
     pub chromatic_aberration: f32,
-    pub ntsc_filter: f32,
-    pub horizontal_blur: f32,
+    pub v_roll: f32,  // V-Hold rolling effect speed (0=off)
 }
 
 impl Default for ShaderParams {
@@ -58,26 +58,25 @@ impl Default for ShaderParams {
             corner_smooth: 2000.0,
             overscan_x: 100.0,
             overscan_y: 100.0,
-            aperture_strength: 0.48,
+            aperture_strength: 0.50,
             aperture_brightboost: 0.16,
-            scanline_weight: 0.245,
-            luminance: 0.0,
+            scanline_weight: 0.25,
+            luminance: 0.14,
             curvature: 1.0,
 
-            saturation: 1.1,
-            halation: 0.75,
+            saturation: 1.04,
+            halation: 0.02,
             rasterbloom: 0.32,
-            blur_width: 0.35,
+            blur_width: 1.23,
             mask_type: 3.0,
             vignette: 2.22,
-            phosphor: 0.68,
-            glow: 0.0065,
-            glow_width: 9.5,
-            vignette_opacity: 0.25,
+            phosphor: 0.58,
+            glow: 0.004,
+            glow_width: 20.0,
+            vignette_opacity: 0.26,
             flicker: 0.4,
             chromatic_aberration: 0.75,
-            ntsc_filter: 0.5,  // NTSC notch filter strength (0=off, 1=full)
-            horizontal_blur: 1.0, // Gap fill - closes thin vertical black lines
+            v_roll: 0.1,  // V-Hold rolling effect (0=off)
         }
     }
 }
@@ -85,7 +84,7 @@ impl Default for ShaderParams {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ShaderParamsGpu {
-    pub data: [f32; 28],
+    pub data: [f32; 32],
 }
 
 impl ShaderParams {
@@ -98,7 +97,8 @@ impl ShaderParams {
                 self.curvature, self.saturation, self.halation, self.rasterbloom,
                 self.blur_width, self.mask_type, self.vignette, self.phosphor,
                 self.glow, self.glow_width, self.vignette_opacity, self.flicker,  // group5
-                self.chromatic_aberration, self.ntsc_filter, self.horizontal_blur, 0.0,  // group6
+                self.chromatic_aberration, 0.0, 0.0, self.v_roll,  // group6
+                0.0, 0.0, 0.0, 0.0,  // group7
             ],
         }
     }
@@ -154,8 +154,7 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
                 changed |= ui.add(egui::Slider::new(&mut params.phosphor, 0.0..=0.95).text("Phosphor Persistence")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.flicker, 0.0..=1.0).text("CRT Flicker")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.chromatic_aberration, 0.0..=1.0).text("Chromatic Aberration")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.ntsc_filter, 0.0..=1.0).text("NTSC Filter")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.horizontal_blur, 0.0..=3.0).text("Gap Fill")).changed();
+                changed |= ui.add(egui::Slider::new(&mut params.v_roll, 0.0..=1.0).text("V-Roll Bar")).changed();
 
                 ui.separator();
                 ui.horizontal(|ui| {

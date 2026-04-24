@@ -1,12 +1,3 @@
-//! Apple IIc Disk Drive Audio Synthesis
-//!
-//! Generates synthesized drive sounds in real-time using physically accurate models:
-//! - Stepper motor clicks: filtered noise + dual-frequency damped oscillators
-//! - Motor relay click: sharp impact on motor start
-//! - Motor sound: disk air turbulence (filtered noise) + subtle cogging + spinup/spindown
-//!
-//! All parameters are runtime-adjustable via DriveAudioParams.
-
 use std::sync::Arc;
 use ringbuf::{HeapRb, traits::*};
 use ringbuf::wrap::caching::Caching;
@@ -15,7 +6,7 @@ pub type AudioProducer = Caching<Arc<HeapRb<f32>>, true, false>;
 
 const CYCLES_PER_SECOND: f64 = 1_023_000.0;
 
-/// Runtime-adjustable drive audio synthesis parameters
+// Runtime-adjustable drive audio synthesis parameters
 #[derive(Clone, Debug)]
 pub struct DriveAudioParams {
     // Overall
@@ -49,13 +40,40 @@ pub struct DriveAudioParams {
     pub relay_freq: f32,                 // ~700 Hz
     pub relay_decay_ms: f32,             // 5-8ms
     
-    // Motor parameters
+    // Channel static (TV channel change effect)
+    pub channel_static_volume: f32,
+    pub channel_static_decay_ms: f32,
+    
+    // Motor parameters (5.25")
     pub motor_volume: f32,
     pub motor_filter_freq: f32,
     pub motor_cog_freq: f32,
     pub motor_cog_mix: f32,
     pub motor_spinup_ms: f32,
     pub motor_spindown_ms: f32,
+
+    // 3.5" drive parameters
+    // Seek: voice-coil actuator produces a soft buzz, not discrete stepper clicks
+    pub seek35_volume: f32,
+    pub seek35_buzz_freq: f32,          // Voice-coil resonance (~400 Hz)
+    pub seek35_buzz_decay_ms: f32,
+    pub seek35_noise_decay_ms: f32,
+    pub seek35_noise_filter_freq: f32,
+    // Motor: constant 300 RPM, smoother than 5.25"
+    pub motor35_volume: f32,
+    pub motor35_filter_freq: f32,       // Higher cutoff (smoother turbulence)
+    pub motor35_hum_freq: f32,          // 300 RPM = 5 Hz fundamental, but audible ~60 Hz
+    pub motor35_hum_mix: f32,
+    pub motor35_spinup_ms: f32,
+    pub motor35_spindown_ms: f32,
+    // Relay: softer engagement than 5.25"
+    pub relay35_volume: f32,
+    pub relay35_freq: f32,
+    pub relay35_decay_ms: f32,
+    // Eject: spring mechanism clunk
+    pub eject35_volume: f32,
+    pub eject35_freq: f32,
+    pub eject35_decay_ms: f32,
 }
 
 impl Default for DriveAudioParams {
@@ -88,27 +106,49 @@ impl Default for DriveAudioParams {
             relay_freq: 940.0,
             relay_decay_ms: 5.9,
             
-            // Motor
+            // Channel static
+            channel_static_volume: 0.35,
+            channel_static_decay_ms: 45.0,
+            
+            // Motor (5.25")
             motor_volume: 0.015,
             motor_filter_freq: 120.0,
             motor_cog_freq: 22.0,
             motor_cog_mix: 0.33,
             motor_spinup_ms: 250.0,
             motor_spindown_ms: 400.0,
+
+            // 3.5" drive
+            seek35_volume: 0.14,
+            seek35_buzz_freq: 400.0,
+            seek35_buzz_decay_ms: 10.0,
+            seek35_noise_decay_ms: 8.0,
+            seek35_noise_filter_freq: 2200.0,
+
+            motor35_volume: 0.018,
+            motor35_filter_freq: 200.0,
+            motor35_hum_freq: 60.0,
+            motor35_hum_mix: 0.25,
+            motor35_spinup_ms: 350.0,
+            motor35_spindown_ms: 500.0,
+
+            relay35_volume: 0.10,
+            relay35_freq: 800.0,
+            relay35_decay_ms: 4.5,
+
+            eject35_volume: 0.15,
+            eject35_freq: 350.0,
+            eject35_decay_ms: 12.0,
         }
     }
 }
 
-/// Simple linear congruential RNG for noise generation
+// Simple linear congruential RNG for noise generation
 struct NoiseGen {
     state: u32,
 }
 
 impl NoiseGen {
-    fn new() -> Self {
-        Self { state: 0x12345678 }
-    }
-    
     fn with_seed(seed: u32) -> Self {
         Self { state: seed }
     }
@@ -119,8 +159,6 @@ impl NoiseGen {
     }
 }
 
-/// Damped oscillator - correct model for mechanical transients
-/// Simulates impulse response of a resonant physical system
 struct DampedOscillator {
     phase: f32,
     amplitude: f32,
@@ -161,12 +199,10 @@ impl DampedOscillator {
     }
 }
 
-/// Multi-stage impact synthesizer for realistic hammer/clack sounds
-/// Combines: attack transient, body with pitch sweep, and harmonics
 struct ImpactSynthesizer {
     sample_rate: f32,
     
-    // Attack transient - very short high-freq burst for initial "crack"
+    // Attack transient, very short high-freq burst for initial "crack"
     attack_phase: f32,
     attack_amp: f32,
     attack_freq: f32,        // ~2000-3000 Hz
@@ -295,7 +331,6 @@ impl ImpactSynthesizer {
     }
 }
 
-/// Simple one-pole lowpass filter for noise shaping
 struct LowpassFilter {
     state: f32,
     coeff: f32,
@@ -313,22 +348,21 @@ impl LowpassFilter {
         self.state += self.coeff * (input - self.state);
         self.state
     }
-
-    #[allow(dead_code)]
-    fn reset(&mut self) {
-        self.state = 0.0;
-    }
 }
 
-/// Drive audio event types
+// Drive audio event types
 #[derive(Clone, Copy, Debug)]
 pub enum DriveEvent {
     Step { quarter_track: u8 },
     MotorOn,
     MotorOff,
+    // 3.5" drive events (voice-coil actuator, constant 300 RPM motor)
+    Step35,
+    MotorOn35,
+    MotorOff35,
+    Eject35,
 }
 
-/// Drive audio synthesizer using physically-based models
 pub struct DriveAudio {
     producer: Option<AudioProducer>,
     sample_rate: u32,
@@ -336,7 +370,6 @@ pub struct DriveAudio {
 
     pub params: DriveAudioParams,
 
-    // Separate noise generators per filter to avoid correlation
     noise_click: NoiseGen,
     noise_crunch: NoiseGen,
     noise_motor: NoiseGen,
@@ -361,6 +394,13 @@ pub struct DriveAudio {
     relay_body: DampedOscillator,      // Body resonance ~750 Hz
     relay_tick: DampedOscillator,      // Metallic tick ~2000 Hz
 
+    // Channel static (TV channel change click)
+    channel_noise: NoiseGen,
+    channel_noise_amp: f32,
+    channel_noise_decay: f32,
+    channel_filter: LowpassFilter,
+    channel_thump: DampedOscillator,   // Low-freq body ~80 Hz
+
     // Motor synthesis with spinup/spindown
     motor_on: bool,
     motor_envelope: f32,               // 0.0-1.0, for spinup/spindown
@@ -369,6 +409,34 @@ pub struct DriveAudio {
     motor_filter: LowpassFilter,
     motor_cog_phase: f32,
     motor_cog_freq: f32,
+
+    // 3.5" drive synthesis state
+    // Seek: voice-coil buzz + noise burst
+    seek35_buzz: DampedOscillator,
+    seek35_noise_amp: f32,
+    seek35_noise_decay: f32,
+    seek35_noise_filter: LowpassFilter,
+    noise_seek35: NoiseGen,
+    // Motor: smoother than 5.25", subtle hum
+    motor35_on: bool,
+    motor35_envelope: f32,
+    motor35_spinup_rate: f32,
+    motor35_spindown_rate: f32,
+    motor35_filter: LowpassFilter,
+    motor35_hum_phase: f32,
+    noise_motor35: NoiseGen,
+    // Relay: softer engagement click
+    relay35_body: DampedOscillator,
+    relay35_noise_amp: f32,
+    relay35_noise_decay: f32,
+    relay35_filter: LowpassFilter,
+    noise_relay35: NoiseGen,
+    // Eject: spring mechanism clunk
+    eject35_body: DampedOscillator,
+    eject35_noise_amp: f32,
+    eject35_noise_decay: f32,
+    eject35_filter: LowpassFilter,
+    noise_eject35: NoiseGen,
 
     events: std::collections::VecDeque<(u64, DriveEvent)>,
 }
@@ -384,7 +452,6 @@ impl DriveAudio {
             last_cycle: 0,
             params: params.clone(),
 
-            // Different seeds for each noise source
             noise_click: NoiseGen::with_seed(0x12345678),
             noise_crunch: NoiseGen::with_seed(0xDEADBEEF),
             noise_motor: NoiseGen::with_seed(0x8BADF00D),
@@ -425,6 +492,13 @@ impl DriveAudio {
                 Self::decay_from_ms(4.0, sample_rate),
             ),
 
+            // Channel static
+            channel_noise: NoiseGen::with_seed(0xCAFEBABE),
+            channel_noise_amp: 0.0,
+            channel_noise_decay: Self::decay_from_ms(params.channel_static_decay_ms, sample_rate),
+            channel_filter: LowpassFilter::new(8000.0, sample_rate),  // Wide bandwidth static
+            channel_thump: DampedOscillator::new(80.0, Self::decay_from_ms(30.0, sample_rate)),
+
             motor_on: false,
             motor_envelope: 0.0,
             motor_spinup_rate: 1.0 / (params.motor_spinup_ms * 0.001 * sample_rate),
@@ -433,12 +507,48 @@ impl DriveAudio {
             motor_cog_phase: 0.0,
             motor_cog_freq: params.motor_cog_freq,
 
+            // 3.5" drive state
+            seek35_buzz: DampedOscillator::new(
+                params.seek35_buzz_freq,
+                Self::decay_from_ms(params.seek35_buzz_decay_ms, sample_rate),
+            ),
+            seek35_noise_amp: 0.0,
+            seek35_noise_decay: Self::decay_from_ms(params.seek35_noise_decay_ms, sample_rate),
+            seek35_noise_filter: LowpassFilter::new(params.seek35_noise_filter_freq, sample_rate),
+            noise_seek35: NoiseGen::with_seed(0xA5A5A5A5),
+
+            motor35_on: false,
+            motor35_envelope: 0.0,
+            motor35_spinup_rate: 1.0 / (params.motor35_spinup_ms * 0.001 * sample_rate),
+            motor35_spindown_rate: 1.0 / (params.motor35_spindown_ms * 0.001 * sample_rate),
+            motor35_filter: LowpassFilter::new(params.motor35_filter_freq, sample_rate),
+            motor35_hum_phase: 0.0,
+            noise_motor35: NoiseGen::with_seed(0x5A5A5A5A),
+
+            relay35_body: DampedOscillator::new(
+                params.relay35_freq,
+                Self::decay_from_ms(params.relay35_decay_ms, sample_rate),
+            ),
+            relay35_noise_amp: 0.0,
+            relay35_noise_decay: Self::decay_from_ms(2.5, sample_rate),
+            relay35_filter: LowpassFilter::new(2000.0, sample_rate),
+            noise_relay35: NoiseGen::with_seed(0x3C3C3C3C),
+
+            eject35_body: DampedOscillator::new(
+                params.eject35_freq,
+                Self::decay_from_ms(params.eject35_decay_ms, sample_rate),
+            ),
+            eject35_noise_amp: 0.0,
+            eject35_noise_decay: Self::decay_from_ms(8.0, sample_rate),
+            eject35_filter: LowpassFilter::new(1500.0, sample_rate),
+            noise_eject35: NoiseGen::with_seed(0xC3C3C3C3),
+
             events: std::collections::VecDeque::new(),
         }
     }
 
-    /// Convert decay time in milliseconds to per-sample decay multiplier
-    /// Decays to -60dB (0.001) over the given time
+    // Convert decay time in milliseconds to per-sample decay multiplier
+    // Decays to -60dB (0.001) over the given time
     fn decay_from_ms(ms: f32, sample_rate: f32) -> f32 {
         let samples = ms * 0.001 * sample_rate;
         if samples < 1.0 {
@@ -456,7 +566,6 @@ impl DriveAudio {
         audio
     }
 
-    /// Apply current params to internal state (call after changing params)
     pub fn apply_params(&mut self) {
         let sr = self.sample_rate as f32;
         let p = &self.params;
@@ -480,10 +589,30 @@ impl DriveAudio {
         self.relay_body.decay = Self::decay_from_ms(p.relay_decay_ms, sr);
         self.relay_tick.decay = Self::decay_from_ms(4.0, sr);
         
+        self.channel_noise_decay = Self::decay_from_ms(p.channel_static_decay_ms, sr);
+        
         self.motor_filter = LowpassFilter::new(p.motor_filter_freq, sr);
         self.motor_cog_freq = p.motor_cog_freq;
         self.motor_spinup_rate = 1.0 / (p.motor_spinup_ms * 0.001 * sr);
         self.motor_spindown_rate = 1.0 / (p.motor_spindown_ms * 0.001 * sr);
+
+        // 3.5" params
+        self.seek35_buzz.freq = p.seek35_buzz_freq;
+        self.seek35_buzz.decay = Self::decay_from_ms(p.seek35_buzz_decay_ms, sr);
+        self.seek35_noise_decay = Self::decay_from_ms(p.seek35_noise_decay_ms, sr);
+        self.seek35_noise_filter = LowpassFilter::new(p.seek35_noise_filter_freq, sr);
+
+        self.motor35_filter = LowpassFilter::new(p.motor35_filter_freq, sr);
+        self.motor35_spinup_rate = 1.0 / (p.motor35_spinup_ms * 0.001 * sr);
+        self.motor35_spindown_rate = 1.0 / (p.motor35_spindown_ms * 0.001 * sr);
+
+        self.relay35_body.freq = p.relay35_freq;
+        self.relay35_body.decay = Self::decay_from_ms(p.relay35_decay_ms, sr);
+        self.relay35_noise_decay = Self::decay_from_ms(2.5, sr);
+
+        self.eject35_body.freq = p.eject35_freq;
+        self.eject35_body.decay = Self::decay_from_ms(p.eject35_decay_ms, sr);
+        self.eject35_noise_decay = Self::decay_from_ms(8.0, sr);
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
@@ -491,11 +620,16 @@ impl DriveAudio {
         if !enabled {
             self.motor_on = false;
             self.motor_envelope = 0.0;
+            self.motor35_on = false;
+            self.motor35_envelope = 0.0;
         }
     }
 
-    pub fn is_enabled(&self) -> bool {
-        self.params.enabled
+    // TV-style channel change static click
+    pub fn trigger_channel_static(&mut self) {
+        let p = &self.params;
+        self.channel_noise_amp = p.channel_static_volume;
+        self.channel_thump.trigger(p.channel_static_volume * 0.5);
     }
 
     pub fn queue_event(&mut self, cycle: u64, event: DriveEvent) {
@@ -599,6 +733,26 @@ impl DriveAudio {
                 self.motor_on = false;
                 // Spindown handled by envelope in generate_sample
             }
+            DriveEvent::Step35 => {
+                // Voice-coil actuator: softer buzz + filtered noise, not a hard stepper click
+                let vol = p.seek35_volume;
+                self.seek35_buzz.trigger(vol);
+                self.seek35_noise_amp = (self.seek35_noise_amp + vol).min(vol * 1.5);
+            }
+            DriveEvent::MotorOn35 => {
+                self.motor35_on = true;
+                // Softer relay engagement than 5.25"
+                self.relay35_noise_amp = p.relay35_volume;
+                self.relay35_body.trigger(p.relay35_volume * 0.6);
+            }
+            DriveEvent::MotorOff35 => {
+                self.motor35_on = false;
+            }
+            DriveEvent::Eject35 => {
+                // Spring mechanism clunk
+                self.eject35_body.trigger(p.eject35_volume);
+                self.eject35_noise_amp = p.eject35_volume;
+            }
         }
     }
 
@@ -607,7 +761,6 @@ impl DriveAudio {
         let p = &self.params;
         let mut output = 0.0;
 
-        // === Click synthesis ===
         // Noise layer (independent volume, not subtracted)
         if self.click_noise_amp > 0.001 {
             let noise = self.noise_click.next();
@@ -631,7 +784,7 @@ impl DriveAudio {
             self.click_crunch_amp *= self.click_crunch_decay;
         }
 
-        // === Relay click (sharp clack on motor start) ===
+        // Relay click
         // Noise burst for impact transient
         if self.relay_noise_amp > 0.001 {
             let noise = self.relay_noise.next();
@@ -648,7 +801,19 @@ impl DriveAudio {
             output += self.relay_tick.tick(sr);
         }
 
-        // === Motor synthesis with spinup/spindown ===
+        // Channel static (TV channel change click)
+        if self.channel_noise_amp > 0.001 {
+            let noise = self.channel_noise.next();
+            let filtered = self.channel_filter.process(noise);
+            output += filtered * self.channel_noise_amp;
+            self.channel_noise_amp *= self.channel_noise_decay;
+        }
+        // Low thump for body
+        if self.channel_thump.is_active() {
+            output += self.channel_thump.tick(sr);
+        }
+
+        // Motor synthesis with spinup/spindown
         // Update envelope
         if self.motor_on {
             self.motor_envelope = (self.motor_envelope + self.motor_spinup_rate).min(1.0);
@@ -674,11 +839,67 @@ impl DriveAudio {
             output += cog * motor_vol * p.motor_cog_mix;
         }
 
+        // 3.5" seek (voice-coil buzz + noise)
+        if self.seek35_buzz.is_active() {
+            output += self.seek35_buzz.tick(sr);  // amplitude already set by trigger()
+        }
+        if self.seek35_noise_amp > 0.001 {
+            let noise = self.noise_seek35.next();
+            let filtered = self.seek35_noise_filter.process(noise);
+            output += filtered * self.seek35_noise_amp * 0.4;
+            self.seek35_noise_amp *= self.seek35_noise_decay;
+        }
+
+        // 3.5" relay click
+        if self.relay35_body.is_active() {
+            output += self.relay35_body.tick(sr);
+        }
+        if self.relay35_noise_amp > 0.001 {
+            let noise = self.noise_relay35.next();
+            let filtered = self.relay35_filter.process(noise);
+            output += filtered * self.relay35_noise_amp * 0.5;
+            self.relay35_noise_amp *= self.relay35_noise_decay;
+        }
+
+        // 3.5" motor (smoother than 5.25", subtle hum)
+        if self.motor35_on {
+            self.motor35_envelope = (self.motor35_envelope + self.motor35_spinup_rate).min(1.0);
+        } else {
+            self.motor35_envelope = (self.motor35_envelope - self.motor35_spindown_rate).max(0.0);
+        }
+        if self.motor35_envelope > 0.001 {
+            let motor_vol = p.motor35_volume * self.motor35_envelope;
+
+            // Air turbulence (smoother than 5.25")
+            let noise = self.noise_motor35.next();
+            let filtered = self.motor35_filter.process(noise);
+            output += filtered * motor_vol * (1.0 - p.motor35_hum_mix);
+
+            // Subtle motor hum
+            self.motor35_hum_phase += p.motor35_hum_freq / sr;
+            if self.motor35_hum_phase >= 1.0 {
+                self.motor35_hum_phase -= 1.0;
+            }
+            let hum = (self.motor35_hum_phase * std::f32::consts::TAU).sin();
+            output += hum * motor_vol * p.motor35_hum_mix;
+        }
+
+        // 3.5" eject clunk
+        if self.eject35_body.is_active() {
+            output += self.eject35_body.tick(sr);
+        }
+        if self.eject35_noise_amp > 0.001 {
+            let noise = self.noise_eject35.next();
+            let filtered = self.eject35_filter.process(noise);
+            output += filtered * self.eject35_noise_amp * 0.5;
+            self.eject35_noise_amp *= self.eject35_noise_decay;
+        }
+
         soft_clip(output * p.master_volume)
     }
 }
 
-/// Soft clipper using tanh for smooth saturation
+// Soft clipper using tanh for smooth saturation
 fn soft_clip(x: f32) -> f32 {
     (x * 1.5).tanh() * 0.9
 }

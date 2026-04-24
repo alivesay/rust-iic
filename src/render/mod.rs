@@ -14,9 +14,7 @@ mod screen;
 
 pub use crt::CrtRenderer;
 pub use gui::{
-    blit_scaled, hit_test_col_button, hit_test_drive_icon, hit_test_power_button,
-    hit_test_reset_button, hit_test_write_toggle, render_status_bar, DriveStatusInfo,
-    STATUS_BAR_HEIGHT,
+    blit_direct, blit_nearest, DriveStatusInfo, ToolbarAction, render_toolbar_ui,
 };
 pub use lcd::LcdRenderer;
 pub use screen::PostProcessor;

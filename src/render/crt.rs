@@ -84,6 +84,7 @@ pub struct CrtRenderer {
     curvature_cache: std::cell::Cell<[f32; 4]>,  // d, R, overscan_x/100, overscan_y/100
     glow_amt_cache: std::cell::Cell<f32>,
     curvature_on_cache: std::cell::Cell<f32>,
+    power_on_time_cache: std::cell::Cell<f32>,  // For suppressing glow during channel change
     source_width_cache: std::cell::Cell<f32>,
     source_height_cache: std::cell::Cell<f32>,
     // NTSC notch filter pass
@@ -94,6 +95,7 @@ pub struct CrtRenderer {
     ntsc_texture: wgpu::Texture,
     ntsc_view: wgpu::TextureView,
     ntsc_strength: std::cell::Cell<f32>,
+    text_only: std::cell::Cell<bool>,  // Text-only mode (no color burst, skip NTSC)
 }
 
 #[repr(C)]
@@ -119,6 +121,12 @@ struct ChromaUniforms {
 }
 
 impl CrtRenderer {
+    /// CRT vertical aspect correction factor.
+    /// Apple II pixels were taller than wide on a 4:3 CRT.
+    /// With 560x192 framebuffer, 4:3 requires height = 560 * 0.75 = 420.
+    /// Scale factor: 420/192 = 2.1875, so correction = 2.1875/2.0 = 1.09375
+    pub const CRT_ASPECT_CORRECTION: f32 = 1.09375;
+
     pub fn new(
         device: &wgpu::Device,
         surface_width: u32,
@@ -156,6 +164,9 @@ impl CrtRenderer {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
 
@@ -915,6 +926,7 @@ impl CrtRenderer {
             curvature_cache: std::cell::Cell::new([3.0, 1.3, 1.0, 1.0]),
             glow_amt_cache: std::cell::Cell::new(0.0),
             curvature_on_cache: std::cell::Cell::new(1.0),
+            power_on_time_cache: std::cell::Cell::new(5.0),  // Start with effect "finished"
             source_width_cache: std::cell::Cell::new(560.0),
             source_height_cache: std::cell::Cell::new(384.0),
             ntsc_pipeline,
@@ -924,6 +936,7 @@ impl CrtRenderer {
             ntsc_texture,
             ntsc_view,
             ntsc_strength: std::cell::Cell::new(0.0),
+            text_only: std::cell::Cell::new(false),
         }
     }
 
@@ -1316,17 +1329,23 @@ impl CrtRenderer {
             params.overscan_x / 100.0,
             params.overscan_y / 100.0,
         ]);
+        // Suppress glow during channel change effect (glow doesn't follow v-roll)
+        let effective_glow = if self.power_on_time_cache.get() < 0.8 {
+            0.0
+        } else {
+            params.glow
+        };
         let chroma_uniforms = ChromaUniforms {
-            params: [params.chromatic_aberration, self.is_mono.get(), params.glow, params.curvature],
+            params: [params.chromatic_aberration, self.is_mono.get(), effective_glow, params.curvature],
             content_rect: self.content_rect_cache.get(),
             curvature: self.curvature_cache.get(),
         };
         queue.write_buffer(&self.chroma_uniform_buffer, 0, bytemuck::bytes_of(&chroma_uniforms));
-        // Update NTSC filter uniforms: params + content_rect
-        self.ntsc_strength.set(params.ntsc_filter);
+        // Update NTSC filter uniforms: disabled (NTSC artifact colors handled in software)
+        self.ntsc_strength.set(0.0);
         let content_rect = self.content_rect_cache.get();
         let ntsc_uniforms: [f32; 8] = [
-            params.ntsc_filter,
+            0.0,
             self.source_width_cache.get(),
             self.source_height_cache.get(),
             self.is_mono.get(),
@@ -1348,6 +1367,8 @@ impl CrtRenderer {
         let sw = surface_w as f64;
         let sh = surface_h as f64;
 
+        // Content rect accurately describes where scaling_renderer places content
+        // Edge artifact prevention is handled in the shader via clamped sampling
         let left = offset_x as f64 / sw;
         let top = offset_y as f64 / sh;
         let right = (offset_x + dst_w) as f64 / sw;
@@ -1382,7 +1403,24 @@ impl CrtRenderer {
         queue.write_buffer(&self.uniform_buffer, 32, bytemuck::bytes_of(&val));
         // Update is_mono in chroma uniforms cache
         self.is_mono.set(val);
-        // Note: chroma_uniform_buffer is updated in update_shader_params which should be called per-frame
+        // Also update NTSC uniforms (is_mono is at offset 12 = 3rd float)
+        queue.write_buffer(&self.ntsc_uniform_buffer, 12, bytemuck::bytes_of(&val));
+    }
+
+      pub fn update_text_mode(&self, queue: &wgpu::Queue, text_only: bool) {
+        self.text_only.set(text_only);
+        // Write to extra.y (offset 32 + 4 = 36)
+        let val: f32 = if text_only { 1.0 } else { 0.0 };
+        queue.write_buffer(&self.uniform_buffer, 36, bytemuck::bytes_of(&val));
+    }
+
+    /// Update power-on elapsed time for CRT startup sync effect.
+    /// The effect runs for ~0.8 seconds then fades out.
+    pub fn update_power_on_time(&self, queue: &wgpu::Queue, elapsed_secs: f32) {
+        // Write to extra.z (offset 32 + 8 = 40)
+        queue.write_buffer(&self.uniform_buffer, 40, bytemuck::bytes_of(&elapsed_secs));
+        // Cache for use in update_shader_params (to suppress glow during effect)
+        self.power_on_time_cache.set(elapsed_secs);
     }
 
     /// Compute the content rect and bar boundary in intermediate texture UV space.
@@ -1510,18 +1548,29 @@ impl CrtRenderer {
         }
 
         // Phosphor persistence (blend current frame with decayed history)
-        // Clear history textures ONCE after resize to remove stale GPU memory,
-        // then immediately resume normal blending so history can rebuild
+        // Clear history/blur/glow textures for several frames after resize to remove stale GPU memory
+        // DON'T clear intermediate - it has the current frame from scaling_renderer
         {
             let clear_remaining = self.clear_frames_remaining.get();
             if clear_remaining > 0 {
                 self.clear_frames_remaining.set(clear_remaining - 1);
-                // Clear both history textures to black (removes garbage from old GPU memory)
-                {
+                // Clear textures that might contain garbage from resize
+                // NOTE: Don't clear intermediate_render_view - it has current frame data!
+                let textures_to_clear = [
+                    (&self.phosphor_history_a_view, "clear_phosphor_a"),
+                    (&self.phosphor_history_b_view, "clear_phosphor_b"),
+                    (&self.gaussx_view, "clear_gaussx"),
+                    (&self.blur_view, "clear_blur"),
+                    (&self.glowx_view, "clear_glowx"),
+                    (&self.glow_view, "clear_glow"),
+                    (&self.chroma_texture_view, "clear_chroma"),
+                    (&self.ntsc_view, "clear_ntsc"),
+                ];
+                for (view, label) in textures_to_clear {
                     let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("clear_phosphor_a"),
+                        label: Some(label),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &self.phosphor_history_a_view,
+                            view,
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
@@ -1534,84 +1583,72 @@ impl CrtRenderer {
                         occlusion_query_set: None,
                     });
                 }
-                {
-                    let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("clear_phosphor_b"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &self.phosphor_history_b_view,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                }
-                // Fall through to normal blending - history is now clean black,
-                // so the first blend will just copy current frame to history
-            }
-            
-            // Normal phosphor blending (runs every frame, even after clear)
-            let frame_idx = self.phosphor_frame_idx.get();
-            let (bind_group, dst_view, dst_texture) = if frame_idx == 0 {
-                (&self.phosphor_bind_group_a, &self.phosphor_history_b_view, &self.phosphor_history_b)
+                // Skip phosphor blending during clear phase to prevent ghosting
+                // Just advance the frame index so the alternating pattern stays in sync
+                let frame_idx = self.phosphor_frame_idx.get();
+                self.phosphor_frame_idx.set(1 - frame_idx);
             } else {
-                (&self.phosphor_bind_group_b, &self.phosphor_history_a_view, &self.phosphor_history_a)
-            };
-            self.phosphor_frame_idx.set(1 - frame_idx);
+                // Normal phosphor blending (runs every frame when not clearing)
+                let frame_idx = self.phosphor_frame_idx.get();
+                let (bind_group, dst_view, dst_texture) = if frame_idx == 0 {
+                    (&self.phosphor_bind_group_a, &self.phosphor_history_b_view, &self.phosphor_history_b)
+                } else {
+                    (&self.phosphor_bind_group_b, &self.phosphor_history_a_view, &self.phosphor_history_a)
+                };
+                self.phosphor_frame_idx.set(1 - frame_idx);
 
-            // Phosphor blend pass
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("phosphor_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: dst_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                rpass.set_pipeline(&self.phosphor_pipeline);
-                rpass.set_bind_group(0, bind_group, &[]);
-                rpass.set_vertex_buffer(0, self.phosphor_vertex_buffer.slice(..));
-                rpass.draw(0..3, 0..1);
+                // Phosphor blend pass
+                {
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("phosphor_render_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: dst_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    rpass.set_pipeline(&self.phosphor_pipeline);
+                    rpass.set_bind_group(0, bind_group, &[]);
+                    rpass.set_vertex_buffer(0, self.phosphor_vertex_buffer.slice(..));
+                    rpass.draw(0..3, 0..1);
+                }
+
+                // Copy phosphor result back to intermediate (level 0 only)
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: dst_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.intermediate_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: self.tex_width,
+                        height: self.tex_height,
+                        depth_or_array_layers: 1,
+                    },
+                );
             }
-
-            // Copy phosphor result back to intermediate (level 0 only)
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: dst_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.intermediate_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: self.tex_width,
-                    height: self.tex_height,
-                    depth_or_array_layers: 1,
-                },
-            );
         }
 
-        // Pass 0.5: NTSC notch filter (intermediate → ntsc_texture → intermediate)
-        // Simulates composite video decoding with notch filter for authentic artifact colors
-        if self.ntsc_strength.get() > 0.01 && self.is_mono.get() < 0.5 {
+        // Pass 0.5: NTSC filter (intermediate → ntsc_texture → intermediate)
+        // Color mode only: YIQ decode with luma/chroma filtering for authentic artifact colors
+        // Skip in mono mode (no NTSC artifacts) and text-only mode (no color burst)
+        let is_mono = self.is_mono.get() > 0.5;
+        let run_ntsc = self.ntsc_strength.get() > 0.01 && !self.text_only.get() && !is_mono;
+        if run_ntsc {
             // NTSC filter pass
             {
                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1839,6 +1876,14 @@ impl PostProcessor for CrtRenderer {
 
     fn update_monochrome(&self, queue: &wgpu::Queue, monochrome: bool) {
         CrtRenderer::update_monochrome(self, queue, monochrome)
+    }
+
+    fn update_text_mode(&self, queue: &wgpu::Queue, text_only: bool) {
+        CrtRenderer::update_text_mode(self, queue, text_only)
+    }
+
+    fn update_power_on_time(&self, queue: &wgpu::Queue, elapsed_secs: f32) {
+        CrtRenderer::update_power_on_time(self, queue, elapsed_secs)
     }
 
     fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams) {

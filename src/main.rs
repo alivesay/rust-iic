@@ -6,7 +6,6 @@
 mod macros;
 
 mod app;
-mod audio;
 mod audio_mixer;
 mod bus;
 mod cli;
@@ -187,25 +186,12 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    if let Some(path) = &args.disk35_2 {
-        match cpu.bus.iou.iwm.load_disk35_2(path) {
-            Ok(()) => {
-                println!("3.5\" drive 2: {}", path);
-            }
-            Err(e) => {
-                eprintln!("Failed to load 3.5\" disk '{}': {}", path, e);
-            }
-        }
-    }
-
-    // Load hard drive images (HDV)
+    // Load hard drive images (HDV) into SmartPort device chain
     if let Some(path) = &args.hdv {
-        match cpu.bus.iou.smartport.load_hdv(path) {
+        match cpu.bus.iou.iwm.smartport.load_hdv(path) {
             Ok(()) => {
-                println!("Hard drive 1: {} ({} blocks)", 
-                    path, cpu.bus.iou.smartport.devices[0].block_count);
-                // Register SmartPort hook for ProDOS MLI interception
-                cpu.hooks.register_smartport_hook();
+                let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[0];
+                println!("Hard drive 1: {} ({} blocks)", path, dev.block_count);
             }
             Err(e) => {
                 eprintln!("Failed to load HDV '{}': {}", path, e);
@@ -214,10 +200,10 @@ fn main() -> Result<(), Error> {
     }
 
     if let Some(path) = &args.hdv2 {
-        match cpu.bus.iou.smartport.load_hdv2(path) {
+        match cpu.bus.iou.iwm.smartport.load_hdv(path) {
             Ok(()) => {
-                println!("Hard drive 2: {} ({} blocks)", 
-                    path, cpu.bus.iou.smartport.devices[1].block_count);
+                let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[1];
+                println!("Hard drive 2: {} ({} blocks)", path, dev.block_count);
             }
             Err(e) => {
                 eprintln!("Failed to load HDV2 '{}': {}", path, e);
@@ -251,15 +237,13 @@ fn run_headless(mut cpu: CPU) {
     }
 }
 
-/// Run emulator with GUI window.
 fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
     let mut event_loop = EventLoop::new().unwrap();
-    let mut app = App::new(cpu, args.shader);
+    let mut app = App::new(cpu, args.shader, args.fullscreen);
 
     let timeout = Some(Duration::ZERO);
     let target_frame_time = Duration::from_micros(16667); // ~60Hz
 
-    // Fast mode configuration
     let mut fast_mode = args.fast_until.is_some();
     let fast_until_addr = args
         .fast_until
@@ -280,12 +264,11 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
 
     let mut next_frame_time = Instant::now();
 
-    // Performance tracking
     let mut perf_start = Instant::now();
     let mut perf_frames = 0u64;
     let mut perf_cycles_start = app.cpu.cycles;
 
-    // Ctrl-C handler
+    // Ctrl-C
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
