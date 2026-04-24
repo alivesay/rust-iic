@@ -82,6 +82,10 @@ pub struct Video {
     pub shader_enabled: bool,
     pub scanline_intensity: f32,
     pub border_size: usize,
+
+    scanline_modes: [u8; 192],
+    scanline_80store: [bool; 192],
+    scanline_count: usize,
 }
 
 impl Video {
@@ -106,7 +110,24 @@ impl Video {
             shader_enabled: false,
             scanline_intensity: 0.15,
             border_size: border,
+            scanline_modes: [0; 192],
+            scanline_80store: [false; 192],
+            scanline_count: 0,
         }
+    }
+
+    pub fn snapshot_scanline(&mut self, scanline: usize, video_mode: u8, is_80store: bool) {
+        if scanline < 192 {
+            self.scanline_modes[scanline] = video_mode;
+            self.scanline_80store[scanline] = is_80store;
+            if scanline >= self.scanline_count {
+                self.scanline_count = scanline + 1;
+            }
+        }
+    }
+
+    pub fn begin_frame(&mut self) {
+        self.scanline_count = 0;
     }
 
     pub fn set_monochrome(&mut self, enabled: bool) {

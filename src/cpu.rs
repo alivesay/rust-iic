@@ -477,6 +477,14 @@ impl CPU {
         self.bus.video_update();
     }
 
+    pub fn video_begin_frame(&mut self) {
+        self.bus.video_begin_frame();
+    }
+
+    pub fn video_snapshot_scanline(&mut self, scanline: usize) {
+        self.bus.video_snapshot_scanline(scanline);
+    }
+
     pub fn step(&mut self) -> u64 {
         if self.handle_interrupt() {
             self.bus.tick(7);
