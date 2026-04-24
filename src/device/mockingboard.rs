@@ -1,33 +1,32 @@
-//! Mockingboard Sound Card Emulation
-//!
-//! Emulates the Sweet Micro Systems Mockingboard sound card:
-//! - Two 6522 VIA chips for timing and control
-//! - Two AY-3-8910 PSG (Programmable Sound Generator) chips
-//!
-//! Memory map (typically slot 4, $C4xx):
-//! - $C400-$C40F: VIA 1 registers (controls PSG 1)
-//! - $C480-$C48F: VIA 2 registers (controls PSG 2)
-//!
-//! References:
-//! - AY-3-8910 datasheet
-//! - MOS 6522 VIA datasheet
-//! - MAME ay8910.cpp (envelope timing, DAC model)
-//! - Matthew Westcott's AY-3-8910 voltage measurements (December 2001)
-//! - gyurco/apple2efpga FPGA implementation (LFSR algorithm)
+// Mockingboard Sound Card Emulation
+//
+// Emulates the Sweet Micro Systems Mockingboard sound card:
+// - Two 6522 VIA chips for timing and control
+// - Two AY-3-8910 PSG (Programmable Sound Generator) chips
+//
+// Memory map (typically slot 4, $C4xx):
+// - $C400-$C40F: VIA 1 registers (controls PSG 1)
+// - $C480-$C48F: VIA 2 registers (controls PSG 2)
+//
+// References:
+// - AY-3-8910 datasheet
+// - MOS 6522 VIA datasheet
+// - MAME ay8910.cpp (envelope timing, DAC model)
+// - Matthew Westcott's AY-3-8910 voltage measurements (December 2001)
+// - gyurco/apple2efpga FPGA implementation (LFSR algorithm)
 
 use std::sync::Arc;
 use ringbuf::{HeapRb, traits::*};
 use ringbuf::wrap::caching::Caching;
 
-/// Audio sample producer type
+// Audio sample producer type
 pub type AudioProducer = Caching<Arc<HeapRb<f32>>, true, false>;
 
 const AMPLITUDE: f32 = 0.5;
 // Apple II clock is 14.318181 MHz / 14 = 1.022727 MHz
 const CYCLES_PER_SECOND: f64 = 1_022_727.0;
 
-/// AY-3-8910 PSG register indices
-#[allow(dead_code)]
+// AY-3-8910 PSG register indices
 mod ay_reg {
     pub const TONE_A_PERIOD_FINE: u8 = 0;
     pub const TONE_A_PERIOD_COARSE: u8 = 1;
@@ -47,7 +46,7 @@ mod ay_reg {
     pub const IO_PORT_B: u8 = 15;
 }
 
-/// AY-3-8910 channel state
+// AY-3-8910 channel state
 #[derive(Clone)]
 struct AyChannel {
     period: u16,        // 12-bit tone period (1-4095, 0 treated as 1)
@@ -67,7 +66,7 @@ impl Default for AyChannel {
     }
 }
 
-/// AY-3-8910 PSG chip - simple tick-based emulation
+// AY-3-8910 PSG chip: simple tick-based emulation
 #[derive(Clone)]
 struct Ay8910 {
     // Registers (as written by software)
@@ -81,7 +80,7 @@ struct Ay8910 {
     noise_period: u8,
     noise_counter: u8,
     noise_output: bool,
-    rng: u32,           // 17-bit LFSR for noise
+    rng: u32, // 17-bit LFSR for noise
     
     // Envelope generator
     envelope_period: u16,
@@ -91,7 +90,7 @@ struct Ay8910 {
     envelope_volume: u8,
     envelope_holding: bool,
     envelope_attack: bool,
-    envelope_prescaler: u8,  // AY-3-8910 envelope runs at half the rate of tones
+    envelope_prescaler: u8, // AY-3-8910 envelope runs at half the rate of tones
     
     // Prescaler (AY runs at CLK/8)
     prescaler: u8,
@@ -110,7 +109,7 @@ impl Default for Ay8910 {
             noise_period: 0,
             noise_counter: 0,
             noise_output: false,
-            rng: 1,  // Must be non-zero
+            rng: 1, // Must be non-zero
             envelope_period: 0,
             envelope_counter: 0,
             envelope_step: 0,
@@ -166,7 +165,7 @@ impl Ay8910 {
                 // Initialize counter to period so we count down a full cycle before first step
                 // (if counter starts at 0, we immediately step which causes envelope glitches)
                 self.envelope_counter = self.envelope_period;
-                self.envelope_prescaler = 0;  // Reset prescaler for clean timing
+                self.envelope_prescaler = 0; // Reset prescaler for clean timing
                 self.envelope_holding = false;
                 self.envelope_attack = (value & 0x04) != 0;
                 self.envelope_volume = if self.envelope_attack { 0 } else { 15 };
@@ -189,8 +188,8 @@ impl Ay8910 {
         self.registers[ay_reg::MIXER as usize]
     }
     
-    /// Tick the PSG by N CPU cycles (batch processing for efficiency)
-    /// Returns the number of prescaler ticks that occurred
+    // Tick the PSG by N CPU cycles (batch processing for efficiency)
+    // Returns the number of prescaler ticks that occurred
     fn tick_n(&mut self, cycles: u32) -> u32 {
         // AY-3-8910 internal prescaler divides clock by 8
         // Instead of calling tick() N times, calculate how many prescaler
@@ -274,8 +273,8 @@ impl Ay8910 {
         prescaler_ticks
     }
     
-    /// Get the filtered output sample (-1.0 to 1.0)
-    /// Applies a simple low-pass filter to reduce aliasing from square waves
+    // Get the filtered output sample (-1.0 to 1.0)
+    // Applies a simple low-pass filter to reduce aliasing from square waves
     fn output(&mut self) -> f32 {
         let mixer = self.get_mixer();
         let mut sum = 0.0_f32;
@@ -314,7 +313,7 @@ impl Ay8910 {
         }
         
         // Scale output to 0.0-1.0 range (silence = 0.0, max = 1.0)
-        // Don't center around 0 - silent MB should contribute nothing to the mix
+        // Don't center around 0, silent MB should contribute nothing to the mix
         let raw_output = sum / 3.0;
         
         // Apply simple one-pole low-pass filter to simulate analog output circuitry
@@ -326,7 +325,7 @@ impl Ay8910 {
     }
 }
 
-/// 6522 VIA chip (simplified for Mockingboard)
+// 6522 VIA chip
 #[derive(Clone)]
 struct Via6522 {
     // Port registers
@@ -360,13 +359,10 @@ impl Default for Via6522 {
         Self {
             ora: 0,
             orb: 0,
-            ira: 0xFF,  // Input pins float high when undriven
+            ira: 0xFF, // Input pins float high when undriven
             irb: 0xFF,
             ddra: 0,
             ddrb: 0,
-            // Real 6522s have undefined power-on state for timers.
-            // Initialize to non-zero so detection can distinguish from ROM.
-            // $FFFF is a reasonable "undefined" value.
             t1c: 0xFFFF,
             t1l: 0xFFFF,
             t2c: 0xFFFF,
@@ -419,7 +415,6 @@ impl Via6522 {
             0x07 => {
                 self.t1l = (self.t1l & 0x00FF) | ((value as u16) << 8);
                 // In free-running mode, writing T1L-H clears the interrupt flag
-                // This is a common behavior some drivers expect (Ultima V, etc.)
                 if self.acr & 0x40 != 0 {
                     self.ifr &= !0x40;
                 }
@@ -450,7 +445,7 @@ impl Via6522 {
         if self.t1c == 0 {
             self.ifr |= 0x40; // Set T1 interrupt flag
             if self.acr & 0x40 != 0 {
-                // Free-running mode - reload from latch
+                // Free-running mode, reload from latch
                 self.t1c = self.t1l;
             }
         } else {
@@ -471,21 +466,21 @@ impl Via6522 {
     }
 }
 
-/// Mockingboard hardware variant
+// Mockingboard hardware variant
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum MockingboardType {
-    /// Standard Mockingboard: Two VIAs, each controlling one PSG
+    // Standard Mockingboard: Two VIAs, each controlling one PSG
     #[default]
     TypeA,
-    /// Mockingboard C/4c: Single VIA, ORB bits 3/4 select PSG(s)
+    // Mockingboard C/4c: Single VIA, ORB bits 3/4 select PSG(s)
     TypeC,
 }
 
-/// Activation delay in CPU cycles (~0.5 sec at 1.023 MHz).
-/// Allows boot ROM to initialize mouse firmware before Mockingboard takes over $C4xx.
+// Activation delay in CPU cycles (~0.5 sec at 1.023 MHz).
+// Allows boot ROM to initialize mouse firmware before Mockingboard takes over $C4xx.
 const ACTIVATION_DELAY_CYCLES: u64 = 500_000;
 
-/// Mockingboard sound card emulation
+// Mockingboard sound card emulation
 pub struct Mockingboard {
     // Two VIA chips (TypeC only uses VIA 0)
     via: [Via6522; 2],
@@ -510,16 +505,16 @@ pub struct Mockingboard {
     // Hardware variant
     mb_type: MockingboardType,
     
-    /// Set true after activation (by hook, timer, hotkey, or write to $C4xx).
-    /// Until activated, reads from $C4xx return ROM instead of VIA registers.
-    /// This allows IIc mouse firmware to work during boot.
+    // Set true after activation (by hook, timer, hotkey, or write to $C4xx).
+    // Until activated, reads from $C4xx return ROM instead of VIA registers.
+    // This allows IIc mouse firmware to work during boot.
     activated: bool,
     
-    /// Cycles remaining until auto-activation (0 = ready to activate on next tick)
-    /// Set to u64::MAX when using hook-based activation
+    // Cycles remaining until auto-activation (0 = ready to activate on next tick)
+    // Set to u64::MAX when using hook-based activation
     activation_countdown: u64,
     
-    /// When true, use hook-based activation instead of countdown timer
+    // When true, use hook-based activation instead of countdown timer
     use_hook_activation: bool,
 }
 
@@ -552,11 +547,6 @@ impl Mockingboard {
         Self::default()
     }
     
-    #[allow(dead_code)]  // May be used for future CLI option to select Mockingboard variant
-    pub fn set_type(&mut self, mb_type: MockingboardType) {
-        self.mb_type = mb_type;
-    }
-    
     pub fn with_audio(producer: AudioProducer, sample_rate: u32) -> Self {
         // Pre-compute cycles per sample in 8.24 fixed point for integer arithmetic
         let cycles_per_sample_frac = ((CYCLES_PER_SECOND / sample_rate as f64) * 256.0) as u32;
@@ -577,10 +567,10 @@ impl Mockingboard {
         self.enabled
     }
     
-    /// Enable hook-based activation instead of timer-based.
-    /// When enabled, the Mockingboard waits for explicit activate() call
-    /// instead of counting down cycles. This should be used with the
-    /// ROM hook at $FA6F (after mouse firmware init).
+    // Enable hook-based activation instead of timer-based.
+    // When enabled, the Mockingboard waits for explicit activate() call
+    // instead of counting down cycles. This should be used with the
+    // ROM hook at $FA6F (after mouse firmware init).
     pub fn set_hook_activation(&mut self, use_hook: bool) {
         self.use_hook_activation = use_hook;
         if use_hook {
@@ -591,9 +581,9 @@ impl Mockingboard {
         }
     }
     
-    /// Activate the Mockingboard (called on first write to $C4xx or by hook).
-    /// Mockingboard stays dormant at boot to avoid conflicts with
-    /// Apple IIc mouse firmware, then activates when software accesses it.
+    // Activate the Mockingboard (called on first write to $C4xx or by hook).
+    // Mockingboard stays dormant at boot to avoid conflicts with
+    // Apple IIc mouse firmware, then activates when software accesses it.
     pub fn activate(&mut self) {
         if self.enabled && !self.activated {
             self.activated = true;
@@ -601,14 +591,14 @@ impl Mockingboard {
         }
     }
     
-    /// Check if Mockingboard is activated and enabled
+    // Check if Mockingboard is activated and enabled
     pub fn is_activated(&self) -> bool {
         self.enabled && self.activated
     }
     
-    /// Read from Mockingboard address space
-    /// TypeA: $00-$7F = VIA 1, $80-$FF = VIA 2
-    /// TypeC: Only VIA 1 at $00-$0F
+    // Read from Mockingboard address space
+    // TypeA: $00-$7F = VIA 1, $80-$FF = VIA 2
+    // TypeC: Only VIA 1 at $00-$0F
     pub fn read(&mut self, offset: u8) -> u8 {
         if !self.enabled {
             return 0xFF;
@@ -657,7 +647,7 @@ impl Mockingboard {
         value
     }
     
-    /// Write to Mockingboard address space
+    // Write to Mockingboard address space
     pub fn write(&mut self, offset: u8, value: u8) {
         if !self.enabled {
             return;
@@ -749,8 +739,8 @@ impl Mockingboard {
         }
     }
     
-    /// Tick the Mockingboard by N CPU cycles (batch processing for efficiency)
-    /// This replaces the old per-cycle tick() with a more efficient batch approach
+    // Tick the Mockingboard by N CPU cycles (batch processing for efficiency)
+    // This replaces the old per-cycle tick() with a more efficient batch approach
     pub fn tick_n(&mut self, cycles: u32) {
         if !self.enabled || cycles == 0 {
             return;
@@ -771,7 +761,7 @@ impl Mockingboard {
             }
         }
         
-        // Tick VIAs (for timer interrupts) - VIA needs per-cycle accuracy for timers
+        // Tick VIAs (for timer interrupts): VIA needs per-cycle accuracy for timers
         for _ in 0..cycles {
             for via in &mut self.via {
                 via.tick();
@@ -811,17 +801,17 @@ impl Mockingboard {
         }
     }
     
-    /// Called once per frame - just for bookkeeping, audio is in tick_n()
+    // Called once per frame for bookkeeping, audio is in tick_n()
     pub fn update(&mut self, current_cycle: u64) {
         self.last_cycle = current_cycle;
     }
     
-    /// Check if any VIA is requesting an interrupt
+    // Check if any VIA is requesting an interrupt
     pub fn irq_active(&self) -> bool {
         self.enabled && (self.via[0].irq_active() || self.via[1].irq_active())
     }
     
-    /// Reset the Mockingboard
+    // Reset the Mockingboard
     pub fn reset(&mut self) {
         self.via = Default::default();
         self.psg = [Ay8910::default(), Ay8910::default()];

@@ -1,8 +1,11 @@
 use crate::{iou::IOU, memory::Memory, rom::ROM, video::VideoModeMask};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 const RAM_SIZE: usize = 64 * 1024;
 const ROM_SIZE: usize = 16 * 1024;
 const LCRAM_SIZE: usize = 4 * 1024;
+const LCRAM_HIGH_SIZE: usize = 8 * 1024;
 
 macro_rules! maybe_write_byte {
     ($write:expr, $ram:expr, $bank:expr, $addr:expr, $value:expr) => {
@@ -65,11 +68,12 @@ pub struct MMU {
     rom: [Memory; 2],   // Two 16KB ROM banks | [ROM1, ROM2]
     ram: [Memory; 2],   // 64KB Main and Auxiliary RAM | [MAIN, AUX]
     lcram: [Memory; 4], // Four 4KB Language Card RAM banks | [MAIN1, MAIN2, AUX1, AUX2]
+    lcram_high: [Memory; 2], // Two 8KB high LC RAM banks | [MAIN, AUX]
 }
 
 impl MMU {
     pub fn new() -> Self {
-        let mmu = Self {
+        let mut mmu = Self {
             rom: [
                 Memory::new(ROM_SIZE, "ROM1".into()),
                 Memory::new(ROM_SIZE, "ROM2".into()),
@@ -84,29 +88,23 @@ impl MMU {
                 Memory::new(LCRAM_SIZE, "LCAUX1".into()),
                 Memory::new(LCRAM_SIZE, "LCAUX2".into()),
             ],
+            lcram_high: [
+                Memory::new(LCRAM_HIGH_SIZE, "LCHIGHMAIN".into()),
+                Memory::new(LCRAM_HIGH_SIZE, "LCHIGHAUX".into()),
+            ],
         };
-        // OLD: Simulate realistic power-on RAM contents
-        // NEW: Start with zeroed RAM like old version for compatibility
-        // TODO: Re-enable once ROM test regression is fixed
-        // for bank in &mut mmu.ram {
-        //     bank.randomize_power_on();
-        // }
-        // for bank in &mut mmu.lcram {
-        //     bank.randomize_power_on();
-        // }
+        mmu.randomize_ram();
         mmu
     }
 
-    // pub fn init_mem_state(&self) {
-    //         self.mem_state.set(MemStateMask::INIT);
-    // }
-
-    #[allow(dead_code)]
     pub fn clear_ram(&mut self) {
         for bank in &mut self.ram {
             bank.clear();
         }
         for bank in &mut self.lcram {
+            bank.clear();
+        }
+        for bank in &mut self.lcram_high {
             bank.clear();
         }
     }
@@ -118,17 +116,15 @@ impl MMU {
         for bank in &mut self.lcram {
             bank.randomize_power_on();
         }
+        for bank in &mut self.lcram_high {
+            bank.randomize_power_on();
+        }
     }
 
     pub fn load_rom(&mut self, rom: ROM) {
         // v3 iic rom boundary $3fff
         self.rom[0].load_bytes(0, &rom.data[0..ROM_SIZE]);
         self.rom[1].load_bytes(0, &rom.data[ROM_SIZE..(ROM_SIZE << 1)]);
-
-        // println!("ROM Bank 1:");
-        // self.rom[0].dump_range(0x0000..=0x00FF);
-        // println!("ROM Bank 2:");
-        // self.rom[1].dump_range(0x0000..=0x00FF);
     }
 
     pub fn read_main_byte(&self, addr: u16) -> u8 {
@@ -139,9 +135,7 @@ impl MMU {
         self.ram[1].read_byte(addr)
     }
 
-    /// Direct write to main RAM (bypasses soft switches)
-    /// Used by emulator for injecting data (custom commands, etc.)
-    #[allow(dead_code)]
+    // direct write to main RAM (bypasses soft switches)
     pub fn write_main_byte(&mut self, addr: u16, value: u8) {
         self.ram[0].write_byte(addr, value);
     }
@@ -159,10 +153,10 @@ impl MMU {
         let ramrd = check_bits_u8!(mem_state, MemStateMask::RAMRD) as usize;
 
         match addr {
-            // **Zero Page & Stack (Main vs. Auxiliary)**
+            // Zero Page & Stack (Main vs. Auxiliary)
             0x0000..=0x01FF => self.ram[altzp].read_byte(addr),
 
-            // **80STORE-affected Display Memory (Text & Graphics)**
+            // 80STORE-affected Display Memory (Text & Graphics)
             // Text page ($0400-$07FF): always redirected by 80STORE+PAGE2
             0x0400..=0x07FF if is_80store => {
                 self.ram[is_page2 as usize].read_byte(addr)
@@ -172,10 +166,10 @@ impl MMU {
                 self.ram[is_page2 as usize].read_byte(addr)
             }
 
-            // **General 48K RAM ($0200 - $BFFF)**
+            // General 48K RAM ($0200 - $BFFF)
             0x0200..=0xBFFF => self.ram[ramrd].read_byte(addr),
 
-            // // **Soft Switches ($C000 - $C0FF)**
+            // // Soft Switches ($C000 - $C0FF)
             // 0xC000..=0xC0FF => {
             //     let result = self.handle_softswitch_read(addr);
             //     println!(
@@ -188,7 +182,7 @@ impl MMU {
             //     return result;
             // }
 
-            // **Language Card (LC) RAM / ROM ($C100 - $CFFF)**
+            // Language Card (LC) RAM / ROM ($C100 - $CFFF)
             0xC100..=0xCFFF => {
                 // Mockingboard2 slot 4 ROM space ($C400-$C4FF) - VIA register access
                 // ONLY intercept if Mockingboard is both enabled AND activated.
@@ -208,16 +202,16 @@ impl MMU {
                 self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
             }
 
-            // **Language Card RAM ($D000 - $DFFF)**
+            // Language Card RAM ($D000 - $DFFF)
             0xD000..=0xDFFF => {
                 if lcram == 1 {
-                    self.lcram[bank + (altzp << 1)].read_byte(addr.wrapping_sub(0xD000)) // TODO: should be altzp or ramrd?
+                    self.lcram[bank + (altzp << 1)].read_byte(addr.wrapping_sub(0xD000))
                 } else {
                     self.rom[altrom].read_byte(addr - 0xC000)
                 }
             }
 
-            // **High Memory RAM / ROM ($E000 - $FFFF)**
+            // High Memory RAM / ROM ($E000 - $FFFF)
             0xE000..=0xFFFF => {
                 if lcram == 1 {
                     self.ram[altzp].read_byte(addr)
@@ -235,11 +229,7 @@ impl MMU {
                     }
                     self.rom[altrom].read_byte(addr.wrapping_sub(0xC000))
                 }
-            } // // **Reset Slot ROM Mapping ($CFFF)**
-            // 0xCFFF => {
-            //     println!("Resetting C800 Slot ROM Mapping!");
-            //     return 0x00;  // Custom logic for slot ROM reset if necessary
-            // }
+            }
             _ => {
                 println!("Unhandled Memory Read at {:#06X}", addr);
                 0x00
@@ -263,42 +253,20 @@ impl MMU {
         let write = check_bits_u8!(mem_state, MemStateMask::WRITE) as usize;
 
         match addr {
-            // **Zero Page & Stack (Main vs. Auxiliary)**
+            // Zero Page & Stack (Main vs. Auxiliary)
             0x0000..=0x01FF => self.ram[altzp].write_byte(addr, value),
 
-            // **80STORE-affected Display Memory (Text & Graphics)**
+            // 80STORE-affected Display Memory (Text & Graphics)
             // Text page ($0400-$07FF): always redirected by 80STORE+PAGE2
-            0x0400..=0x07FF if is_80store => {
-                self.ram[is_page2 as usize].write_byte(addr, value)
-            }
-            // HiRes page ($2000-$3FFF): only redirected by 80STORE+PAGE2 when HIRES is active
-            0x2000..=0x3FFF if is_80store && is_hires => {
-                self.ram[is_page2 as usize].write_byte(addr, value)
-            }
+            0x0400..=0x07FF if is_80store => self.ram[is_page2 as usize].write_byte(addr, value),
 
-            // **General 48K RAM ($0200 - $BFFF)**
+            // HiRes page ($2000-$3FFF): only redirected by 80STORE+PAGE2 when HIRES is active
+            0x2000..=0x3FFF if is_80store && is_hires => self.ram[is_page2 as usize].write_byte(addr, value),
+
+            // General 48K RAM ($0200 - $BFFF)
             0x0200..=0xBFFF => self.ram[ramwrt].write_byte(addr, value),
 
-            // // **Soft Switch Writes ($C000 - $C0FF)**
-            // 0xC000..=0xC0FF => {
-            //     let result = self.handle_softswitch_write(addr, value, is_80store);
-            //     println!(
-            //         "SoftSwitch Write at {:#06X} = {:#04X} {}",
-            //         addr,
-            //         value,
-            //         mem_state_to_string(mem_state)
-            //     );
-            //     return result;
-            // }
-
-            // **Language Card (LC) RAM / ROM ($C100 - $CFFF)**
-            //     0xC100..=0xCFFF => maybe_write_byte!(
-            //     write,
-            //     self.lcram,
-            //     bank + (ramwrt << 1),
-            //     addr - 0xC100,
-            //     value
-            // ),
+            // Soft Switches ($C000 - $C0FF)
             0xC100..=0xCFFF => {
                 // Debug: log ALL writes to slot 4/5 ROM space
                 if (0xC400..=0xC4FF).contains(&addr) {
@@ -326,22 +294,17 @@ impl MMU {
                 0x00
             },
 
-            // **Language Card RAM ($D000 - $DFFF)**
+            // Language Card RAM ($D000 - $DFFF)
             0xD000..=0xDFFF => maybe_write_byte!(
                 write,
                 self.lcram,
-                bank + (altzp << 1), // TODO: altzp or ramwrt?
+                bank + (altzp << 1),
                 addr - 0xD000,
                 value
             ),
 
-            // **High Memory RAM / ROM ($E000 - $FFFF)**
+            // High Memory RAM / ROM ($E000 - $FFFF)
             0xE000..=0xFFFF => maybe_write_byte!(write, self.ram, altzp, addr, value),
-            // // **Reset Slot ROM Mapping ($CFFF)**
-            // 0xCFFF => {
-            //     println!("Resetting C800 Slot ROM Mapping!");
-            //     return 0x00;  // Custom logic for slot ROM reset if necessary
-            // }
             _ => {
                 println!("Unhandled Memory Write at {:#06X}", addr);
                 0x00

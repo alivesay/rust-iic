@@ -121,4 +121,8 @@ pub struct Args {
     /// Path to second HDV hard drive image
     #[arg(long)]
     pub hdv2: Option<String>,
+
+    /// Start in fullscreen mode (same as Cmd+Enter on macOS)
+    #[arg(long)]
+    pub fullscreen: bool,
 }

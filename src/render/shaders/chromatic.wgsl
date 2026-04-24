@@ -173,7 +173,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
             
             // Apply corner mask to fade glow at rounded corners
-            // Use same parameters as CRT shader defaults
             let csize = 0.001;
             let csmooth = 2000.0;
             glow_mask = corner_mask(xy, ovs, csize, csmooth);
@@ -183,8 +182,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                           * smoothstep(0.0, 0.02, xy.y) * smoothstep(0.0, 0.02, 1.0 - xy.y);
             glow_mask *= edge_fade;
             
-            // Convert curved emulator space [0,1] back to screen UV space
-            // The glow texture is in screen UV space (blur of full surface)
+            // Sample glow at CURVED coordinates (xy) to match the curved CRT image
+            // The glow should appear around where the pixels are ON SCREEN, not in flat space
             glow_uv = vec2<f32>(
                 cr_left + xy.x * content_span.x,
                 cr_top + xy.y * content_span.y,

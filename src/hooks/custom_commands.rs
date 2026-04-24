@@ -11,6 +11,8 @@
 //!    For game modding (3D overlay, trainers, etc.), you watch health, position,
 //!    inventory, etc. and react to changes.
 
+#![allow(dead_code)]
+
 use crate::bus::Bus;
 use super::{HookFilter, HookManager, HookMode, HookResult, Hook};
 use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
@@ -229,41 +231,6 @@ fn read_prodos_string(bus: &mut Bus, addr: u16) -> String {
     s
 }
 
-// =============================================================================
-// Custom Command System (via MLI interception)
-// =============================================================================
-
-/// Apple II text screen base addresses for each line (40-column mode)
-/// The screen memory has an interleaved layout
-#[allow(dead_code)]
-const TEXT_LINE_ADDRS: [u16; 24] = [
-    0x0400, 0x0480, 0x0500, 0x0580, 0x0600, 0x0680, 0x0700, 0x0780,
-    0x0428, 0x04A8, 0x0528, 0x05A8, 0x0628, 0x06A8, 0x0728, 0x07A8,
-    0x0450, 0x04D0, 0x0550, 0x05D0, 0x0650, 0x06D0, 0x0750, 0x07D0,
-];
-
-/// Write a string to the Apple II text screen at specified line
-#[allow(dead_code)]
-fn write_screen_line(bus: &mut Bus, line: usize, text: &str) {
-    if line >= 24 {
-        return;
-    }
-    let base = TEXT_LINE_ADDRS[line];
-    for (i, ch) in text.chars().take(40).enumerate() {
-        // Convert to Apple II screen code (normal text = char | 0x80, inverse = char & 0x3F)
-        let screen_byte = if ch.is_ascii() {
-            (ch as u8) | 0x80  // Normal text
-        } else {
-            0xA0  // Space for non-ASCII
-        };
-        bus.poke_byte(base + i as u16, screen_byte);
-    }
-    // Clear rest of line
-    for i in text.len()..40 {
-        bus.poke_byte(base + i as u16, 0xA0);  // Space
-    }
-}
-
 /// Check if this MLI call is for a custom command and handle it
 /// Returns true if command was handled (caller should suppress normal MLI processing)
 pub fn check_custom_command_mli(_bus: &mut Bus, _mli_info: &MliCallInfo) -> bool {
@@ -377,10 +344,6 @@ impl GameState {
     }
 }
 
-// =============================================================================
-// Legacy Custom Command Support (kept for reference)
-// =============================================================================
-
 /// Action returned by check_custom_command
 #[allow(dead_code)]
 pub enum CustomCommandAction {
@@ -388,12 +351,6 @@ pub enum CustomCommandAction {
     DebugDump,
 }
 
-/// Check and handle custom commands - called from main loop with Bus access
-#[allow(dead_code)]
-pub fn check_custom_command(_bus: &mut Bus) -> Option<CustomCommandAction> {
-    // Legacy - see check_mli_calls for the better approach
-    None
-}
 /// Register all hooks (called from main)
 pub fn register_hooks(hooks: &mut HookManager) {
     register_prodos_hooks(hooks);

@@ -1,44 +1,36 @@
-//! ROM/Execution Hook System
-//!
-//! Provides a flexible mechanism to hook into specific PC addresses during
-//! emulation. Useful for:
-//! - Installing drivers at specific boot points (e.g., Mockingboard after mouse init)
-//! - Game modding: intercepting draw functions, game state, etc.
-//! - Debugging: breakpoints with callbacks
-//! - Patching ROM behavior without modifying ROM data
-//!
-//! Hook Types:
-//! - OneShot: Fires once, then automatically removes itself
-//! - Persistent: Fires every time the PC hits the address
-//! - Replace: Fires and skips the original instruction (for patching)
+// ROM/Execution Hook System
+// Hook Types:
+// - OneShot: Fires once, then automatically removes itself
+// - Persistent: Fires every time the PC hits the address
+// - Replace: Fires and skips the original instruction (for patching)
 
 use std::collections::HashMap;
 
-/// Hook execution mode
+// Hook execution mode
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum HookMode {
-    /// Fire once, then remove the hook
+    // Fire once, then remove the hook
     OneShot,
-    /// Fire every time PC reaches this address  
+    // Fire every time PC reaches this address  
     Persistent,
-    /// Fire and skip the original instruction (advanced patching)
+    // Fire and skip the original instruction (advanced patching)
     Replace,
 }
 
-/// Result of hook execution
+// Result of hook execution
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum HookResult {
-    /// Continue normal execution after hook
+    // Continue normal execution after hook
     Continue,
-    /// Skip the instruction at this address (only valid for Replace mode)
+    // Skip the instruction at this address (only valid for Replace mode)
     Skip,
-    /// Remove this hook after execution
+    // Remove this hook after execution
     Remove,
 }
 
-/// Context passed to hook callbacks with CPU/system state
+// Context passed to hook callbacks with CPU/system state
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct HookContext {
@@ -51,27 +43,27 @@ pub struct HookContext {
     pub cycles: u64,
 }
 
-/// Filter conditions for hooks - determines when a hook should be active
+// Filter conditions for hooks - determines when a hook should be active
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum HookFilter {
-    /// Always active (no filtering)
+    // Always active (no filtering)
     Always,
-    /// Only when ProDOS is detected (checks MLI signature at $BF00)
+    // Only when ProDOS is detected (checks MLI signature at $BF00)
     ProDOS,
-    /// Only when DOS 3.3 is detected
+    // Only when DOS 3.3 is detected
     DOS33,
-    /// Only when BASIC.SYSTEM is active (ProDOS BASIC)
+    // Only when BASIC.SYSTEM is active (ProDOS BASIC)
     BasicSystem,
-    /// Only when Applesoft BASIC is running (ROM BASIC)
+    // Only when Applesoft BASIC is running (ROM BASIC)
     Applesoft,
-    /// Custom memory signature check: (address, expected_bytes)
+    // Custom memory signature check: (address, expected_bytes)
     MemorySignature(u16, Vec<u8>),
-    /// Multiple filters - ALL must match
+    // Multiple filters - ALL must match
     All(Vec<HookFilter>),
-    /// Multiple filters - ANY must match
+    // Multiple filters - ANY must match
     Any(Vec<HookFilter>),
-    /// Invert another filter
+    // Invert another filter
     Not(Box<HookFilter>),
 }
 
@@ -81,7 +73,7 @@ impl Default for HookFilter {
     }
 }
 
-/// A registered hook
+// A registered hook
 pub struct Hook {
     pub address: u16,
     pub mode: HookMode,
@@ -106,14 +98,14 @@ impl Hook {
         }
     }
     
-    /// Add a filter to this hook
+    // Add a filter to this hook
     pub fn with_filter(mut self, filter: HookFilter) -> Self {
         self.filter = filter;
         self
     }
 }
 
-/// A timer-based hook that fires after a certain number of cycles
+// A timer-based hook that fires after a certain number of cycles
 pub struct TimedHook {
     pub trigger_cycle: u64,
     pub name: String,
@@ -133,34 +125,20 @@ impl TimedHook {
     }
 }
 
-/// Manages all registered hooks (address-based and timer-based)
+// Manages all registered hooks (address-based and timer-based)
 pub struct HookManager {
-    /// Hooks indexed by address for fast lookup
+    // Hooks indexed by address for fast lookup
     hooks: HashMap<u16, Vec<Hook>>,
-    /// Timer-based hooks (sorted by trigger cycle)
+    // Timer-based hooks (sorted by trigger cycle)
     timed_hooks: Vec<TimedHook>,
-    /// Count of hooks that have fired (for debugging)
+    // Count of hooks that have fired (for debugging)
     pub fire_count: u64,
-    /// Pending action: activate Mockingboard slot 4 (set by hooks, cleared after processing)
+    // Pending action: activate Mockingboard slot 4 (set by hooks, cleared after processing)
     pub pending_mockingboard_activate: bool,
-    /// Pending action: activate Mockingboard slot 5 (set by hooks, cleared after processing)
+    // Pending action: activate Mockingboard slot 5 (set by hooks, cleared after processing)
     pub pending_mockingboard2_activate: bool,
-    /// Pending action: check for custom commands (set by GETLN hook)
+    // Pending action: check for custom commands (set by GETLN hook)
     pub pending_custom_command_check: bool,
-    /// SmartPort hook enabled (for HDV support)
-    pub smartport_enabled: bool,
-    /// Pending SmartPort call to process (set by hook, cleared after processing)
-    pub pending_smartport_call: Option<SmartPortCall>,
-}
-
-/// SmartPort call information captured by hook
-#[derive(Clone, Debug)]
-pub struct SmartPortCall {
-    pub command: u8,
-    pub unit: u8,
-    pub buffer_addr: u16,
-    pub block_num: u32,
-    pub return_addr: u16,  // Where to return after handling
 }
 
 impl Default for HookManager {
@@ -178,19 +156,17 @@ impl HookManager {
             pending_mockingboard_activate: false,
             pending_mockingboard2_activate: false,
             pending_custom_command_check: false,
-            smartport_enabled: false,
-            pending_smartport_call: None,
         }
     }
 
-    /// Register a new hook
+    // Register a new hook
     pub fn add_hook(&mut self, hook: Hook) {
         let address = hook.address;
         log::debug!("Hook registered: '{}' at ${:04X} ({:?})", hook.name, address, hook.mode);
         self.hooks.entry(address).or_default().push(hook);
     }
 
-    /// Convenience method to add a one-shot hook
+    // Convenience method to add a one-shot hook
     #[allow(dead_code)]
     pub fn add_oneshot<F>(&mut self, address: u16, name: impl Into<String>, callback: F)
     where
@@ -199,7 +175,7 @@ impl HookManager {
         self.add_hook(Hook::new(address, HookMode::OneShot, name, callback));
     }
 
-    /// Convenience method to add a persistent hook
+    // Convenience method to add a persistent hook
     #[allow(dead_code)]
     pub fn add_persistent<F>(&mut self, address: u16, name: impl Into<String>, callback: F)
     where
@@ -208,13 +184,13 @@ impl HookManager {
         self.add_hook(Hook::new(address, HookMode::Persistent, name, callback));
     }
 
-    /// Remove all hooks at an address
+    // Remove all hooks at an address
     #[allow(dead_code)]
     pub fn remove_hooks_at(&mut self, address: u16) {
         self.hooks.remove(&address);
     }
 
-    /// Remove a hook by name
+    // Remove a hook by name
     #[allow(dead_code)]
     pub fn remove_hook_by_name(&mut self, name: &str) {
         for hooks in self.hooks.values_mut() {
@@ -224,7 +200,7 @@ impl HookManager {
         self.hooks.retain(|_, v| !v.is_empty());
     }
 
-    /// Add a timer-based hook that fires after N cycles from boot
+    // Add a timer-based hook that fires after N cycles from boot
     pub fn add_timed_hook<F>(&mut self, cycles_from_boot: u64, name: impl Into<String>, callback: F)
     where
         F: FnMut(u64) + Send + 'static,
@@ -236,8 +212,8 @@ impl HookManager {
         self.timed_hooks.sort_by_key(|h| h.trigger_cycle);
     }
 
-    /// Check and execute any timed hooks that should fire at current cycle
-    /// Returns true if any hooks fired
+    // Check and execute any timed hooks that should fire at current cycle
+    // Returns true if any hooks fired
     pub fn check_timed_hooks(&mut self, current_cycle: u64) -> bool {
         let mut fired = false;
         
@@ -269,22 +245,22 @@ impl HookManager {
         fired
     }
 
-    /// Check if any timed hooks are pending
+    // Check if any timed hooks are pending
     #[inline]
     pub fn has_pending_timed_hooks(&self) -> bool {
         !self.timed_hooks.is_empty()
     }
 
-    /// Clear all timed hooks (call on reset)
+    // Clear all timed hooks (call on reset)
     pub fn clear_timed_hooks(&mut self) {
         self.timed_hooks.clear();
     }
 
-    /// Register the Mockingboard activation hook using a timer.
-    /// This fires after enough cycles for DOS/ProDOS to fully initialize.
-    /// ~3 seconds at 1MHz = ~3,000,000 cycles is safe for most boot scenarios.
-    /// `current_cycle` allows registering relative to current time (for reset handling).
-    /// `slot` is 0 for slot 4, 1 for slot 5 (second Mockingboard).
+    // Register the Mockingboard activation hook using a timer.
+    // This fires after enough cycles for DOS/ProDOS to fully initialize.
+    // ~3 seconds at 1MHz = ~3,000,000 cycles is safe for most boot scenarios.
+    // `current_cycle` allows registering relative to current time (for reset handling).
+    // `slot` is 0 for slot 4, 1 for slot 5 (second Mockingboard).
     pub fn register_mockingboard_hook(&mut self, slot: u8, delay_cycles: u64) {
         let trigger_at = delay_cycles;  // From boot
         let hook_name = if slot == 0 { "mockingboard_activate" } else { "mockingboard2_activate" };
@@ -301,20 +277,13 @@ impl HookManager {
         );
     }
 
-    /// Register the SmartPort hook for HDV hard drive support.
-    /// This enables interception of SmartPort calls to virtual hard drives.
-    pub fn register_smartport_hook(&mut self) {
-        self.smartport_enabled = true;
-        log::info!("SmartPort hook enabled for HDV support");
-    }
-
-    /// Check if any hooks exist at this address (fast path for execution loop)
+    // Check if any hooks exist at this address (fast path for execution loop)
     #[inline]
     pub fn has_hooks_at(&self, address: u16) -> bool {
         self.hooks.contains_key(&address)
     }
     
-    /// Check if a filter matches the current system state
+    // Check if a filter matches the current system state
     fn check_filter<F>(filter: &HookFilter, peek: &mut F) -> bool 
     where
         F: FnMut(u16) -> u8,
@@ -376,9 +345,9 @@ impl HookManager {
         }
     }
 
-    /// Execute all hooks at the given address, with memory access for filter checking
-    /// Returns true if instruction should be skipped (Replace mode)
-    /// `peek` is a function that reads a byte from memory without side effects
+    // Execute all hooks at the given address, with memory access for filter checking
+    // Returns true if instruction should be skipped (Replace mode)
+    // `peek` is a function that reads a byte from memory without side effects
     pub fn execute_hooks_filtered<F>(&mut self, ctx: &HookContext, peek: &mut F) -> bool 
     where
         F: FnMut(u16) -> u8,
@@ -451,7 +420,7 @@ impl HookManager {
         skip_instruction
     }
 
-    /// List all registered hooks (for debugging)
+    // List all registered hooks (for debugging)
     #[allow(dead_code)]
     pub fn list_hooks(&self) -> Vec<(u16, &str, HookMode)> {
         let mut result = Vec::new();
@@ -464,55 +433,55 @@ impl HookManager {
         result
     }
 
-    /// Clear all hooks
+    // Clear all hooks
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.hooks.clear();
     }
 }
 
-/// Well-known Apple IIc ROM addresses for hooking
+// Well-known Apple IIc ROM addresses for hooking
 #[allow(dead_code)]
 pub mod iic_addresses {
-    /// RESET entry point
+    // RESET entry point
     pub const RESET: u16 = 0xFA62;
     
-    /// After SETNORM in reset sequence
+    // After SETNORM in reset sequence
     pub const AFTER_SETNORM: u16 = 0xFA66;
     
-    /// After INIT in reset sequence
+    // After INIT in reset sequence
     pub const AFTER_INIT: u16 = 0xFA69;
     
-    /// After ZZQUIT (Setvid/Setkbd) in reset sequence
+    // After ZZQUIT (Setvid/Setkbd) in reset sequence
     pub const AFTER_ZZQUIT: u16 = 0xFA6C;
     
-    /// Mouse firmware init call (jsr initmouse)
+    // Mouse firmware init call (jsr initmouse)
     pub const INITMOUSE_CALL: u16 = 0xFA6C;
     
-    /// First instruction AFTER mouse init returns - ideal for Mockingboard activation
+    // First instruction AFTER mouse init returns - ideal for Mockingboard activation
     pub const AFTER_INITMOUSE: u16 = 0xFA6F;
     
-    /// After CLRPORT in reset sequence
+    // After CLRPORT in reset sequence
     pub const AFTER_CLRPORT: u16 = 0xFA72;
     
-    /// After RESET_X (all device init done)
+    // After RESET_X (all device init done)
     pub const AFTER_RESET_X: u16 = 0xFA7B;
     
-    /// PWRUP2 - about to display "Apple //c" banner
+    // PWRUP2 - about to display "Apple //c" banner
     pub const PWRUP2: u16 = 0xFB12;
     
-    /// About to jump to boot device ($C600 usually)
+    // About to jump to boot device ($C600 usually)
     pub const BEFORE_BOOT: u16 = 0xFB19;
     
-    /// Monitor entry point
+    // Monitor entry point
     pub const MON: u16 = 0xFF65;
     
-    /// COUT - character output
+    // COUT - character output
     pub const COUT: u16 = 0xFDED;
     
-    /// KEYIN - keyboard input
+    // KEYIN - keyboard input
     pub const KEYIN: u16 = 0xFD1B;
     
-    /// HOME - clear screen
+    // HOME - clear screen
     pub const HOME: u16 = 0xFC58;
 }

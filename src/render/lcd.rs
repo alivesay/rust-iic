@@ -1,13 +1,3 @@
-//! Apple IIc Flat Panel LCD Renderer
-//!
-//! The Apple IIc LCD was a 9" passive-matrix STN display with:
-//! - Vertically compressed aspect ratio (shorter than CRT equivalent)
-//! - Visible pixel grid structure
-//! - Green-tinted background with dark pixels
-//! - Relatively slow response time (ghosting)
-//!
-//! This renderer is simpler than CRT as it doesn't need bloom/halation passes.
-
 use wgpu::util::DeviceExt;
 
 use super::screen::PostProcessor;
@@ -399,6 +389,14 @@ impl PostProcessor for LcdRenderer {
         // extra.x is at byte offset 16 (content_rect) + 16 (params) = 32
         let val: f32 = if monochrome { 1.0 } else { 0.0 };
         queue.write_buffer(&self.uniform_buffer, 32, bytemuck::bytes_of(&val));
+    }
+
+    fn update_text_mode(&self, _queue: &wgpu::Queue, _text_only: bool) {
+        // LCD doesn't use NTSC processing, so text mode is irrelevant
+    }
+
+    fn update_power_on_time(&self, _queue: &wgpu::Queue, _elapsed_secs: f32) {
+        // LCD doesn't have power-on sync effect
     }
 
     fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams) {

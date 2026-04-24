@@ -19,18 +19,6 @@ pub struct Bus {
     pub interrupts: InterruptController,
 
     pub video: Video,
-
-    // pub vblint: Cell<u8>,   // VBL Interrupt Status
-    // iou_disabled: Cell<u8>, // IOU Disable Flag
-
-    // button_0: Cell<u8>,     // Button 0 (Open Apple Key)
-    // button_1: Cell<u8>,     // Button 1 (Closed Apple Key)
-    // paddle_timer: Cell<u8>, // Paddle Timer
-    // mouse_x: Cell<u8>,      // Mouse X Position
-    // mouse_y: Cell<u8>,      // Mouse Y Position
-    // mouse_ack: Cell<u8>,    // Mouse Acknowledge
-
-    //#[cfg(feature = "klauss-interrupt-test")]
     pub i_port: u8, // Klauss IRQ/NMI Feedback Register
 
     pub debug: bool,
@@ -51,30 +39,12 @@ impl Bus {
 
             video: Video::new(),
 
-            // vblint: Cell::new(0),
-            // iou_disabled: Cell::new(0),
-
-            // button_0: Cell::new(0),
-            // button_1: Cell::new(0),
-            // mouse_x: Cell::new(0),
-            // mouse_y: Cell::new(0),
-            // paddle_timer: Cell::new(0),
-            // mouse_ack: Cell::new(0),
             bus_ram: Memory::new(memory_size, "BUSRAM".into()),
 
             // #[cfg(feature = "klauss-interrupt-test")]
             i_port: 0,
             debug: false,
         }
-    }
-
-    pub fn init_mmu(&mut self) {
-        //self.mmu.init_mem_state();
-    }
-
-    #[allow(dead_code)]
-    pub fn clear_ram(&mut self) {
-        self.mmu.clear_ram();
     }
 
     pub fn randomize_ram(&mut self) {
@@ -107,39 +77,6 @@ impl Bus {
             }
         } else {
             self.bus_ram.read_byte(addr)
-        }
-    }
-
-    /// Write a byte without triggering soft switch side effects
-    /// Used for injecting data from emulator (custom commands, etc.)
-    /// Respects RAMRD/RAMWRT soft switches to write to correct bank
-    #[allow(dead_code)]
-    pub fn poke_byte(&mut self, addr: u16, value: u8) {
-        if self.system_type == SystemType::AppleIIc {
-            if addr >= 0xC000 && addr <= 0xC0FF {
-                // Skip soft switch writes - can't poke I/O space safely
-                return;
-            }
-            // Use the same memory path as normal writes (respects banking)
-            if addr < 0xC000 {
-                let mem_state = self.iou.mem_state.get();
-                let video_mode = self.iou.video_mode.get();
-                let is_page2 = (video_mode & crate::video::VideoModeMask::PAGE2) != 0;
-                let is_hires = (video_mode & crate::video::VideoModeMask::HIRES) != 0;
-                let is_80store = self.iou.is_80store.get();
-
-                self.mmu.write_byte(
-                    &mut self.iou,
-                    addr,
-                    value,
-                    mem_state,
-                    is_80store,
-                    is_page2,
-                    is_hires,
-                );
-            }
-        } else {
-            self.bus_ram.write_byte(addr, value);
         }
     }
 
@@ -210,22 +147,16 @@ impl Bus {
         } else {
             match addr {
                 0xBFFC => {
-                    println!(
-                        "⚡ Writing to IRQ/NMI feedback register at $BFFC: {:#04X}",
-                        value
-                    );
                     self.i_port = value;
 
                     let irq_triggered = value & (1 << 0) != 0;
                     let nmi_triggered = value & (1 << 1) != 0;
 
                     if irq_triggered {
-                        println!("Triggering IRQ from $BFFC!");
                         self.interrupts.request_irq();
                     }
 
                     if nmi_triggered {
-                        println!("Triggering NMI from $BFFC!");
                         self.interrupts.request_nmi();
                     }
 
@@ -241,15 +172,6 @@ impl Bus {
             self.write_byte(start.wrapping_add(i as u16), byte);
         }
     }
-
-    // #[allow(dead_code)]
-    // pub fn dump_stack(&self) {
-    //     self.memory().dump_range(0x0100..=0x01FF);
-    // }
-
-    // pub fn memory(&self) -> &Memory {
-    //     &self.mmu.active_ram()
-    // }
 
     pub fn handle_iic_read(&mut self, addr: u16) -> u8 {
         match addr {
@@ -298,8 +220,6 @@ impl Bus {
             self.iou.scan_cycle -= 17030;
         }
 
-        // Update floating bus: read the byte from text page 1 RAM
-        // at the address the video hardware would currently be fetching.
         // Apple II NTSC: 65 cycles/scanline, 262 scanlines/frame.
         // During active display the video reads from text/graphics RAM.
         // Text page 1 address = base + col, where base depends on scanline.
@@ -324,10 +244,10 @@ impl Bus {
 
         self.iou.mouse.tick(cycles);
         self.iou.iwm.tick(cycles);
-        self.iou.scc.tick(cycles);
-        self.iou.zip.tick();  // ZIP Chip slowdown counter
         
-        // Mockingboard batch tick (much more efficient than per-cycle loop)
+        self.iou.scc.tick(cycles);
+        self.iou.zip.tick();
+        
         self.iou.mockingboard.tick_n(cycles as u32);
         self.iou.mockingboard2.tick_n(cycles as u32);
         
