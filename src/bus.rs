@@ -59,6 +59,18 @@ impl Bus {
         self.video.update(&self.iou, &self.mmu);
     }
 
+    pub fn video_begin_frame(&mut self) {
+        self.video.begin_frame();
+    }
+
+    pub fn video_snapshot_scanline(&mut self, scanline: usize) {
+        self.video.snapshot_scanline(
+            scanline,
+            self.iou.video_mode.get(),
+            self.iou.is_80store.get(),
+        );
+    }
+
     pub fn load_rom(&mut self, rom: ROM) {
         if self.system_type == SystemType::AppleIIc {
             self.mmu.load_rom(rom);

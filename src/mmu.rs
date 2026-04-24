@@ -249,13 +249,6 @@ impl MMU {
 
             // Soft Switches ($C000 - $C0FF)
             0xC100..=0xCFFF => {
-                // Debug: log ALL writes to slot 4/5 ROM space
-                if (0xC400..=0xC4FF).contains(&addr) {
-                    println!("MMU WRITE: addr=${:04X} value=${:02X} mb2_enabled={}", addr, value, iou.mockingboard2.is_enabled());
-                }
-                if (0xC500..=0xC5FF).contains(&addr) {
-                    println!("MMU WRITE: addr=${:04X} value=${:02X} mb_enabled={}", addr, value, iou.mockingboard.is_enabled());
-                }
                 // Mockingboard2 slot 4 ROM space ($C400-$C4FF) - VIA register writes
                 // Any write to $C4xx activates the Mockingboard2 (mimicking MB4c hardware)
                 if iou.mockingboard2.is_enabled() && (0xC400..=0xC4FF).contains(&addr) {

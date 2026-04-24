@@ -300,24 +300,42 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
         };
 
         if app.window.is_some() {
-            let mut cycles_run = 0;
-            while cycles_run < effective_cpf {
-                if fast_mode && app.cpu.pc == fast_until_addr {
-                    println!(
-                        "Reached fast_until address {:04X}. Switching to normal speed.",
-                        fast_until_addr
-                    );
-                    fast_mode = false;
-                    cycles_per_frame = (1.0 * 1_023_000.0 / 60.0) as u64;
-                    app.cpu.debug = true;
+            // Scanline-interleaved execution: run ~65 cycles per scanline (262 scanlines/frame)
+            // for canline-accurate VBL timing and floating bus values.
+            let cycles_per_scanline = effective_cpf / 262;
+            let remainder = effective_cpf % 262;
+            let mut cycles_run: u64 = 0;
+            let mut target_cycles: u64 = 0;
+
+            app.cpu.video_begin_frame();
+
+            for scanline in 0..262_usize {
+                // overshoot from one scanline naturally reduces the next
+                target_cycles += cycles_per_scanline + if (scanline as u64) < remainder { 1 } else { 0 };
+
+                while cycles_run < target_cycles {
+                    if fast_mode && app.cpu.pc == fast_until_addr {
+                        println!(
+                            "Reached fast_until address {:04X}. Switching to normal speed.",
+                            fast_until_addr
+                        );
+                        fast_mode = false;
+                        cycles_per_frame = (1.0 * 1_023_000.0 / 60.0) as u64;
+                        app.cpu.debug = true;
+                    }
+
+                    if !fast_mode && args.log_until.is_some() && app.cpu.pc == log_until_addr {
+                        println!("Reached log_until address {:04X}. Exiting.", log_until_addr);
+                        std::process::exit(0);
+                    }
+
+                    cycles_run += app.cpu.tick();
                 }
 
-                if !fast_mode && args.log_until.is_some() && app.cpu.pc == log_until_addr {
-                    println!("Reached log_until address {:04X}. Exiting.", log_until_addr);
-                    std::process::exit(0);
+                // Snapshot video mode at end of each visible scanline
+                if scanline < 192 {
+                    app.cpu.video_snapshot_scanline(scanline);
                 }
-
-                cycles_run += app.cpu.tick();
             }
 
             cpu_time = frame_start.elapsed();
