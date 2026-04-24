@@ -227,26 +227,48 @@ impl Bus {
         // Track position within NTSC frame for VBL timing
         // 262 scanlines × 65 cycles = 17030 cycles/frame
         let old_scan = self.iou.scan_cycle;
-        self.iou.scan_cycle += cycles;
-        if self.iou.scan_cycle >= 17030 {
-            self.iou.scan_cycle -= 17030;
-        }
 
-        // Apple II NTSC: 65 cycles/scanline, 262 scanlines/frame.
-        // During active display the video reads from text/graphics RAM.
-        // Text page 1 address = base + col, where base depends on scanline.
-        let scan = self.iou.scan_cycle;
-        let scanline = (scan / 65) as u16;
-        let col = (scan % 65) as u16;
-        if scanline < 192 && col < 40 {
-            // Apple II text page base address for a given row:
-            // row = scanline / 8, group = row / 8, offset = row % 8
-            // base = $0400 + group * 0x80 + offset * 0x28
-            let row = scanline / 8;
-            let group = row / 8;
-            let offset = row % 8;
-            let addr = 0x0400 + group * 0x80 + offset * 0x28 + col;
-            self.iou.floating_bus = self.mmu.read_main_byte(addr);
+        // Per-cycle floating bus update.
+        // The Apple II video hardware fetches one byte per cycle during active
+        // display. Software that reads the floating bus ($C000-$C07F with no
+        // switch selected, or certain unconnected addresses) sees whatever the
+        // video circuitry last put on the data bus.
+        let video_mode = self.iou.video_mode.get();
+        let is_hires = (video_mode & VideoModeMask::HIRES) != 0;
+        let is_page2 = (video_mode & VideoModeMask::PAGE2) != 0;
+        let is_80store = self.iou.is_80store.get();
+
+        for _ in 0..cycles {
+            self.iou.scan_cycle += 1;
+            if self.iou.scan_cycle >= 17030 {
+                self.iou.scan_cycle -= 17030;
+            }
+
+            let scan = self.iou.scan_cycle;
+            let scanline = (scan / 65) as u16;
+            let col = (scan % 65) as u16;
+
+            if scanline < 192 && col < 40 {
+                let row = scanline / 8;
+                let group = row / 8;
+                let offset = row % 8;
+
+                if is_hires {
+                    // HiRes: video fetches from $2000/$4000 page
+                    // Address = base + scanline_row*1024 + (group%8)*128 + (group/8)*40 + col
+                    // where scanline_row = scanline % 8, group = scanline / 8
+                    let s_group = scanline / 8;
+                    let s_row = scanline % 8;
+                    let base: u16 = if !is_80store && is_page2 { 0x4000 } else { 0x2000 };
+                    let addr = base + s_row * 1024 + (s_group % 8) * 128 + (s_group / 8) * 40 + col;
+                    self.iou.floating_bus = self.mmu.read_main_byte(addr);
+                } else {
+                    // Text/LoRes: video fetches from $0400/$0800 page
+                    let base: u16 = if !is_80store && is_page2 { 0x0800 } else { 0x0400 };
+                    let addr = base + group * 0x80 + offset * 0x28 + col;
+                    self.iou.floating_bus = self.mmu.read_main_byte(addr);
+                }
+            }
         }
 
         // Set VBL interrupt when entering VBL region (scanline 192+)
@@ -255,7 +277,17 @@ impl Bus {
         }
 
         self.iou.mouse.tick(cycles);
-        self.iou.iwm.tick(cycles);
+
+        // Per-cycle IWM ticking for precise bit timing (4 cycles = 1 bit).
+        // When the motor is active, tick one cycle at a time so the data latch
+        // becomes ready on the exact cycle.
+        if self.iou.iwm.motor_on {
+            for _ in 0..cycles {
+                self.iou.iwm.tick(1);
+            }
+        } else {
+            self.iou.iwm.tick(cycles);
+        }
         
         self.iou.scc.tick(cycles);
         self.iou.zip.tick();
