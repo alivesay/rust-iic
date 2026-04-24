@@ -251,11 +251,6 @@ impl SmartPortDevice {
 
         Ok(())
     }
-
-    // Get the device path
-    pub fn path(&self) -> &str {
-        &self.path
-    }
 }
 
 impl Drop for SmartPortDevice {
@@ -425,24 +420,6 @@ impl SmartPort {
         );
     }
 
-    pub fn consume_compare_trace(&mut self) -> Option<(u32, u32, u16)> {
-        let block = self.compare_trace_block?;
-        if self.compare_trace_remaining == 0 {
-            self.compare_trace_block = None;
-            return None;
-        }
-
-        let step = 25u16.saturating_sub(self.compare_trace_remaining);
-        self.compare_trace_remaining -= 1;
-        if self.compare_trace_remaining == 0 {
-            self.compare_trace_block = None;
-        }
-
-        Some((self.compare_trace_seq, block, step))
-    }
-
-    // -- public device management --
-
     // Load a 3.5" disk image into the floppy drive (unit 1)
     pub fn load_disk(&mut self, path: &str) -> Result<(), String> {
         self.floppy.load_disk(path)
@@ -458,11 +435,6 @@ impl SmartPort {
             }
         }
         Err("No free HDV device slots".to_string())
-    }
-
-    // True if a 3.5" floppy is loaded (unit 1)
-    pub fn has_disk(&self) -> bool {
-        self.floppy.has_disk()
     }
 
     // True if any device (floppy or HDV) is loaded
@@ -515,19 +487,6 @@ impl SmartPort {
         self.trace_wire("bus_reset-after");
     }
 
-    // -- protocol state queries (used by IWM) --
-
-    pub fn poll_ack_status(&mut self) -> bool {
-        if !self.ack && self.ack_low_count > 0 {
-            self.ack_low_count -= 1;
-            if self.ack_low_count == 0 { self.ack = true; }
-            self.response_delay_cycles = 0;
-            self.req_high = true;
-            return false;
-        }
-        self.ack
-    }
-
     pub fn tick(&mut self, cycles: u64) {
         if self.state != ProtocolState::ResponsePending
             || self.response_waiting_for_req_low
@@ -549,12 +508,6 @@ impl SmartPort {
             self.make_response_ready();
             self.maybe_start_sending_response();
         }
-    }
-
-    pub fn is_sending_response(&self) -> bool {
-        matches!(self.state, ProtocolState::ResponsePending
-                           | ProtocolState::SendingResponse
-                           | ProtocolState::ResponseDone)
     }
 
     pub fn is_wire_active(&self) -> bool {

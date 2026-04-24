@@ -42,8 +42,6 @@ mod ay_reg {
     pub const ENVELOPE_PERIOD_FINE: u8 = 11;
     pub const ENVELOPE_PERIOD_COARSE: u8 = 12;
     pub const ENVELOPE_SHAPE: u8 = 13;
-    pub const IO_PORT_A: u8 = 14;
-    pub const IO_PORT_B: u8 = 15;
 }
 
 // AY-3-8910 channel state
@@ -494,7 +492,6 @@ pub struct Mockingboard {
     
     // Audio output
     producer: Option<AudioProducer>,
-    sample_rate: u32,
     last_cycle: u64,
     sample_accum: u32,  // Integer accumulator for sample timing (in 1/256 cycle units)
     cycles_per_sample_frac: u32,  // Pre-computed cycles/sample in 8.8 fixed point
@@ -529,7 +526,6 @@ impl Default for Mockingboard {
             psg_bc1: [false; 2],
             psg_bdir: [false; 2],
             producer: None,
-            sample_rate: 44100,
             last_cycle: 0,
             sample_accum: 0,
             cycles_per_sample_frac: DEFAULT_CYCLES_PER_SAMPLE_FRAC,
@@ -552,7 +548,6 @@ impl Mockingboard {
         let cycles_per_sample_frac = ((CYCLES_PER_SECOND / sample_rate as f64) * 256.0) as u32;
         Self {
             producer: Some(producer),
-            sample_rate,
             cycles_per_sample_frac,
             enabled: true,
             ..Default::default()

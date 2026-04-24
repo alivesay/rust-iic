@@ -1,6 +1,4 @@
 use crate::{iou::IOU, memory::Memory, rom::ROM, video::VideoModeMask};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::OnceLock;
 
 const RAM_SIZE: usize = 64 * 1024;
 const ROM_SIZE: usize = 16 * 1024;
@@ -97,18 +95,6 @@ impl MMU {
         mmu
     }
 
-    pub fn clear_ram(&mut self) {
-        for bank in &mut self.ram {
-            bank.clear();
-        }
-        for bank in &mut self.lcram {
-            bank.clear();
-        }
-        for bank in &mut self.lcram_high {
-            bank.clear();
-        }
-    }
-
     pub fn randomize_ram(&mut self) {
         for bank in &mut self.ram {
             bank.randomize_power_on();
@@ -133,11 +119,6 @@ impl MMU {
 
     pub fn read_aux_byte(&self, addr: u16) -> u8 {
         self.ram[1].read_byte(addr)
-    }
-
-    // direct write to main RAM (bypasses soft switches)
-    pub fn write_main_byte(&mut self, addr: u16, value: u8) {
-        self.ram[0].write_byte(addr, value);
     }
 
     pub fn read_byte(&self, iou: &mut IOU, addr: u16) -> u8 {
