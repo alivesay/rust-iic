@@ -898,14 +898,17 @@ impl Video {
                         }
                     }
 
-                    // Extract 4-bit color using aligned 4-pixel groups.
-                    // Each group of 4 pixels shares one color.
+                    // Extract 4-bit color using a sliding window with phase rotation.
+                    // Each pixel gets its own nibble from a 4-bit window centered on
+                    // its position. The phase term rotates which bit maps to which
+                    // nibble position, so a repeating 4-bit pattern (e.g. 0,0,1,1
+                    // for blue) maps to the same palette index at every pixel.
                     for i in 0..560_usize {
-                        let group_start = i - (i % 4);
+                        let phase = i % 4;
                         let mut nibble: u8 = 0;
                         for j in 0..4_usize {
-                            if scanline_bits[group_start + j] {
-                                nibble |= 1 << j; // LSB-first
+                            if scanline_bits[i + j] {
+                                nibble |= 1 << (3 - ((phase + j) % 4));
                             }
                         }
 
