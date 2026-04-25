@@ -36,12 +36,12 @@ pub struct App {
     pub post_processor: Option<Box<dyn PostProcessor>>,
     pub shader_type: ShaderType,
     pub shader_start_time: Instant,
-    pub power_on_time: Instant,  // For CRT "channel change" effect (triggered by F3)
+    pub power_on_time: Instant,
     pub modifiers: ModifiersState,
     pub last_cursor_pos: Option<(f64, f64)>,
     pub show_toolbar: bool,
     pub is_fullscreen: bool,
-    pub start_fullscreen: bool,  // Start in fullscreen mode (from CLI --fullscreen)
+    pub start_fullscreen: bool,
     pub last_drive_click: Option<(usize, Instant)>,
     // egui state for shader parameter UI
     pub egui_ctx: egui::Context,
@@ -54,6 +54,8 @@ pub struct App {
     pub cpu_monitor: CpuMonitor,
     pub drive_icons: Option<DriveIcons>,
     pub paused: bool,
+    pub window_aspect_ratio: f64,
+    pub last_resize_time: Option<Instant>,
 }
 
 impl App {
@@ -89,6 +91,8 @@ impl App {
             cpu_monitor: CpuMonitor::new(),
             drive_icons: None,
             paused: false,
+            window_aspect_ratio: 1.0,
+            last_resize_time: None,
         }
     }
 
@@ -96,6 +100,35 @@ impl App {
         self.cpu.bus.iou.iwm.eject_disk(0);
         self.cpu.bus.iou.iwm.eject_disk(1);
         self.cpu.bus.iou.iwm.smartport.flush_all();
+    }
+
+    /// Snap window to correct aspect ratio after user finishes resizing
+    pub fn snap_aspect_ratio(&mut self) {
+        if let Some(last_resize) = self.last_resize_time {
+            if last_resize.elapsed() >= Duration::from_millis(150) {
+                self.last_resize_time = None;
+
+                let target_ratio = self.window_aspect_ratio;
+                let current_ratio = self.surface_width as f64 / self.surface_height as f64;
+
+                if (current_ratio - target_ratio).abs() > 0.01 {
+                    // Keep the wider dimension, adjust the other
+                    let (new_w, new_h) = if current_ratio > target_ratio {
+                        // Too wide, shrink width to match height
+                        ((self.surface_height as f64 * target_ratio).round() as u32, self.surface_height)
+                    } else {
+                        // Too tall, shrink height to match width
+                        (self.surface_width, (self.surface_width as f64 / target_ratio).round() as u32)
+                    };
+
+                    if let Some(window) = &self.window {
+                        let scale = window.scale_factor();
+                        let logical = LogicalSize::new(new_w as f64 / scale, new_h as f64 / scale);
+                        let _ = window.request_inner_size(logical);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -206,8 +239,28 @@ impl winit::application::ApplicationHandler for App {
             CrtRenderer::CRT_ASPECT_CORRECTION as f64
         };
         
-        let win_w = buf_w as f64;
-        let win_h = native_h as f64 * 2.0 * aspect;
+        let base_w = buf_w as f64;
+        let base_h = native_h as f64 * 2.0 * aspect;
+
+        // Pick the largest integer scale that fits within 80% of the monitor (logical points)
+        let scale = if let Some(monitor) = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next()) {
+            let monitor_size = monitor.size();
+            let dpi_scale = monitor.scale_factor();
+            let logical_w = monitor_size.width as f64 / dpi_scale;
+            let logical_h = monitor_size.height as f64 / dpi_scale;
+            let max_w = logical_w * 0.80;
+            let max_h = logical_h * 0.80;
+            let max_scale_w = (max_w / base_w).floor() as u32;
+            let max_scale_h = (max_h / base_h).floor() as u32;
+            max_scale_w.min(max_scale_h).max(1)
+        } else {
+            2
+        };
+
+        let win_w = base_w * scale as f64;
+        let win_h = base_h * scale as f64;
+
+        self.window_aspect_ratio = base_w / base_h;
 
         let window_buttons = WindowButtons::CLOSE | WindowButtons::MINIMIZE;
         
@@ -217,6 +270,7 @@ impl winit::application::ApplicationHandler for App {
                     Window::default_attributes()
                         .with_title("Apple //c")
                         .with_inner_size(LogicalSize::new(win_w, win_h))
+                        .with_min_inner_size(LogicalSize::new(base_w, base_h))
                         .with_enabled_buttons(window_buttons),
                 )
                 .unwrap(),
@@ -382,6 +436,11 @@ impl winit::application::ApplicationHandler for App {
                             if let Some(pp) = self.post_processor.as_mut() {
                                 pp.resize(pixels.device(), pixels.queue(), size.width, size.height);
                             }
+                        }
+
+                        // Mark resize timestamp for deferred aspect-ratio snap
+                        if !self.is_fullscreen {
+                            self.last_resize_time = Some(Instant::now());
                         }
 
                         if let Some(window) = &self.window {

@@ -191,6 +191,10 @@ impl Iwm {
     /// Update drive audio synthesis (call once per frame)
     pub fn update_audio(&mut self) {
         self.drive_audio.update(self.audio_cycle);
+        // Tick down 3.5" drive activity indicators
+        for floppy in &mut self.smartport.floppies {
+            floppy.tick_activity();
+        }
     }
 
     /// Reset IWM chip state as if the hardware reset line was asserted.
@@ -350,10 +354,13 @@ impl Iwm {
     }
 
     /// Drive UI status for rendering the status bar.
-    /// Returns (has_disk, is_active, is_write_protected) for the given drive (0 or 1).
+    /// Returns (has_disk, is_active, is_write_protected) for the given 5.25" drive (0 or 1).
     pub fn drive_status(&self, drive: usize) -> (bool, bool, bool) {
         let has_disk = self.drives[drive].has_disk();
-        let is_active = self.motor_on && self.di() == drive;
+        // When drive_select selects drive 2 and SmartPort devices are present,
+        // the IWM motor activity belongs to the SmartPort bus, not 5.25" drive B.
+        let is_active = self.motor_on && self.di() == drive
+            && !(drive == 1 && self.has_smartport_device());
         let wp = self.drives[drive].write_protect;
         (has_disk, is_active, wp)
     }
@@ -412,7 +419,18 @@ impl Iwm {
     /// Returns (has_disk, is_active, is_write_protected) for the given SmartPort floppy slot.
     pub fn drive_status_35(&self, drive: usize) -> (bool, bool, bool) {
         if drive < self.smartport.floppies.len() {
-            self.smartport.floppies[drive].drive_status()
+            let f = &self.smartport.floppies[drive];
+            let has_disk = f.has_disk();
+            // The firmware toggles the IWM motor on/off during SmartPort bus
+            // exchanges (drive_select=1 selects the SmartPort port).  Use that
+            // hardware signal combined with recent-access tracking so the icon
+            // blinks naturally like 5.25" drives.
+            let is_active = has_disk
+                && f.active_frames > 0
+                && self.motor_on
+                && self.drive_select;
+            let wp = f.device.write_protected;
+            (has_disk, is_active, wp)
         } else {
             (false, false, false)
         }

@@ -21,7 +21,7 @@ impl DriveIcons {
             let size = [rgba.width() as usize, rgba.height() as usize];
             let pixels = rgba.into_raw();
             let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
-            ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR)
+            ctx.load_texture(name, color_image, egui::TextureOptions::NEAREST)
         }
         Self {
             disk1: load_png(ctx, "disk1", include_bytes!("../../assets/disk1.png")),

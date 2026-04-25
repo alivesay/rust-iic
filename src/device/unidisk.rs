@@ -43,6 +43,8 @@ pub struct UniDisk35 {
     pub num_qtr_tracks: u16,
     // Disk-switched flag (cleared by OS after acknowledging swap)
     pub just_ejected: bool,
+    // Frame countdown for UI activity indicator (set on access, decremented each frame)
+    pub active_frames: u32,
 }
 
 impl UniDisk35 {
@@ -96,6 +98,7 @@ impl UniDisk35 {
             cur_qtr_track: 0,
             num_qtr_tracks: 0,
             just_ejected: false,
+            active_frames: 0,
         }
     }
 
@@ -113,13 +116,13 @@ impl UniDisk35 {
         self.device.has_disk()
     }
 
-    // UI-facing status triple: (has_disk, motor_on, write_protected)
-    pub fn drive_status(&self) -> (bool, bool, bool) {
-        (self.has_disk(), self.motor_on, self.device.write_protected)
-    }
-
     pub fn toggle_write_protect(&mut self) {
         self.device.write_protected = !self.device.write_protected;
+    }
+
+    /// Decrement the activity indicator counter (call once per frame).
+    pub fn tick_activity(&mut self) {
+        self.active_frames = self.active_frames.saturating_sub(1);
     }
 
     pub fn eject(&mut self) {
@@ -138,6 +141,10 @@ impl UniDisk35 {
     // Returns a `CommandResult` that the bus controller will encode into
     // a wire-protocol response packet.
     pub fn execute(&mut self, cmd: u8, decoded: &[u8]) -> CommandResult {
+        // Light up the drive activity indicator for a few frames
+        if matches!(cmd, 0x01 | 0x02 | 0x03) {
+            self.active_frames = 6;
+        }
         match cmd {
             0x00 => self.cmd_status(decoded),
             0x01 => self.cmd_read_block(decoded),

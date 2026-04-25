@@ -111,6 +111,14 @@ impl MMU {
         // v3 iic rom boundary $3fff
         self.rom[0].load_bytes(0, &rom.data[0..ROM_SIZE]);
         self.rom[1].load_bytes(0, &rom.data[ROM_SIZE..(ROM_SIZE << 1)]);
+
+        // // Patch "Check Disk Drive" infinite loop to boot to BASIC prompt instead.
+        // // At $C55D the ROM has BRA $C55D (80 FE) which hangs forever when no disk is inserted.
+        // // Replace with JMP $E000 (4C 00 E0) to drop into Applesoft BASIC.
+        // // ROM offset = $C55D - $C000 = $055D (bank 1)
+        // self.rom[0].write_byte(0x055D, 0x4C); // JMP
+        // self.rom[0].write_byte(0x055E, 0x00); // $E000 low
+        // self.rom[0].write_byte(0x055F, 0xE0); // $E000 high
     }
 
     pub fn read_main_byte(&self, addr: u16) -> u8 {
