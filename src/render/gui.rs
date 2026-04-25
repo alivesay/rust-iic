@@ -3,9 +3,10 @@ pub struct DriveStatusInfo {
     pub has_disk: bool,
     pub is_active: bool,
     pub is_write_protected: bool,
+    pub filename: Option<String>,
 }
 
-/// Toolbar drive icon textures, loaded once from embedded PNGs.
+// Toolbar drive icon textures
 pub struct DriveIcons {
     pub disk1: egui::TextureHandle,
     pub disk2: egui::TextureHandle,
@@ -118,16 +119,11 @@ pub fn render_toolbar_ui(
 
                 // Pause/Run button
                 let pause_text = if paused { "\u{25B6}" } else { "\u{23F8}" };
-                let pause_color = if paused {
-                    egui::Color32::from_rgb(100, 255, 100)
-                } else {
-                    egui::Color32::from_rgb(255, 200, 100)
-                };
                 if ui
                     .add(
                         egui::Button::new(
                             egui::RichText::new(pause_text)
-                                .color(pause_color)
+                                .color(egui::Color32::WHITE)
                                 .size(16.0),
                         )
                         .min_size(egui::vec2(32.0, 32.0)),
@@ -142,7 +138,7 @@ pub fn render_toolbar_ui(
                     .add(
                         egui::Button::new(
                             egui::RichText::new("\u{21BA}")
-                                .color(egui::Color32::from_rgb(200, 200, 200))
+                                .color(egui::Color32::WHITE)
                                 .size(18.0),
                         )
                         .min_size(egui::vec2(32.0, 32.0)),
@@ -156,8 +152,8 @@ pub fn render_toolbar_ui(
                 if ui
                     .add(
                         egui::Button::new(
-                            egui::RichText::new("\u{23FB}")
-                                .color(egui::Color32::from_rgb(255, 100, 100))
+                            egui::RichText::new("\u{26A1}")
+                                .color(egui::Color32::WHITE)
                                 .size(18.0),
                         )
                         .min_size(egui::vec2(32.0, 32.0)),
@@ -169,14 +165,9 @@ pub fn render_toolbar_ui(
 
                 // 40/80 column toggle
                 let col_text = if col80 { "80" } else { "40" };
-                let col_color = if col80 {
-                    egui::Color32::from_rgb(100, 200, 100)
-                } else {
-                    egui::Color32::from_rgb(200, 200, 100)
-                };
                 if ui
                     .add(
-                        egui::Button::new(egui::RichText::new(col_text).color(col_color).size(14.0))
+                        egui::Button::new(egui::RichText::new(col_text).color(egui::Color32::WHITE).size(14.0))
                             .min_size(egui::vec2(32.0, 32.0)),
                     )
                     .clicked()
@@ -206,7 +197,10 @@ pub fn render_toolbar_ui(
                         let img = egui::Image::new(tex)
                             .fit_to_exact_size(egui::vec2(32.0, 32.0))
                             .tint(tint);
-                        let response = ui.add(egui::Button::image(img));
+                        let response = ui.add(
+                            egui::Button::image(img)
+                                .sense(egui::Sense::click()),
+                        );
 
                         if response.double_clicked() && drive.has_disk {
                             action.eject_disk = Some(i);
@@ -229,6 +223,12 @@ pub fn render_toolbar_ui(
                             ui.separator();
 
                             if drive.has_disk {
+                                if let Some(ref name) = drive.filename {
+                                    ui.label(
+                                        egui::RichText::new(name)
+                                            .color(egui::Color32::from_rgb(180, 220, 255)),
+                                    );
+                                }
                                 ui.label(format!(
                                     "Status: {}",
                                     if drive.is_active { "Active" } else { "Idle" }

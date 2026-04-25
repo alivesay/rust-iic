@@ -159,6 +159,43 @@ impl AudioMixer {
     }
 }
 
+pub struct DummyAudioMixer {
+    sample_rate: u32,
+}
+
+impl DummyAudioMixer {
+    pub fn new() -> (Self, AudioProducers) {
+        let sample_rate = 44100;
+        let buffer_size = sample_rate as usize / 10;
+
+        let speaker_ring = HeapRb::<f32>::new(buffer_size);
+        let (speaker_prod, _speaker_cons) = speaker_ring.split();
+
+        let mb1_ring = HeapRb::<f32>::new(buffer_size * 2);
+        let (mb1_prod, _mb1_cons) = mb1_ring.split();
+
+        let mb2_ring = HeapRb::<f32>::new(buffer_size * 2);
+        let (mb2_prod, _mb2_cons) = mb2_ring.split();
+
+        let drive_ring = HeapRb::<f32>::new(buffer_size);
+        let (drive_prod, _drive_cons) = drive_ring.split();
+
+        let mixer = DummyAudioMixer { sample_rate };
+        let producers = AudioProducers {
+            speaker: speaker_prod,
+            mockingboard1: mb1_prod,
+            mockingboard2: mb2_prod,
+            drive_audio: drive_prod,
+        };
+
+        (mixer, producers)
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+}
+
 /// Soft clipping to prevent harsh distortion when mixing
 #[inline(always)]
 fn soft_clip(x: f32) -> f32 {

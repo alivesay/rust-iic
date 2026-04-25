@@ -370,6 +370,33 @@ impl Iwm {
         self.drives[drive].write_protect = !self.drives[drive].write_protect;
     }
 
+    /// Get the disk image filename (not full path) for a 5.25" drive.
+    pub fn disk_filename(&self, drive: usize) -> Option<String> {
+        self.drives[drive].disk_path.as_ref().map(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.clone())
+        })
+    }
+
+    /// Get the disk image filename (not full path) for a 3.5" SmartPort floppy.
+    pub fn disk_filename_35(&self, drive: usize) -> Option<String> {
+        if drive < self.smartport.floppies.len() && self.smartport.floppies[drive].has_disk() {
+            let path = &self.smartport.floppies[drive].device.path;
+            if path.is_empty() {
+                None
+            } else {
+                Some(std::path::Path::new(path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone()))
+            }
+        } else {
+            None
+        }
+    }
+
     /// Eject the disk from the given drive.
     pub fn eject_disk(&mut self, drive: usize) {
         if self.drives[drive].dirty {

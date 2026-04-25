@@ -38,7 +38,7 @@ pub const MAX_BLOCKS: u32 = 65535;
 // SmartPort block device (hard drive image)
 pub struct SmartPortDevice {
     // Path to the image file
-    path: String,
+    pub path: String,
     // File handle (None if not loaded)
     file: Option<File>,
     // Byte offset to the start of block data (e.g. 64 for 2IMG header)

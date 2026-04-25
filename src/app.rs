@@ -703,19 +703,23 @@ impl App {
                         let drive_status: [DriveStatusInfo; 4] = [
                             {
                                 let (has_disk, is_active, wp) = self.cpu.bus.iou.iwm.drive_status(0);
-                                DriveStatusInfo { has_disk, is_active, is_write_protected: wp }
+                                let filename = self.cpu.bus.iou.iwm.disk_filename(0);
+                                DriveStatusInfo { has_disk, is_active, is_write_protected: wp, filename }
                             },
                             {
                                 let (has_disk, is_active, wp) = self.cpu.bus.iou.iwm.drive_status(1);
-                                DriveStatusInfo { has_disk, is_active, is_write_protected: wp }
+                                let filename = self.cpu.bus.iou.iwm.disk_filename(1);
+                                DriveStatusInfo { has_disk, is_active, is_write_protected: wp, filename }
                             },
                             {
                                 let (has_disk, is_active, wp) = self.cpu.bus.iou.iwm.drive_status_35(0);
-                                DriveStatusInfo { has_disk, is_active, is_write_protected: wp }
+                                let filename = self.cpu.bus.iou.iwm.disk_filename_35(0);
+                                DriveStatusInfo { has_disk, is_active, is_write_protected: wp, filename }
                             },
                             {
                                 let (has_disk, is_active, wp) = self.cpu.bus.iou.iwm.drive_status_35(1);
-                                DriveStatusInfo { has_disk, is_active, is_write_protected: wp }
+                                let filename = self.cpu.bus.iou.iwm.disk_filename_35(1);
+                                DriveStatusInfo { has_disk, is_active, is_write_protected: wp, filename }
                             },
                         ];
                         
@@ -768,24 +772,8 @@ impl App {
                             self.cpu.bus.iou.col80_switch = !self.cpu.bus.iou.col80_switch;
                         }
                         if let Some(drive) = toolbar_action.load_disk {
-                            let file = if drive < 2 {
-                                rfd::FileDialog::new()
-                                    .add_filter("WOZ Disk Image", &["woz"])
-                                    .pick_file()
-                            } else {
-                                rfd::FileDialog::new()
-                                    .add_filter("3.5\" Disk Image", &["po", "2mg", "2img"])
-                                    .pick_file()
-                            };
-                            if let Some(path) = file {
-                                let _ = match drive {
-                                    0 => self.cpu.bus.iou.iwm.load_disk(&path),
-                                    1 => self.cpu.bus.iou.iwm.load_disk2(&path),
-                                    2 => self.cpu.bus.iou.iwm.load_disk35(&path),
-                                    3 => self.cpu.bus.iou.iwm.load_disk35_drive(1, &path),
-                                    _ => Ok(()),
-                                };
-                            }
+                            // Defer single-click so double-click (eject) can override it
+                            self.last_drive_click = Some((drive, Instant::now()));
                         }
                         if let Some(drive) = toolbar_action.toggle_write_protect {
                             if drive < 2 {
@@ -795,6 +783,10 @@ impl App {
                             }
                         }
                         if let Some(drive) = toolbar_action.eject_disk {
+                            // Cancel any pending single-click for this drive
+                            if let Some((d, _)) = self.last_drive_click {
+                                if d == drive { self.last_drive_click = None; }
+                            }
                             if drive < 2 {
                                 self.cpu.bus.iou.iwm.eject_disk(drive);
                             } else {
