@@ -2,6 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 use a2kit::img::DiskImage;
 
+use crate::timing;
 use super::drive_audio::{DriveAudio, DriveEvent, AudioProducer};
 use super::smartport::SmartPort;
 
@@ -396,32 +397,38 @@ impl Iwm {
         self.load_disk_drive(1, path)
     }
     
-    /// Load a 3.5" disk image (.po, .2mg) into drive 3 (first SmartPort/3.5" drive)
+    /// Load a 3.5" disk image (.po, .2mg) into a SmartPort floppy slot
     pub fn load_disk35<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        self.load_disk35_drive(0, path)
+    }
+
+    /// Load a 3.5" disk image into a specific SmartPort floppy slot (0 or 1)
+    pub fn load_disk35_drive<P: AsRef<Path>>(&mut self, slot: usize, path: P) -> anyhow::Result<()> {
         let path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?;
-        eprintln!("DISK35 LOADER: mode=smartport path={}", path_str);
-        self.smartport.load_disk(path_str).map_err(|e| anyhow::anyhow!(e))
+        eprintln!("DISK35 LOADER: slot={} mode=smartport path={}", slot, path_str);
+        self.smartport.load_floppy(slot, path_str).map_err(|e| anyhow::anyhow!(e))
     }
     
-    /// Returns (has_disk, is_active, is_write_protected) for the given 3.5" drive (0 or 1).
+    /// Returns (has_disk, is_active, is_write_protected) for the given SmartPort floppy slot.
     pub fn drive_status_35(&self, drive: usize) -> (bool, bool, bool) {
-        match drive {
-            0 => self.smartport.floppy.drive_status(),
-            _ => (false, false, false),
+        if drive < self.smartport.floppies.len() {
+            self.smartport.floppies[drive].drive_status()
+        } else {
+            (false, false, false)
         }
     }
     
-    /// Toggle write protect for the given 3.5" drive.
+    /// Toggle write protect for the given SmartPort floppy slot.
     pub fn toggle_write_protect_35(&mut self, drive: usize) {
-        if drive == 0 {
-            self.smartport.floppy.toggle_write_protect();
+        if drive < self.smartport.floppies.len() {
+            self.smartport.floppies[drive].toggle_write_protect();
         }
     }
 
-    /// Eject the disk from the given 3.5" drive.
+    /// Eject the disk from the given SmartPort floppy slot.
     pub fn eject_disk_35(&mut self, drive: usize) {
-        if drive == 0 {
-            self.smartport.floppy.eject();
+        if drive < self.smartport.floppies.len() {
+            self.smartport.floppies[drive].eject();
         }
     }
 
@@ -544,7 +551,7 @@ impl Iwm {
             } else {
                 // Mode bit 2 clear (default): start ~1 second motor-off timer
                 self.motor_off_pending = true;
-                self.motor_off_timer = 1_023_000; // ~1 second at 1.023 MHz
+                self.motor_off_timer = timing::CYCLES_PER_SECOND as u64; // ~1 second
                 if self.debug { println!("IWM MOTOR: ON → OFF pending (drive={}, 1s timer)", self.di() + 1); }
             }
         }
@@ -739,7 +746,7 @@ impl Iwm {
 
         // BIT-LEVEL PROCESSING
         // Process bits continuously as cycles elapse (4 cycles = 1 bit for 5.25" drives)
-        // IWM spec: 4µs per bit in slow mode = ~4 CPU cycles at 1.023 MHz
+        // IWM spec: 4 CPU cycles per bit ≈ 3.92µs at effective clock
         let cycles_per_bit: u64 = 4;
         
         let track_bits = self.drives[d].track_bit_count;

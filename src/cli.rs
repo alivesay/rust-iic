@@ -87,7 +87,7 @@ pub struct Args {
     pub fast_disk: bool,
 
     /// Display shader: none, crt, lcd
-    #[arg(long, value_enum, default_value_t = ShaderType::None)]
+    #[arg(long, value_enum, default_value_t = ShaderType::Crt)]
     pub shader: ShaderType,
 
     /// Connect modem port (SCC Ch A) to a TCP host, e.g. --serial bbs.example.com:23
@@ -125,4 +125,8 @@ pub struct Args {
     /// Start in fullscreen mode (same as Cmd+Enter on macOS)
     #[arg(long)]
     pub fullscreen: bool,
+
+    /// Enable paddle input via host gamepad
+    #[arg(long)]
+    pub paddle: bool,
 }

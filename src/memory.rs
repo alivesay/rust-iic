@@ -1,19 +1,12 @@
-#[allow(dead_code)]
 pub struct Memory {
-    data: Vec<u8>,
-    id: String,
+    data: Vec<u8>
 }
 
 impl Memory {
     pub fn new(size: usize, id: String) -> Self {
         println!("memory {:>8} {:>8} {} KB", id, "ONLINE", size);
         
-        let data = vec![0x00; size];
-
-        Self {
-            data,
-            id,
-        }
+        Self { data: vec![0x00; size] }
     }
 
     pub fn randomize_power_on(&mut self) {
@@ -22,11 +15,6 @@ impl Memory {
             let noise = fastrand::u8(..) & fastrand::u8(..) & fastrand::u8(..);
             *byte = base ^ noise;
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.data.fill(0x00);
     }
 
     pub fn read_byte(&self, addr: u16) -> u8 {
@@ -50,25 +38,6 @@ impl Memory {
         //     self.id, addr, value, self.id
         // );
         0x00
-    }
-
-    #[allow(dead_code)]
-    pub fn dump_range(&self, range: std::ops::RangeInclusive<u16>) {
-        use crate::util::hexdump;
-
-        let start = *range.start() as usize;
-        let end = *range.end() as usize;
-        let length = (end - start) + 1;
-
-        if start >= self.data.len() {
-            println!("DEBUG: Start out of range, skipping hexdump!");
-            return;
-        }
-
-        let slice_end = (start + length).min(self.data.len());
-        let slice = &self.data[start..slice_end];
-
-        hexdump(slice, Some(start as u16), Some(slice.len()));
     }
 
     pub fn load_bytes(&mut self, offset: u16, bytes: &[u8]) {

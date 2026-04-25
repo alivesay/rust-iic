@@ -4,7 +4,9 @@ use ringbuf::wrap::caching::Caching;
 
 pub type AudioProducer = Caching<Arc<HeapRb<f32>>, true, false>;
 
-const CYCLES_PER_SECOND: f64 = 1_023_000.0;
+use crate::timing;
+
+const CYCLES_PER_SECOND: f64 = timing::CYCLES_PER_SECOND;
 
 // Runtime-adjustable drive audio synthesis parameters
 #[derive(Clone, Debug)]

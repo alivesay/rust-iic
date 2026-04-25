@@ -1,36 +1,30 @@
-/// Emulation of the Zilog 8530 SCC (Serial Communications Controller)
-///
-/// The Apple IIc uses a single Z8530 SCC for both serial ports:
-///   - Channel A = Modem port (Slot 1 equivalent)
-///   - Channel B = Printer port (Slot 2 equivalent)
-///
-/// Apple IIc address mapping:
-///   $C038 = Channel B Command/Status (Printer)
-///   $C039 = Channel A Command/Status (Modem)
-///   $C03A = Channel B Data (Printer)
-///   $C03B = Channel A Data (Modem)
-///
-/// Slot-based mirrors (for software using slot I/O):
-///   $C098–$C09F = Channel A (Modem, Slot 1)
-///   $C0A8–$C0AF = Channel B (Printer, Slot 2)
-///
-/// The SCC uses a register pointer mechanism:
-///   1. Write register number to command port (selects WR/RR n)
-///   2. Next read/write on command port accesses that register
-///   3. Pointer auto-resets to 0 after access
+// Emulation of the Zilog 8530 SCC (Serial Communications Controller)
+//
+// The Apple IIc uses a single Z8530 SCC for both serial ports:
+//   - Channel A = Modem port (Slot 1 equivalent)
+//   - Channel B = Printer port (Slot 2 equivalent)
+//
+// Apple IIc address mapping:
+//   $C038 = Channel B Command/Status (Printer)
+//   $C039 = Channel A Command/Status (Modem)
+//   $C03A = Channel B Data (Printer)
+//   $C03B = Channel A Data (Modem)
+//
+// Slot-based mirrors (for software using slot I/O):
+//   $C098–$C09F = Channel A (Modem, Slot 1)
+//   $C0A8–$C0AF = Channel B (Printer, Slot 2)
+//
+// The SCC uses a register pointer mechanism:
+//   1. Write register number to command port (selects WR/RR n)
+//   2. Next read/write on command port accesses that register
+//   3. Pointer auto-resets to 0 after access
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-// ─── SCC Channel ──────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ModemState {
-    Command,
-    Online,
-    Escape,
-}
+use crate::timing;
+use super::modem::{HayesModem, ModemAction, ModemState};
 
 pub struct SccChannel {
     pub id: &'static str,
@@ -73,13 +67,7 @@ pub struct SccChannel {
     poll_interval: u64,
 
     // Virtual Hayes modem
-    pub modem_enabled: bool,
-    modem_state: ModemState,
-    cmd_buffer: String,
-    echo: bool,
-    verbose: bool,
-    plus_count: u8,
-    last_data_cycle: u64,
+    pub modem: HayesModem,
 }
 
 impl SccChannel {
@@ -103,14 +91,8 @@ impl SccChannel {
             acia_command: 0,
             acia_control: 0,
             poll_countdown: 0,
-            poll_interval: 1023,
-            modem_enabled: false,
-            modem_state: ModemState::Command,
-            cmd_buffer: String::new(),
-            echo: true,
-            verbose: true,
-            plus_count: 0,
-            last_data_cycle: 0,
+            poll_interval: (timing::CYCLES_PER_SECOND / 1000.0) as u64, // ~1ms
+            modem: HayesModem::new(),
         }
     }
 
@@ -125,14 +107,11 @@ impl SccChannel {
         self.ext_ip = false;
         self.acia_command = 0;
         self.acia_control = 0;
-        // Preserve TCP connection and modem state across reset
     }
 
-    // ─── Register Access ───────────────────────────────────────────
-
-    /// Return ACIA-compatible status register (6551 format)
-    /// Apple IIc firmware presents ACIA interface at slot I/O addresses
-    /// even though actual hardware is SCC
+    // Return ACIA-compatible status register (6551 format)
+    // Apple IIc firmware presents ACIA interface at slot I/O addresses
+    // even though actual hardware is SCC
     fn acia_status(&self) -> u8 {
         let mut status = 0u8;
         
@@ -154,7 +133,7 @@ impl SccChannel {
         
         // Bit 6: DSR (Data Set Ready) - ACTIVE LOW (0 = ready)
         // Report ready when connected, modem enabled, or loopback mode
-        if !self.connected && !self.modem_enabled && !self.loopback {
+        if !self.connected && !self.modem.enabled && !self.loopback {
             status |= 0x40;  // Not ready
         }
         
@@ -166,7 +145,7 @@ impl SccChannel {
         status
     }
 
-    /// Read the command/status port
+    // Read the command/status port
     fn read_command(&mut self) -> u8 {
         let reg = self.reg_ptr;
         self.reg_ptr = 0; // Auto-reset pointer
@@ -225,7 +204,7 @@ impl SccChannel {
         }
     }
 
-    /// Write the command/status port
+    // Write the command/status port
     fn write_command(&mut self, value: u8) {
         let reg = self.reg_ptr;
         self.reg_ptr = 0; // Auto-reset pointer
@@ -392,7 +371,7 @@ impl SccChannel {
         }
     }
 
-    /// Read the data port
+    // Read the data port
     fn read_data(&mut self) -> u8 {
         if let Some(byte) = self.rx_buffer.pop_front() {
             // Clear Rx interrupt if buffer now empty
@@ -409,8 +388,8 @@ impl SccChannel {
         }
     }
 
-    /// Write the data port (transmit)
-    /// Returns the byte if it should be forwarded for cross-channel loopback
+    // Write the data port (transmit)
+    // Returns the byte if it should be forwarded for cross-channel loopback
     fn write_data(&mut self, value: u8) -> Option<u8> {
         if self.debug {
             println!("SCC[{}]: write data {:#04X} '{}'", self.id, value,
@@ -421,8 +400,10 @@ impl SccChannel {
             // Internal loopback: echo to own receive buffer (simulates loopback plug)
             self.receive_byte(value);
             false
-        } else if self.modem_enabled {
-            self.modem_transmit(value);
+        } else if self.modem.enabled {
+            let action = self.modem.transmit(value, self.stream.as_mut());
+            self.drain_modem_rx();
+            self.handle_modem_action(action);
             false
         } else if let Some(stream) = self.stream.as_mut() {
             let _ = stream.write_all(&[value]);
@@ -442,8 +423,6 @@ impl SccChannel {
         if forward_for_crossloop { Some(value) } else { None }
     }
 
-    // ─── TCP ───────────────────────────────────────────────────────
-
     pub fn tcp_connect(&mut self, addr: &str) -> Result<(), std::io::Error> {
         let stream = TcpStream::connect(addr)?;
         stream.set_nonblocking(true)?;
@@ -460,8 +439,8 @@ impl SccChannel {
         }
         self.connected = false;
         self.dcd = false;
-        if self.modem_enabled {
-            self.modem_state = ModemState::Command;
+        if self.modem.enabled {
+            self.modem.state = ModemState::Command;
         }
         // Trigger external/status interrupt if DCD IE enabled
         if self.wr[15] & 0x08 != 0 {
@@ -470,13 +449,11 @@ impl SccChannel {
         println!("SCC[{}]: disconnected", self.id);
     }
 
-    /// Tick — polls TCP socket for incoming data
+    // Tick — polls TCP socket for incoming data
     fn tick(&mut self, cycles: u64) {
         // Check +++ escape sequence
-        if self.modem_enabled && self.plus_count >= 3 && self.modem_state == ModemState::Online {
-            self.plus_count = 0;
-            self.modem_state = ModemState::Escape;
-            self.send_response("OK");
+        if self.modem.check_escape() {
+            self.drain_modem_rx();
             println!("SCC[{}]: +++ escape to command mode", self.id);
             return;
         }
@@ -520,13 +497,14 @@ impl SccChannel {
 
         if disconnect {
             self.tcp_disconnect();
-            if self.modem_enabled {
-                self.send_response("NO CARRIER");
+            if self.modem.enabled {
+                self.modem.on_disconnected();
+                self.drain_modem_rx();
             }
         }
     }
 
-    /// Push a byte into the receive buffer
+    // Push a byte into the receive buffer
     pub fn receive_byte(&mut self, byte: u8) {
         if self.rx_buffer.len() >= 3 {
             // Real SCC has 3-byte FIFO
@@ -541,207 +519,54 @@ impl SccChannel {
         }
     }
 
-    /// Check if any interrupt is pending for this channel
+    // Check if any interrupt is pending for this channel
     fn irq_pending(&self) -> bool {
         self.rx_ip || self.tx_ip || self.ext_ip
     }
 
-    // ─── Virtual Hayes Modem ───────────────────────────────────────
-
-    fn modem_transmit(&mut self, byte: u8) {
-        match self.modem_state {
-            ModemState::Online => {
-                if byte == b'+' {
-                    self.plus_count += 1;
-                    if self.plus_count >= 3 {
-                        return;
-                    }
-                } else {
-                    if self.plus_count > 0 {
-                        let count = self.plus_count;
-                        self.plus_count = 0;
-                        for _ in 0..count {
-                            if let Some(stream) = self.stream.as_mut() {
-                                let _ = stream.write_all(&[b'+']);
-                            }
-                        }
-                    }
-                    self.last_data_cycle = 0;
-                }
-
-                if self.plus_count == 0 {
-                    if let Some(stream) = self.stream.as_mut() {
-                        let _ = stream.write_all(&[byte]);
-                    }
-                }
-            }
-
-            ModemState::Command | ModemState::Escape => {
-                if self.echo {
-                    self.receive_byte(byte);
-                }
-
-                if byte == b'\r' || byte == b'\n' {
-                    let cmd = self.cmd_buffer.trim().to_uppercase();
-                    self.cmd_buffer.clear();
-                    if !cmd.is_empty() {
-                        self.process_at_command(&cmd);
-                    }
-                } else if byte == 0x08 || byte == 0x7F {
-                    self.cmd_buffer.pop();
-                } else if byte >= 0x20 {
-                    self.cmd_buffer.push(byte as char);
-                }
-            }
-        }
-    }
-
-    fn process_at_command(&mut self, cmd: &str) {
-        if !cmd.starts_with("AT") {
-            self.send_response("ERROR");
-            return;
-        }
-
-        let args = &cmd[2..];
-        if args.is_empty() {
-            self.send_response("OK");
-            return;
-        }
-
-        let mut chars = args.chars().peekable();
-        while let Some(c) = chars.next() {
-            match c {
-                'I' => {
-                    // ATI - modem identification
-                    if let Some(&next) = chars.peek() {
-                        if next.is_ascii_digit() { chars.next(); }
-                    }
-                    self.send_response("rust-iic Virtual Hayes Modem v1.0");
-                    return;
-                }
-                'D' => {
-                    if let Some(&next) = chars.peek() {
-                        if next == 'T' || next == 'P' { chars.next(); }
-                    }
-                    let addr: String = chars.collect();
-                    self.modem_dial(&addr);
-                    return;
-                }
-                'H' => {
-                    if let Some(&next) = chars.peek() {
-                        if next == '0' { chars.next(); }
-                    }
-                    if self.connected { self.tcp_disconnect(); }
-                    self.send_response("OK");
-                }
-                'O' => {
-                    if let Some(&next) = chars.peek() {
-                        if next == '0' { chars.next(); }
-                    }
-                    if self.connected {
-                        self.modem_state = ModemState::Online;
-                        self.plus_count = 0;
-                        self.send_response("CONNECT");
-                        return;
-                    } else {
-                        self.send_response("NO CARRIER");
-                        return;
-                    }
-                }
-                'E' => {
-                    if let Some(&next) = chars.peek() {
-                        if next == '0' { self.echo = false; chars.next(); }
-                        else if next == '1' { self.echo = true; chars.next(); }
-                    } else {
-                        self.echo = true;
-                    }
-                }
-                'V' => {
-                    if let Some(&next) = chars.peek() {
-                        if next == '0' { self.verbose = false; chars.next(); }
-                        else if next == '1' { self.verbose = true; chars.next(); }
-                    } else {
-                        self.verbose = true;
-                    }
-                }
-                'Z' => {
-                    if self.connected { self.tcp_disconnect(); }
-                    self.echo = true;
-                    self.verbose = true;
-                    self.cmd_buffer.clear();
-                    self.send_response("OK");
-                    return;
-                }
-                'S' => {
-                    while let Some(&next) = chars.peek() {
-                        if next.is_ascii_digit() || next == '=' || next == '?' {
-                            chars.next();
-                        } else { break; }
-                    }
-                }
-                '&' => {
-                    chars.next();
-                    if let Some(&next) = chars.peek() {
-                        if next.is_ascii_digit() { chars.next(); }
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.send_response("OK");
-    }
-
-    fn modem_dial(&mut self, addr: &str) {
-        let addr = addr.trim();
-        if addr.is_empty() {
-            self.send_response("ERROR");
-            return;
-        }
-        if self.connected { self.tcp_disconnect(); }
-
-        let addr = if addr.contains(':') {
-            addr.to_lowercase()
-        } else {
-            format!("{}:23", addr.to_lowercase())
-        };
-
-        match self.tcp_connect(&addr) {
-            Ok(()) => {
-                self.modem_state = ModemState::Online;
-                self.plus_count = 0;
-                self.send_response("CONNECT 2400");
-            }
-            Err(_) => {
-                self.modem_state = ModemState::Command;
-                self.send_response("NO CARRIER");
-            }
-        }
-    }
-
-    fn send_response(&mut self, msg: &str) {
-        let response = if self.verbose {
-            format!("\r\n{}\r\n", msg)
-        } else {
-            let code = match msg {
-                "OK" => "0",
-                s if s.starts_with("CONNECT") => "1",
-                "RING" => "2",
-                "NO CARRIER" => "3",
-                "ERROR" => "4",
-                "NO DIALTONE" => "6",
-                "BUSY" => "7",
-                "NO ANSWER" => "8",
-                _ => "4",
-            };
-            format!("{}\r", code)
-        };
-        for byte in response.bytes() {
+    // Drain any bytes the modem queued for the receive buffer.
+    fn drain_modem_rx(&mut self) {
+        let bytes: Vec<u8> = self.modem.rx_out.drain(..).collect();
+        for byte in bytes {
             self.receive_byte(byte);
         }
     }
-}
 
-// ─── SCC (Dual-Channel Controller) ───────────────────────────────────
+    // Act on a ModemAction returned by the modem.
+    fn handle_modem_action(&mut self, action: ModemAction) {
+        match action {
+            ModemAction::None => {}
+            ModemAction::Dial(addr) => {
+                if self.connected { self.tcp_disconnect(); }
+                let addr = if addr.contains(':') {
+                    addr.to_lowercase()
+                } else {
+                    format!("{}:23", addr.to_lowercase())
+                };
+                match self.tcp_connect(&addr) {
+                    Ok(()) => self.modem.on_connected(),
+                    Err(_) => self.modem.on_connect_failed(),
+                }
+                self.drain_modem_rx();
+            }
+            ModemAction::Hangup => {
+                if self.connected { self.tcp_disconnect(); }
+                self.modem.on_hangup();
+                self.drain_modem_rx();
+            }
+            ModemAction::GoOnline => {
+                if self.connected {
+                    self.modem.state = ModemState::Online;
+                    self.modem.plus_count = 0;
+                    self.modem.send_response("CONNECT");
+                } else {
+                    self.modem.send_response("NO CARRIER");
+                }
+                self.drain_modem_rx();
+            }
+        }
+    }
+}
 
 pub struct Scc {
     pub ch_a: SccChannel,  // Channel A = Modem port
@@ -763,8 +588,8 @@ impl Scc {
         self.ch_b.reset();
     }
 
-    /// Access SCC via Apple IIc motherboard addresses ($C038–$C03B)
-    /// addr is the raw address; returns read value for reads
+    // Access SCC via Apple IIc motherboard addresses ($C038–$C03B)
+    // addr is the raw address; returns read value for reads
     pub fn read(&mut self, addr: u16) -> u8 {
         match addr & 0x03 {
             0x00 => self.ch_b.read_command(), // $C038: Ch B Command/Status
@@ -835,14 +660,14 @@ impl Scc {
         }
     }
 
-    /// Access via slot I/O addresses
-    /// Slot 1 ($C098–$C09F) = Channel B (printer port)
-    /// Slot 2 ($C0A8–$C0AF) = Channel A (modem port)
-    /// Apple IIc presents ACIA-compatible interface at these addresses:
-    ///   offset 0 ($C098/$C0A8) = Data register (read/write)
-    ///   offset 1 ($C099/$C0A9) = Status register (read-only)
-    ///   offset 2 ($C09A/$C0AA) = Command register (read/write)
-    ///   offset 3 ($C09B/$C0AB) = Control register (read/write)
+    // Access via slot I/O addresses
+    // Slot 1 ($C098–$C09F) = Channel B (printer port)
+    // Slot 2 ($C0A8–$C0AF) = Channel A (modem port)
+    // Apple IIc presents ACIA-compatible interface at these addresses:
+    //   offset 0 ($C098/$C0A8) = Data register (read/write)
+    //   offset 1 ($C099/$C0A9) = Status register (read-only)
+    //   offset 2 ($C09A/$C0AA) = Command register (read/write)
+    //   offset 3 ($C09B/$C0AB) = Control register (read/write)
     pub fn slot_read(&mut self, addr: u16) -> u8 {
         match addr {
             // Slot 1 = Channel B (printer port)
@@ -907,13 +732,13 @@ impl Scc {
         }
     }
 
-    /// Tick both channels
+    // Tick both channels
     pub fn tick(&mut self, cycles: u64) {
         self.ch_a.tick(cycles);
         self.ch_b.tick(cycles);
     }
 
-    /// Check if either channel has a pending interrupt
+    // Check if either channel has a pending interrupt
     pub fn irq_pending(&self) -> bool {
         // Only generate IRQ if Master Interrupt Enable is set (WR9 bit 3)
         let mie = self.ch_a.wr[9] & 0x08 != 0;

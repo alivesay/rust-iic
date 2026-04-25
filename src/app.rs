@@ -22,7 +22,7 @@ use crate::device::drive_audio::DriveAudioParams;
 use crate::monitor::Monitor;
 use crate::render::{
     blit_direct, blit_nearest, CrtRenderer,
-    DriveStatusInfo, LcdRenderer, PostProcessor, ToolbarAction, render_toolbar_ui,
+    DriveIcons, DriveStatusInfo, LcdRenderer, PostProcessor, ToolbarAction, render_toolbar_ui,
 };
 
 pub struct App {
@@ -52,6 +52,8 @@ pub struct App {
     pub show_drive_audio_ui: bool,
     pub drive_audio_params: DriveAudioParams,
     pub cpu_monitor: CpuMonitor,
+    pub drive_icons: Option<DriveIcons>,
+    pub paused: bool,
 }
 
 impl App {
@@ -85,6 +87,8 @@ impl App {
             show_drive_audio_ui: false,
             drive_audio_params: DriveAudioParams::default(),
             cpu_monitor: CpuMonitor::new(),
+            drive_icons: None,
+            paused: false,
         }
     }
 
@@ -263,9 +267,9 @@ impl winit::application::ApplicationHandler for App {
                     pixels.set_scaling_mode(ScalingMode::Fill);
                 }
                 pixels.clear_color(wgpu::Color::BLACK);
-                if self.shader_type != ShaderType::None {
-                    let surface_format = pixels.render_texture_format();
+                let surface_format = pixels.render_texture_format();
 
+                if self.shader_type != ShaderType::None {
                     self.post_processor = match self.shader_type {
                         ShaderType::Crt => Some(Box::new(CrtRenderer::new(
                             pixels.device(),
@@ -292,26 +296,27 @@ impl winit::application::ApplicationHandler for App {
                         ShaderType::None => None,
                     };
 
-                    let egui_state = egui_winit::State::new(
-                        self.egui_ctx.clone(),
-                        egui::ViewportId::ROOT,
-                        window.as_ref(),
-                        Some(window.scale_factor() as f32),
-                        None,
-                        Some(pixels.device().limits().max_texture_dimension_2d as usize),
-                    );
-                    let egui_renderer = egui_wgpu::Renderer::new(
-                        pixels.device(),
-                        surface_format,
-                        Default::default(),
-                    );
-                    self.egui_state = Some(egui_state);
-                    self.egui_renderer = Some(egui_renderer);
-
                     if let Some(pp) = &mut self.post_processor {
                         pp.resize(pixels.device(), pixels.queue(), surface_w, surface_h);
                     }
                 }
+
+                let egui_state = egui_winit::State::new(
+                    self.egui_ctx.clone(),
+                    egui::ViewportId::ROOT,
+                    window.as_ref(),
+                    Some(window.scale_factor() as f32),
+                    None,
+                    Some(pixels.device().limits().max_texture_dimension_2d as usize),
+                );
+                let egui_renderer = egui_wgpu::Renderer::new(
+                    pixels.device(),
+                    surface_format,
+                    Default::default(),
+                );
+                self.egui_state = Some(egui_state);
+                self.egui_renderer = Some(egui_renderer);
+
                 window.request_redraw();
                 Some(pixels)
             }
@@ -447,7 +452,7 @@ impl App {
                         0 => self.cpu.bus.iou.iwm.load_disk(&path),
                         1 => self.cpu.bus.iou.iwm.load_disk2(&path),
                         2 => self.cpu.bus.iou.iwm.load_disk35(&path),
-                        3 => Ok(()),  // Only one 3.5" drive supported
+                        3 => self.cpu.bus.iou.iwm.load_disk35_drive(1, &path),
                         _ => Ok(()),
                     };
                     if let Err(e) = result {
@@ -677,7 +682,10 @@ impl App {
                                 self.cpu_monitor.render(ctx, &cpu_state, &memory_reader);
                             }
                             if self.show_toolbar {
-                                toolbar_action = render_toolbar_ui(ctx, &drive_status, col80);
+                                if self.drive_icons.is_none() {
+                                    self.drive_icons = Some(DriveIcons::load(ctx));
+                                }
+                                toolbar_action = render_toolbar_ui(ctx, &drive_status, col80, self.paused, self.drive_icons.as_ref().unwrap());
                             }
                         });
                         egui_state.handle_platform_output(window.as_ref(), output.platform_output.clone());
@@ -687,6 +695,9 @@ impl App {
                             self.cpu.bus.iou.iwm.drive_audio.apply_params();
                         }
                         
+                        if toolbar_action.toggle_pause {
+                            self.paused = !self.paused;
+                        }
                         if toolbar_action.reset {
                             self.cpu.reset();
                         }
@@ -712,7 +723,7 @@ impl App {
                                     0 => self.cpu.bus.iou.iwm.load_disk(&path),
                                     1 => self.cpu.bus.iou.iwm.load_disk2(&path),
                                     2 => self.cpu.bus.iou.iwm.load_disk35(&path),
-                                    3 => Ok(()),
+                                    3 => self.cpu.bus.iou.iwm.load_disk35_drive(1, &path),
                                     _ => Ok(()),
                                 };
                             }

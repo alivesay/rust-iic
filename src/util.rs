@@ -55,37 +55,6 @@ pub fn mem_state_to_string(mem_state: u8) -> String {
     )
 }
 
-#[inline]
-#[allow(dead_code)]
-pub fn ior(val: u8) -> u8 {
-    if val != 0 {
-        0x80
-    } else {
-        0x00
-    }
-}
-
-#[allow(dead_code)]
-pub fn ascii_to_apple_iic(ch: u8, is_altchar: bool) -> u8 {
-    match ch {
-        b'A'..=b'O' => (ch - b'A') + 0xC1, // 'A' (0x41) → 0xC1, 'B' (0x42) → 0xC2
-        b'P'..=b'_' => (ch - b'P') + 0xD0, // 'P' (0x50) → 0xD0, includes [\]^_
-
-        b'0'..=b'9' => (ch - b'0') + 0xB0,
-
-        b' ' => 0x20,
-
-        b'!'..=b'/' => (ch - b'!') + 0xA1, //  !"#$%&'()*+,-./ → 0xA1-0xAF
-        b':'..=b'@' => (ch - b':') + 0xBA, //  :;<=>?@ → 0xBA-0xBF
-
-        b'a'..=b'z' => (ch - 32 - b'A') + 0xC1, // Convert to uppercase VRAM range
-
-        b'`'..=b'~' if is_altchar => (ch - b'`') + 0x40, // MouseText uses 0x40-0x5F
-
-        _ => 0xA0,
-    }
-}
-
 pub fn apple_iic_font_index(vram_code: u8, is_altchar: bool) -> (usize, bool) {
     // Returns (clean_font_index, invert_flag)
     // Clean Font Layout (0-127):
