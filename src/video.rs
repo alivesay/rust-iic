@@ -8,23 +8,24 @@ const MONO_BLACK_RGBA: [u8; 4] = [15, 23, 23, 255];
 
 /// NTSC 16-color palette
 /// Source: R. Munafo (mrob.com/pub/xapple2/colors.html)
+/// Lifted ~6% to compensate for modern LCD gamma vs CRT phosphor response.
 #[rustfmt::skip]
 const NTSC_PALETTE: [[u8; 4]; 16] = [
     [  0,   0,   0, 255], // 0x0: Black
-    [227,  30,  96, 255], // 0x1: Deep Red       (phase  90°, chroma 60)
-    [ 96,  78, 189, 255], // 0x2: Dark Blue      (phase   0°, chroma 60)
-    [255,  68, 253, 255], // 0x3: Purple/Violet  (phase  45°, chroma 100) HiRes: Violet
-    [  0, 163,  96, 255], // 0x4: Dark Green     (phase 270°, chroma 60)
-    [156, 156, 156, 255], // 0x5: Gray 1
-    [  0, 180, 255, 255], // 0x6: Medium Blue    (phase 315°, chroma 100) HiRes: Blue
-    [208, 195, 255, 255], // 0x7: Light Blue     (phase   0°, chroma 60)
-    [ 96, 114,   3, 255], // 0x8: Brown          (phase 180°, chroma 60)
-    [255, 106,  60, 255], // 0x9: Orange         (phase 135°, chroma 100) HiRes: Orange
-    [156, 156, 156, 255], // 0xA: Gray 2
-    [255, 160, 208, 255], // 0xB: Pink           (phase  90°, chroma 60)
-    [ 20, 245,  60, 255], // 0xC: Light Green    (phase 225°, chroma 100) HiRes: Green
-    [210, 212,  26, 255], // 0xD: Yellow         (phase 180°, chroma 60)
-    [114, 255, 208, 255], // 0xE: Aqua           (phase 270°, chroma 60)
+    [240,  31, 101, 255], // 0x1: Deep Red       (phase  90°, chroma 60)
+    [101,  82, 200, 255], // 0x2: Dark Blue      (phase   0°, chroma 60)
+    [255,  72, 255, 255], // 0x3: Purple/Violet  (phase  45°, chroma 100) HiRes: Violet
+    [  0, 172, 101, 255], // 0x4: Dark Green     (phase 270°, chroma 60)
+    [165, 165, 165, 255], // 0x5: Gray 1
+    [  0, 190, 255, 255], // 0x6: Medium Blue    (phase 315°, chroma 100) HiRes: Blue
+    [220, 206, 255, 255], // 0x7: Light Blue     (phase   0°, chroma 60)
+    [101, 120,   3, 255], // 0x8: Brown          (phase 180°, chroma 60)
+    [255, 112,  63, 255], // 0x9: Orange         (phase 135°, chroma 100) HiRes: Orange
+    [165, 165, 165, 255], // 0xA: Gray 2
+    [255, 169, 220, 255], // 0xB: Pink           (phase  90°, chroma 60)
+    [ 21, 255,  63, 255], // 0xC: Light Green    (phase 225°, chroma 100) HiRes: Green
+    [222, 224,  27, 255], // 0xD: Yellow         (phase 180°, chroma 60)
+    [120, 255, 220, 255], // 0xE: Aqua           (phase 270°, chroma 60)
     [255, 255, 255, 255], // 0xF: White
 ];
 
@@ -32,23 +33,24 @@ const NTSC_PALETTE: [[u8; 4]; 16] = [
 /// The bit-to-nibble phase rotation means nibble values map to different colors
 /// than the LoRes palette: entries 2<-8, 3<-9, 6<-C, 7<-D are swapped.
 /// Source: mii_emu (buserror/mii_emu) DHIRES CLUT
+/// Lifted ~6% to compensate for modern LCD gamma vs CRT phosphor response.
 #[rustfmt::skip]
 const DHIRES_PALETTE: [[u8; 4]; 16] = [
     [  0,   0,   0, 255], // 0x0: Black
-    [227,  30,  96, 255], // 0x1: Magenta/Deep Red
-    [ 96, 114,   3, 255], // 0x2: Brown          (LoRes 0x8)
-    [255, 106,  60, 255], // 0x3: Orange         (LoRes 0x9)
-    [  0, 163,  96, 255], // 0x4: Dark Green
-    [156, 156, 156, 255], // 0x5: Gray 1
-    [ 20, 245,  60, 255], // 0x6: Green          (LoRes 0xC)
-    [210, 212,  26, 255], // 0x7: Yellow         (LoRes 0xD)
-    [ 96,  78, 189, 255], // 0x8: Dark Blue      (LoRes 0x2)
-    [255,  68, 253, 255], // 0x9: Purple         (LoRes 0x3)
-    [156, 156, 156, 255], // 0xA: Gray 2
-    [255, 160, 208, 255], // 0xB: Pink
-    [  0, 180, 255, 255], // 0xC: Blue           (LoRes 0x6)
-    [208, 195, 255, 255], // 0xD: Light Blue     (LoRes 0x7)
-    [114, 255, 208, 255], // 0xE: Aqua
+    [240,  31, 101, 255], // 0x1: Magenta/Deep Red
+    [101, 120,   3, 255], // 0x2: Brown          (LoRes 0x8)
+    [255, 112,  63, 255], // 0x3: Orange         (LoRes 0x9)
+    [  0, 172, 101, 255], // 0x4: Dark Green
+    [165, 165, 165, 255], // 0x5: Gray 1
+    [ 21, 255,  63, 255], // 0x6: Green          (LoRes 0xC)
+    [222, 224,  27, 255], // 0x7: Yellow         (LoRes 0xD)
+    [101,  82, 200, 255], // 0x8: Dark Blue      (LoRes 0x2)
+    [255,  72, 255, 255], // 0x9: Purple         (LoRes 0x3)
+    [165, 165, 165, 255], // 0xA: Gray 2
+    [255, 169, 220, 255], // 0xB: Pink
+    [  0, 190, 255, 255], // 0xC: Blue           (LoRes 0x6)
+    [220, 206, 255, 255], // 0xD: Light Blue     (LoRes 0x7)
+    [120, 255, 220, 255], // 0xE: Aqua
     [255, 255, 255, 255], // 0xF: White
 ];
 
@@ -137,19 +139,7 @@ impl Video {
     pub fn update(&mut self, iou: &IOU, mmu: &MMU) -> bool {
         self.frame_count = self.frame_count.wrapping_add(1);
         
-        // clear
         self.framebuffer.fill(0);
-
-        let video_mode = iou.video_mode.get();
-
-        let _is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
-        let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
-        let is_dhires = check_bits_u8!(video_mode, VideoModeMask::DHIRES);
-        let lo_res_mode = check_bits_u8!(video_mode, VideoModeMask::LORES);
-        let is_hires = check_bits_u8!(video_mode, VideoModeMask::HIRES);
-        let mixed_mode = check_bits_u8!(video_mode, VideoModeMask::MIXED);
-        let text_mode = check_bits_u8!(video_mode, VideoModeMask::TEXT);
-        let _is_80store: bool = iou.is_80store.get();
 
         let new_active_width = 560;
         let new_active_height = 384;
@@ -162,29 +152,51 @@ impl Video {
             self.resize_framebuffer(new_width, new_height);
         }
 
-        let is_graphics = !text_mode && (is_hires || lo_res_mode);
+        // Per-scanline mode rendering: iterate by text row (8 scanlines each).
+        // Use captured scanline_modes when available, fall back to current IOU state.
+        let has_snapshots = self.scanline_count >= 192;
+        let mut any_graphics = false;
 
-        if text_mode {
-            self.render_text_mode(iou, mmu);
-        } else if is_hires {
-            if is_dhires && is_80col {
-                self.render_double_hires_mode(iou, mmu);
+        for text_row in 0..24_usize {
+            let scanline = text_row * 8;
+            let mode = if has_snapshots {
+                self.scanline_modes[scanline]
             } else {
-                self.render_hires_mode(iou, mmu);
+                iou.video_mode.get()
+            };
+
+            let text_mode = (mode & VideoModeMask::TEXT) != 0;
+            let is_hires = (mode & VideoModeMask::HIRES) != 0;
+            let lo_res_mode = (mode & VideoModeMask::LORES) != 0;
+            let is_dhires = (mode & VideoModeMask::DHIRES) != 0;
+            let is_80col = (mode & VideoModeMask::COL80) != 0;
+            let mixed_mode = (mode & VideoModeMask::MIXED) != 0;
+            let is_graphics = !text_mode && (is_hires || lo_res_mode);
+
+            // in mixed mode, rows 20-23 are always text regardless of graphics mode
+            let force_text = mixed_mode && text_row >= 20;
+
+            if text_mode || force_text {
+                self.render_text_rows(iou, mmu, text_row as u16..(text_row as u16 + 1));
+                if force_text && is_graphics && text_row == 20 && !self.monochrome {
+                    self.apply_mixed_mode_text_fringing(20);
+                }
+            } else if is_hires {
+                if is_dhires && is_80col {
+                    self.render_double_hires_rows(iou, mmu, text_row..text_row + 1);
+                } else {
+                    self.render_hires_rows(iou, mmu, text_row..text_row + 1);
+                }
+                any_graphics = true;
+            } else if lo_res_mode {
+                self.render_lores_rows(iou, mmu, text_row..text_row + 1, mode);
+                any_graphics = true;
+            } else {
+                self.render_text_rows(iou, mmu, text_row as u16..(text_row as u16 + 1));
             }
-            if mixed_mode {
-                self.render_text_mode_overlay(iou, mmu);
-            }
-        } else if lo_res_mode {
-            self.render_lores_mode(iou, mmu);
-            if mixed_mode {
-                self.render_text_mode_overlay(iou, mmu);
-            }
-        } else {
-            self.render_text_mode(iou, mmu);
         }
 
-        if is_graphics && !self.monochrome {
+        if any_graphics && !self.monochrome {
             self.apply_chroma_blur(0, 192 * 2);
             self.apply_comb_filter();
         }
@@ -293,18 +305,6 @@ impl Video {
         }
     }
    
-    pub fn render_text_mode(&mut self, iou: &IOU, mmu: &MMU) {
-        self.render_text_rows(iou, mmu, 0..24);
-    }
-
-    pub fn render_text_mode_overlay(&mut self, iou: &IOU, mmu: &MMU) {
-        self.render_text_rows(iou, mmu, 20..24);
-
-        if !self.monochrome {
-            self.apply_mixed_mode_text_fringing(20);
-        }
-    }
-
     fn render_text_rows(&mut self, iou: &IOU, mmu: &MMU, rows: std::ops::Range<u16>) {
         let video_mode = iou.video_mode.get();
         let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
@@ -522,21 +522,16 @@ impl Video {
                 if phase_column % 2 == 0 { NTSC_PALETTE[12] } else { NTSC_PALETTE[3] }
             }
         } else if prev || next {
-            // Edge of a colored region, uminance-weighted bleed...
-            // bright colors (orange, green) get visible spread (~0.4-0.5),
-            // dark colors (blue) get minimal spread (~0.15).
+            // single neighbor edge
             let base = if palette {
                 if phase_column % 2 == 0 { NTSC_PALETTE[9] } else { NTSC_PALETTE[6] }
             } else {
                 if phase_column % 2 == 0 { NTSC_PALETTE[12] } else { NTSC_PALETTE[3] }
             };
-            let luma = (0.299 * base[0] as f32 + 0.587 * base[1] as f32
-                + 0.114 * base[2] as f32) / 255.0;
-            let factor = luma; // linear
             [
-                (base[0] as f32 * factor) as u8,
-                (base[1] as f32 * factor) as u8,
-                (base[2] as f32 * factor) as u8,
+                (base[0] as f32 * 0.56) as u8,
+                (base[1] as f32 * 0.56) as u8,
+                (base[2] as f32 * 0.56) as u8,
                 255,
             ]
         } else {
@@ -544,21 +539,22 @@ impl Video {
         }
     }
 
-    fn render_lores_mode(&mut self, iou: &IOU, mmu: &MMU) {
-        let video_mode = iou.video_mode.get();
-        let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
-        let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
-        let is_dhires = check_bits_u8!(video_mode, VideoModeMask::DHIRES);
+    fn render_lores_rows(&mut self, iou: &IOU, mmu: &MMU, text_rows: std::ops::Range<usize>, video_mode: u8) {
+        let is_page2 = (video_mode & VideoModeMask::PAGE2) != 0;
+        let is_80col = (video_mode & VideoModeMask::COL80) != 0;
+        let is_dhires = (video_mode & VideoModeMask::DHIRES) != 0;
         let is_double_lores = is_80col && is_dhires;
         let is_80store = iou.is_80store.get();
-        let mixed_mode = check_bits_u8!(video_mode, VideoModeMask::MIXED);
+        let mixed_mode = (video_mode & VideoModeMask::MIXED) != 0;
 
         let base_vram: u16 = if !is_80store && is_page2 { 0x0800 } else { 0x0400 };
 
-        // if Mixed Mode is ON, only draw the top 20 blocks (40 half-rows)
-        let max_row = if mixed_mode { 40 } else { 48 };
+        // Convert text rows to half-rows (each text row = 2 half-rows)
+        let half_row_start = text_rows.start * 2;
+        let half_row_end_max = if mixed_mode { 40 } else { 48 };
+        let half_row_end = (text_rows.end * 2).min(half_row_end_max);
 
-        for row in 0..max_row {
+        for row in half_row_start..half_row_end {
             let base_address = base_vram
                 + match row / 2 {
                     0 => 0x000,
@@ -661,20 +657,20 @@ impl Video {
     }
 
     /// Render HiRes mode using direct NTSC artifact color palette lookup.
-    /// HiRes only has 4 possible artifact colors per palette — violet/green
-    /// (palette 0) and blue/orange (palette 1) — so a lookup from Munafo's
-    /// calibrated palette is more accurate than a full composite decode.
-    fn render_hires_mode(&mut self, iou: &IOU, mmu: &MMU) {
+    /// HiRes only has 4 possible artifact colors per palette: violet/green
+    /// (palette 0) and blue/orange (palette 1)
+    fn render_hires_rows(&mut self, iou: &IOU, mmu: &MMU, groups: std::ops::Range<usize>) {
         let base_vram: u16 = 0x0000;
 
-        for group in 0..24_u16 {
+        for group in groups {
+            let group16 = group as u16;
             for row in 0..8_u16 {
                 let row_base = base_vram
                     .wrapping_add(row.wrapping_mul(1024))
-                    .wrapping_add((group % 8).wrapping_mul(128))
-                    .wrapping_add((group / 8).wrapping_mul(40));
+                    .wrapping_add((group16 % 8).wrapping_mul(128))
+                    .wrapping_add((group16 / 8).wrapping_mul(40));
 
-                let y = ((group as usize) * 8 + (row as usize)) * 2;
+                let y = (group * 8 + (row as usize)) * 2;
 
                 if self.monochrome {
                     for col in 0..40_u16 {
@@ -752,19 +748,35 @@ impl Video {
     }
 
     /// Blur I and Q channels independently in YIQ space.
-    /// Simulates analog chroma bandwidth limiting: I (~1.3 MHz, 7-tap)
-    /// and Q (~0.5 MHz, 11-tap) blur at different widths. Luma (Y)
-    /// is left sharp. At color-to-black edges, chroma fades gradually
-    /// producing desaturated pixels at the correct hue.
+    /// Simulates analog chroma bandwidth limiting with asymmetric right-bias
+    /// matching NTSC chroma demodulator group delay. Color bleeds ~1.5px right
+    /// (the classic Apple II "rainbow tail") and ~0.5px left. Luma (Y) is
+    /// left sharp.
     fn apply_chroma_blur(&mut self, y_start: usize, y_end: usize) {
-        const I_KERNEL: [f32; 3] = [0.25, 0.5, 0.25];
-        const Q_KERNEL: [f32; 3] = [0.25, 0.5, 0.25];
+        // 7-tap, left-heavy kernel: pixels pull strongly from left neighbors,
+        // causing color to bleed ~2.5px RIGHT past edges into black — the
+        // classic Apple II "rainbow tail". Left tail (0.15+0.2) = 0.35 pulls
+        // hard; right tail (0.07+0.03) = 0.10 is minimal.
+        const I_KERNEL: [f32; 7] = [0.15, 0.2, 0.25, 0.2, 0.1, 0.07, 0.03];
+        const Q_KERNEL: [f32; 7] = [0.15, 0.2, 0.25, 0.2, 0.1, 0.07, 0.03];
+
+        #[inline]
+        fn srgb_to_linear(c: f32) -> f32 {
+            if c <= 0.04045 { c / 12.92 }
+            else { ((c + 0.055) / 1.055).powf(2.4) }
+        }
+
+        #[inline]
+        fn linear_to_srgb(c: f32) -> f32 {
+            if c <= 0.0031308 { c * 12.92 }
+            else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+        }
 
         #[inline]
         fn rgb_to_yiq(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-            let r = r as f32 / 255.0;
-            let g = g as f32 / 255.0;
-            let b = b as f32 / 255.0;
+            let r = srgb_to_linear(r as f32 / 255.0);
+            let g = srgb_to_linear(g as f32 / 255.0);
+            let b = srgb_to_linear(b as f32 / 255.0);
             (
                 0.299 * r + 0.587 * g + 0.114 * b,
                 0.5959 * r - 0.2746 * g - 0.3213 * b,
@@ -774,16 +786,17 @@ impl Video {
 
         #[inline]
         fn yiq_to_rgb(y: f32, i: f32, q: f32) -> (u8, u8, u8) {
-            (
-                ((y + 0.9563 * i + 0.6210 * q).clamp(0.0, 1.0) * 255.0) as u8,
-                ((y - 0.2721 * i - 0.6474 * q).clamp(0.0, 1.0) * 255.0) as u8,
-                ((y - 1.1070 * i + 1.7046 * q).clamp(0.0, 1.0) * 255.0) as u8,
-            )
+            let r = (y + 0.9563 * i + 0.6210 * q).clamp(0.0, 1.0);
+            let g = (y - 0.2721 * i - 0.6474 * q).clamp(0.0, 1.0);
+            let b = (y - 1.1070 * i + 1.7046 * q).clamp(0.0, 1.0);
+            // threshold before gamma encoding
+            let encode = |c: f32| if c < 0.0003 { 0.0 } else { linear_to_srgb(c) };
+            ((encode(r) * 255.0) as u8, (encode(g) * 255.0) as u8, (encode(b) * 255.0) as u8)
         }
 
         let aw = self.active_width;
-        let i_half = I_KERNEL.len() / 2;
-        let q_half = Q_KERNEL.len() / 2;
+        let i_half = 3_usize; // center tap at index 3 (right-biased)
+        let q_half = 3_usize;
 
         for y in (y_start..y_end).step_by(2) {
             let row_yiq: Vec<(f32, f32, f32)> = (0..aw)
@@ -800,56 +813,101 @@ impl Video {
             for x in 0..aw {
                 let y_val = row_yiq[x].0;
 
-                let mut bi = 0.0f32;
-                let mut bw_i = 0.0f32;
-                for (k, &w) in I_KERNEL.iter().enumerate() {
-                    let sx = x as i32 - i_half as i32 + k as i32;
-                    if sx >= 0 && sx < aw as i32 {
-                        bi += row_yiq[sx as usize].1 * w;
-                        bw_i += w;
+                // White protection with subtle chroma bleed: near-white pixels
+                // get ~15% of neighbor chroma for realistic color fringe at
+                // white/color boundaries, plus a slight luma boost matching
+                // CRT behavior where adjacent ON pixels produce max composite
+                // amplitude with no chroma modulation.
+                if y_val > 0.85 {
+                    let mut bi = 0.0f32;
+                    let mut bw_i = 0.0f32;
+                    for (k, &w) in I_KERNEL.iter().enumerate() {
+                        let sx = x as i32 - i_half as i32 + k as i32;
+                        if sx >= 0 && sx < aw as i32 {
+                            bi += row_yiq[sx as usize].1 * w;
+                            bw_i += w;
+                        }
                     }
-                }
-                let i_val = bi / bw_i;
-
-                let mut bq = 0.0f32;
-                let mut bw_q = 0.0f32;
-                for (k, &w) in Q_KERNEL.iter().enumerate() {
-                    let sx = x as i32 - q_half as i32 + k as i32;
-                    if sx >= 0 && sx < aw as i32 {
-                        bq += row_yiq[sx as usize].2 * w;
-                        bw_q += w;
+                    let mut bq = 0.0f32;
+                    let mut bw_q = 0.0f32;
+                    for (k, &w) in Q_KERNEL.iter().enumerate() {
+                        let sx = x as i32 - q_half as i32 + k as i32;
+                        if sx >= 0 && sx < aw as i32 {
+                            bq += row_yiq[sx as usize].2 * w;
+                            bw_q += w;
+                        }
                     }
-                }
-                let q_val = bq / bw_q;
+                    // Graduated tint: pixels near the threshold (Y~0.85) get
+                    // more chroma bleed, pure white (Y~1.0) gets almost none.
+                    // This softens the transition instead of a hard cutoff.
+                    let proximity = ((1.0 - y_val) / 0.15).clamp(0.0, 1.0); // 1.0 at Y=0.85, 0.0 at Y=1.0
+                    let tint = 0.20f32 * proximity;
+                    let i_val = row_yiq[x].1 * (1.0 - tint) + (bi / bw_i) * tint;
+                    let q_val = row_yiq[x].2 * (1.0 - tint) + (bq / bw_q) * tint;
+                    let boosted_y = (y_val * 1.03).min(1.0);
+                    let (r, g, b) = yiq_to_rgb(boosted_y, i_val, q_val);
 
-                let (r, g, b) = yiq_to_rgb(y_val, i_val, q_val);
+                    for dy in 0..2_usize {
+                        let idx = self.fb_index(x, y + dy);
+                        if idx + 4 <= self.framebuffer.len() {
+                            self.framebuffer[idx] = r;
+                            self.framebuffer[idx + 1] = g;
+                            self.framebuffer[idx + 2] = b;
+                        }
+                    }
+                } else {
+                    let mut bi = 0.0f32;
+                    let mut bw_i = 0.0f32;
+                    for (k, &w) in I_KERNEL.iter().enumerate() {
+                        let sx = x as i32 - i_half as i32 + k as i32;
+                        if sx >= 0 && sx < aw as i32 {
+                            bi += row_yiq[sx as usize].1 * w;
+                            bw_i += w;
+                        }
+                    }
+                    let i_val = bi / bw_i;
 
-                for dy in 0..2_usize {
-                    let idx = self.fb_index(x, y + dy);
-                    if idx + 4 <= self.framebuffer.len() {
-                        self.framebuffer[idx] = r;
-                        self.framebuffer[idx + 1] = g;
-                        self.framebuffer[idx + 2] = b;
+                    let mut bq = 0.0f32;
+                    let mut bw_q = 0.0f32;
+                    for (k, &w) in Q_KERNEL.iter().enumerate() {
+                        let sx = x as i32 - q_half as i32 + k as i32;
+                        if sx >= 0 && sx < aw as i32 {
+                            bq += row_yiq[sx as usize].2 * w;
+                            bw_q += w;
+                        }
+                    }
+                    let q_val = bq / bw_q;
+
+                    let (r, g, b) = yiq_to_rgb(y_val, i_val, q_val);
+
+                    for dy in 0..2_usize {
+                        let idx = self.fb_index(x, y + dy);
+                        if idx + 4 <= self.framebuffer.len() {
+                            self.framebuffer[idx] = r;
+                            self.framebuffer[idx + 1] = g;
+                            self.framebuffer[idx + 2] = b;
+                        }
                     }
                 }
             }
         }
     }
 
-    fn render_double_hires_mode(&mut self, _iou: &IOU, mmu: &MMU) {
+    fn render_double_hires_rows(&mut self, _iou: &IOU, mmu: &MMU, groups: std::ops::Range<usize>) {
         let base_vram: u16 = 0x2000;
 
-        for group in 0..24_u16 {
+        for group in groups {
+            let group16 = group as u16;
             for row in 0..8_u16 {
                 let row_base = base_vram
                         .wrapping_add(row.wrapping_mul(1024))
-                        .wrapping_add((group % 8).wrapping_mul(128))
-                        .wrapping_add((group / 8).wrapping_mul(40));
+                        .wrapping_add((group16 % 8).wrapping_mul(128))
+                        .wrapping_add((group16 / 8).wrapping_mul(40));
 
-                let y = (group * 8 + row) * 2; // double height
+                let y = (group * 8 + row as usize) * 2; // double height
 
                 if self.monochrome {
-                    // Monochrome: 560 pixels (1 bit = 1 pixel)
+                    // monochrome: 560 pixels (1 bit = 1 pixel)
                     for col in 0..40_u16 {
                         let addr = row_base.wrapping_add(col);
                         let aux_byte = mmu.read_aux_byte(addr);

@@ -60,12 +60,12 @@ impl Default for ShaderParams {
             overscan_y: 100.0,
             aperture_strength: 0.50,
             aperture_brightboost: 0.16,
-            scanline_weight: 0.25,
+            scanline_weight: 0.3,
             luminance: 0.14,
             curvature: 1.0,
 
             saturation: 1.04,
-            halation: 0.02,
+            halation: 0.05,
             rasterbloom: 0.32,
             blur_width: 1.23,
             mask_type: 3.0,
@@ -76,7 +76,7 @@ impl Default for ShaderParams {
             vignette_opacity: 0.26,
             flicker: 0.4,
             chromatic_aberration: 0.75,
-            v_roll: 0.1,  // V-Hold rolling effect (0=off)
+            v_roll: 0.1,
         }
     }
 }
