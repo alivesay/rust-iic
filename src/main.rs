@@ -61,9 +61,22 @@ fn main() -> Result<(), Error> {
 
     let args = Args::parse();
 
-    // Create centralized audio mixer - single cpal stream for all audio sources
-    let (_audio_mixer, audio_producers) = AudioMixer::new();
-    let sample_rate = _audio_mixer.sample_rate();
+    // centralized audio mixer
+    let (sample_rate, audio_producers, _audio_mixer, _dummy_mixer);
+    if args.no_audio {
+        let (dm, ap) = audio_mixer::DummyAudioMixer::new();
+        sample_rate = dm.sample_rate();
+        audio_producers = ap;
+        _dummy_mixer = Some(dm);
+        _audio_mixer = None;
+        println!("Audio disabled (--no-audio)");
+    } else {
+        let (am, ap) = AudioMixer::new();
+        sample_rate = am.sample_rate();
+        audio_producers = ap;
+        _audio_mixer = Some(am);
+        _dummy_mixer = None;
+    }
 
     let mut cpu = CPU::new(
         SystemType::AppleIIc,
@@ -115,32 +128,29 @@ fn main() -> Result<(), Error> {
         println!("ZIP CHIP II-8 enabled (8MHz) - Press ESC during boot to disable, Ctrl+Z to toggle");
     }
 
-    // Mockingboard sound card in slot 5 (no conflict with memory expansion)
-    // Uses centralized audio mixer channel
+    // Mockingboard sound card in slot 5
     if args.mockingboard {
         cpu.bus.iou.mockingboard = crate::device::mockingboard::Mockingboard::with_audio(audio_producers.mockingboard1, sample_rate);
         cpu.bus.iou.set_mockingboard_enabled(true);
         
-        // Use timer-based activation - wait for DOS/ProDOS to fully initialize
-        // ~3M cycles = ~3 seconds at 1MHz, should be enough for most boot scenarios
+        // timer-based activation, wait for system to fully initialize
         cpu.bus.iou.mockingboard.set_hook_activation(true);
-        cpu.hooks.register_mockingboard_hook(1, 3_000_000);  // Slot 5
+        cpu.hooks.register_mockingboard_hook(1, 4_000_000);  // Slot 5
         
         println!("Mockingboard enabled in slot 5");
     }
 
-    // Second Mockingboard in slot 4 (for Ultima V dual-MB support, disables memory expansion)
-    // Uses centralized audio mixer channel
+    // Second Mockingboard in slot 4 (disables memory expansion)
     if args.mockingboard2 {
         cpu.bus.iou.mockingboard2 = crate::device::mockingboard::Mockingboard::with_audio(audio_producers.mockingboard2, sample_rate);
         cpu.bus.iou.set_mockingboard2_enabled(true);
         
-        // Use timer-based activation
+        // timer-based activation
         cpu.bus.iou.mockingboard2.set_hook_activation(true);
         cpu.hooks.register_mockingboard_hook(0, 3_000_000);  // Slot 4
         
         if args.mockingboard {
-            println!("Second Mockingboard enabled in slot 4 (12 total sound channels, memory expansion disabled)");
+            println!("Second Mockingboard enabled in slot 4 (memory expansion disabled)");
         } else {
             println!("Mockingboard enabled in slot 4 (memory expansion disabled)");
         }
@@ -149,7 +159,7 @@ fn main() -> Result<(), Error> {
     // Register ProDOS MLI hooks
     hooks::register_hooks(&mut cpu.hooks);
 
-    // Paddle/gamepad input
+    // Paddle input
     if args.paddle {
         cpu.bus.iou.paddle.enable_gamepad();
         println!("Paddle enabled.");

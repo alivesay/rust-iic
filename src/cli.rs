@@ -22,6 +22,10 @@ pub struct Args {
     #[arg(long)]
     pub no_video: bool,
 
+    /// Run without audio output
+    #[arg(long)]
+    pub no_audio: bool,
+
     /// Start in interactive monitor/debugger mode
     #[arg(long)]
     pub monitor: bool,
@@ -34,7 +38,7 @@ pub struct Args {
     #[arg(long, short)]
     pub debug: bool,
 
-    /// CPU speed multiplier (1.0 = 1.023 MHz)
+    /// CPU speed multiplier
     #[arg(long, default_value_t = 1.0)]
     pub speed: f32,
 
