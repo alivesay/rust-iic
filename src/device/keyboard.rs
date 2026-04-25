@@ -1,6 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 
+use crate::timing;
+
 pub struct Keyboard {
     // Last key code (Apple II ASCII, 0-127)
     last_key: Cell<u8>,
@@ -124,14 +126,14 @@ impl Keyboard {
             if !held.is_empty() {
                 let cycles_since_clear = cycles.saturating_sub(self.repeat_cycle.get());
                 
-                // 1.023 MHz: 500ms = 511,500 cycles, 66.7ms = 68,241 cycles
-                const PRE_REPEAT_CYCLES: u64 = 511_500;
-                const REPEAT_CYCLES: u64 = 68_241;
+                // 500ms pre-repeat delay, 66.7ms repeat rate
+                let pre_repeat_cycles = (timing::CYCLES_PER_SECOND * 0.5) as u64;
+                let repeat_cycles = (timing::CYCLES_PER_SECOND / 15.0) as u64;
                 
                 let threshold = if self.first_repeat_done.get() {
-                    REPEAT_CYCLES
+                    repeat_cycles
                 } else {
-                    PRE_REPEAT_CYCLES
+                    pre_repeat_cycles
                 };
                 
                 if cycles_since_clear >= threshold {
@@ -209,12 +211,6 @@ impl Keyboard {
     // Write to $C010, also clears strobe
     pub fn write_strobe(&self) {
         self.strobe.set(false);
-    }
-
-    // Check if any key is currently held (for AKD)
-    #[allow(dead_code)]
-    pub fn any_key_down(&self) -> bool {
-        !self.held_keys.borrow().is_empty()
     }
 }
 

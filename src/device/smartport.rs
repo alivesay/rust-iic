@@ -263,6 +263,8 @@ impl Drop for SmartPortDevice {
 
 // Maximum hard-drive (HDV) devices on the SmartPort chain
 const MAX_HDV_DEVICES: usize = 2;
+// Maximum 3.5" floppy drives on the SmartPort chain
+const MAX_FLOPPY_DEVICES: usize = 2;
 const SMARTPORT_RESPONSE_DELAY_CYCLES: u64 = 32;
 
 // Wire protocol state machine
@@ -283,9 +285,9 @@ pub enum ProtocolState {
 // sync detection, packet decode, command dispatch, response encoding,
 // and ACK handshaking.
 pub struct SmartPort {
-    // 3.5" floppy drive (unit 1) — full device emulation with audio
-    pub floppy: UniDisk35,
-    // Hard-drive devices (units 2+) — bare block I/O
+    // 3.5" floppy drives
+    pub floppies: [UniDisk35; MAX_FLOPPY_DEVICES],
+    // Hard-drive devices
     pub hdv_devices: [SmartPortDevice; MAX_HDV_DEVICES],
 
     // -- wire protocol state --
@@ -296,8 +298,6 @@ pub struct SmartPort {
     sync_count: u8,
     header_count: u8,
     header: [u8; 7],
-    ack: bool,
-    ack_low_count: u8,
     bsy: bool,
     response_delay_cycles: u64,
     response_waiting_for_req_low: bool,
@@ -312,13 +312,6 @@ pub struct SmartPort {
     current_dest: u8,
     cmd_count: u32,
     pub debug: bool,
-
-    // Comparison-trace state: after a READ_BLOCK completes, capture a short
-    // execution window so SmartPort and hacked comparison paths can be diffed
-    // against the same block boundaries.
-    compare_trace_seq: u32,
-    compare_trace_block: Option<u32>,
-    compare_trace_remaining: u16,
 
     // Audio events pending delivery to the IWM/DriveAudio system.
     // Filled by command handlers, drained by the IWM after each command.
@@ -353,7 +346,7 @@ impl SmartPort {
 
     pub fn new() -> Self {
         Self {
-            floppy: UniDisk35::new(),
+            floppies: [UniDisk35::new(), UniDisk35::new()],
             hdv_devices: [SmartPortDevice::new(), SmartPortDevice::new()],
             state: ProtocolState::WaitingForSync,
             cmd_buffer: Vec::with_capacity(64),
@@ -362,8 +355,6 @@ impl SmartPort {
             sync_count: 0,
             header_count: 0,
             header: [0; 7],
-            ack: true,
-            ack_low_count: 0,
             bsy: true,
             response_delay_cycles: 0,
             response_waiting_for_req_low: false,
@@ -373,16 +364,16 @@ impl SmartPort {
             current_dest: 0,
             cmd_count: 0,
             debug: false,
-            compare_trace_seq: 0,
-            compare_trace_block: None,
-            compare_trace_remaining: 0,
             pending_audio: Vec::new(),
         }
     }
 
-    // Load a 3.5" disk image into the floppy drive (unit 1)
-    pub fn load_disk(&mut self, path: &str) -> Result<(), String> {
-        self.floppy.load_disk(path)
+    // Load a 3.5" disk image into a specific floppy slot
+    pub fn load_floppy(&mut self, slot: usize, path: &str) -> Result<(), String> {
+        if slot >= MAX_FLOPPY_DEVICES {
+            return Err(format!("Invalid floppy slot {} (max {})", slot, MAX_FLOPPY_DEVICES - 1));
+        }
+        self.floppies[slot].load_disk(path)
     }
 
     // Load an HDV hard-drive image into the next free slot (units 2+)
@@ -399,13 +390,15 @@ impl SmartPort {
 
     // True if any device (floppy or HDV) is loaded
     pub fn has_any_device(&self) -> bool {
-        self.floppy.has_disk() || self.hdv_devices.iter().any(|d| d.has_disk())
+        self.floppies.iter().any(|f| f.has_disk()) || self.hdv_devices.iter().any(|d| d.has_disk())
     }
 
     // Number of active devices on the chain
     fn device_count(&self) -> u8 {
         let mut count: u8 = 0;
-        if self.floppy.has_disk() { count += 1; }
+        for f in &self.floppies {
+            if f.has_disk() { count += 1; }
+        }
         for d in &self.hdv_devices {
             if d.has_disk() { count += 1; }
         }
@@ -414,13 +407,14 @@ impl SmartPort {
 
     // Get bare SmartPortDevice by 1-based unit number.
     // Maps unit numbers to active (has_disk) devices dynamically:
-    // only devices with disks are assigned unit numbers, so when
-    // only an HDV is loaded (no floppy), unit 1 maps to hdv[0].
+    // floppies first (in order), then HDVs.
     fn get_device(&mut self, unit: u8) -> Option<&mut SmartPortDevice> {
         let mut current = 0u8;
-        if self.floppy.has_disk() {
-            current += 1;
-            if current == unit { return Some(&mut self.floppy.device); }
+        for i in 0..self.floppies.len() {
+            if self.floppies[i].has_disk() {
+                current += 1;
+                if current == unit { return Some(&mut self.floppies[i].device); }
+            }
         }
         for i in 0..self.hdv_devices.len() {
             if self.hdv_devices[i].has_disk() {
@@ -431,9 +425,17 @@ impl SmartPort {
         None
     }
 
-    // Check if a 1-based unit number maps to the floppy drive
-    fn is_floppy_unit(&self, unit: u8) -> bool {
-        self.floppy.has_disk() && unit == 1
+    // Check if a 1-based unit number maps to a floppy drive.
+    // Returns the floppy index if so.
+    fn floppy_index_for_unit(&self, unit: u8) -> Option<usize> {
+        let mut current = 0u8;
+        for (i, f) in self.floppies.iter().enumerate() {
+            if f.has_disk() {
+                current += 1;
+                if current == unit { return Some(i); }
+            }
+        }
+        None
     }
 
     // Drain any pending drive-audio events (called by IWM after command processing)
@@ -691,21 +693,17 @@ impl SmartPort {
         log::debug!("SmartPort: CMD={:02X} dest={} raw_unit={} local_unit={} (devices={})",
             cmd, dest, raw_unit, unit, max_dest);
 
-        // Floppy gets unit 1 only when it has a disk loaded;
-        // otherwise unit 1 maps to the first HDV device.
-        let is_floppy = self.is_floppy_unit(unit);
-        if is_floppy || (unit == 0 && cmd == 0x00) {
-            if is_floppy {
-                let block = if decoded.len() >= 7 {
+        // Floppy drives get priority unit numbering;
+        // check if this unit maps to a floppy device.
+        let floppy_idx = self.floppy_index_for_unit(unit);
+        if floppy_idx.is_some() || (unit == 0 && cmd == 0x00) {
+            if let Some(idx) = floppy_idx {
+                let _block = if decoded.len() >= 7 {
                     (decoded[4] as u32) | ((decoded[5] as u32) << 8) | ((decoded[6] as u32) << 16)
                 } else { 0 };
-                eprintln!("SmartPort: floppy cmd={:02X} unit={} block={} decoded_len={} decoded[0..7]={:02X?}",
-                    cmd, unit, block, decoded.len(), &decoded[..decoded.len().min(7)]);
-                let result = self.floppy.execute(cmd, &decoded);
-                if cmd == 0x01 {
-                    eprintln!("SmartPort: floppy READ_BLOCK #{} status={:02X} payload_len={} first16={:02X?}",
-                        block, result.status, result.payload.len(), &result.payload[..result.payload.len().min(16)]);
-                }
+                
+                let result = self.floppies[idx].execute(cmd, &decoded);
+
                 self.pending_audio.extend(result.audio_events);
                 self.build_response(0x00, dest, if cmd == 0x01 { 0x02 } else { 0x01 }, result.status, &result.payload);
                 return;
@@ -1032,8 +1030,10 @@ impl SmartPort {
     }
 
     pub fn flush_all(&mut self) {
-        if let Err(e) = self.floppy.device.flush() {
-            log::error!("Failed to flush SmartPort floppy: {}", e);
+        for (i, floppy) in self.floppies.iter_mut().enumerate() {
+            if let Err(e) = floppy.device.flush() {
+                log::error!("Failed to flush SmartPort floppy {}: {}", i, e);
+            }
         }
         for device in &mut self.hdv_devices {
             if let Err(e) = device.flush() {

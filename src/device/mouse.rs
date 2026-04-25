@@ -14,9 +14,7 @@ const MOUSE_PENDING_CAP: i16 = 32;
 const MOUSE_SENSITIVITY: f32 = 1.0;
 
 pub struct Mouse {
-    #[allow(dead_code)]
     pub x: Cell<u16>,
-    #[allow(dead_code)]
     pub y: Cell<u16>,
     pub button0: Cell<bool>,
     pub button1: Cell<bool>,

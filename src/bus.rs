@@ -7,6 +7,7 @@ use crate::mmu::MMU;
 use crate::rom::ROM;
 use crate::util::mem_state_to_string;
 use crate::video::{Video, VideoModeMask};
+use crate::timing;
 
 const MEMORY_SIZE: usize = 64 * 1024;
 const RAM_BANK_SIZE: usize = 48 * 1024;
@@ -225,7 +226,6 @@ impl Bus {
         self.iou.cycles += cycles;
 
         // Track position within NTSC frame for VBL timing
-        // 262 scanlines × 65 cycles = 17030 cycles/frame
         let old_scan = self.iou.scan_cycle;
 
         // Per-cycle floating bus update.
@@ -240,13 +240,13 @@ impl Bus {
 
         for _ in 0..cycles {
             self.iou.scan_cycle += 1;
-            if self.iou.scan_cycle >= 17030 {
-                self.iou.scan_cycle -= 17030;
+            if self.iou.scan_cycle >= timing::CYCLES_PER_FRAME {
+                self.iou.scan_cycle -= timing::CYCLES_PER_FRAME;
             }
 
             let scan = self.iou.scan_cycle;
-            let scanline = (scan / 65) as u16;
-            let col = (scan % 65) as u16;
+            let scanline = (scan / timing::CYCLES_PER_SCANLINE) as u16;
+            let col = (scan % timing::CYCLES_PER_SCANLINE) as u16;
 
             if scanline < 192 && col < 40 {
                 let row = scanline / 8;
@@ -272,7 +272,7 @@ impl Bus {
         }
 
         // Set VBL interrupt when entering VBL region (scanline 192+)
-        if old_scan < 12480 && self.iou.scan_cycle >= 12480 {
+        if old_scan < timing::VBL_START_CYCLE && self.iou.scan_cycle >= timing::VBL_START_CYCLE {
             self.iou.mouse.vbl_int.set(true);
         }
 

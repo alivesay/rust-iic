@@ -6,51 +6,49 @@ const MONO_GREEN: (u8, u8, u8) = (118, 247, 211);
 const MONO_GREEN_RGBA: [u8; 4] = [MONO_GREEN.0, MONO_GREEN.1, MONO_GREEN.2, 255];
 const MONO_BLACK_RGBA: [u8; 4] = [15, 23, 23, 255];
 
-/// NTSC 16-color palette
-/// Source: R. Munafo (mrob.com/pub/xapple2/colors.html)
-/// Lifted ~6% to compensate for modern LCD gamma vs CRT phosphor response.
+// NTSC 16-color palette (standard LoRes/HiRes ordering)
+// Derived from Apple IIc video ROM (video.bin 0x800-0xFFF) via NTSC demodulation
+// of the hardware dot patterns at 49° colorburst phase.
+// Re-ordered from DHIRES numbering: entries 2↔8, 3↔9, 6↔C, 7↔D swapped.
 #[rustfmt::skip]
 const NTSC_PALETTE: [[u8; 4]; 16] = [
     [  0,   0,   0, 255], // 0x0: Black
-    [240,  31, 101, 255], // 0x1: Deep Red       (phase  90°, chroma 60)
-    [101,  82, 200, 255], // 0x2: Dark Blue      (phase   0°, chroma 60)
-    [255,  72, 255, 255], // 0x3: Purple/Violet  (phase  45°, chroma 100) HiRes: Violet
-    [  0, 172, 101, 255], // 0x4: Dark Green     (phase 270°, chroma 60)
-    [165, 165, 165, 255], // 0x5: Gray 1
-    [  0, 190, 255, 255], // 0x6: Medium Blue    (phase 315°, chroma 100) HiRes: Blue
-    [220, 206, 255, 255], // 0x7: Light Blue     (phase   0°, chroma 60)
-    [101, 120,   3, 255], // 0x8: Brown          (phase 180°, chroma 60)
-    [255, 112,  63, 255], // 0x9: Orange         (phase 135°, chroma 100) HiRes: Orange
-    [165, 165, 165, 255], // 0xA: Gray 2
-    [255, 169, 220, 255], // 0xB: Pink           (phase  90°, chroma 60)
-    [ 21, 255,  63, 255], // 0xC: Light Green    (phase 225°, chroma 100) HiRes: Green
-    [222, 224,  27, 255], // 0xD: Yellow         (phase 180°, chroma 60)
-    [120, 255, 220, 255], // 0xE: Aqua           (phase 270°, chroma 60)
+    [208,   0, 100, 255], // 0x1: Magenta        (DHIRES 0x1)
+    [ 44,  24, 255, 255], // 0x2: Dark Blue      (DHIRES 0x8)
+    [251,   8, 255, 255], // 0x3: Purple/Violet  (DHIRES 0x9) HiRes: Violet
+    [  0, 144,  28, 255], // 0x4: Dark Green     (DHIRES 0x4)
+    [127, 127, 128, 255], // 0x5: Gray 1
+    [  0, 168, 255, 255], // 0x6: Medium Blue    (DHIRES 0xC) HiRes: Blue
+    [171, 152, 255, 255], // 0x7: Light Blue     (DHIRES 0xD)
+    [ 84, 103,   0, 255], // 0x8: Brown          (DHIRES 0x2)
+    [255,  87,   0, 255], // 0x9: Orange         (DHIRES 0x3) HiRes: Orange
+    [128, 127, 128, 255], // 0xA: Gray 2
+    [255, 111, 227, 255], // 0xB: Pink           (DHIRES 0xB)
+    [  4, 247,   0, 255], // 0xC: Light Green    (DHIRES 0x6) HiRes: Green
+    [211, 231,   0, 255], // 0xD: Yellow         (DHIRES 0x7)
+    [ 47, 255, 155, 255], // 0xE: Aqua           (DHIRES 0xE)
     [255, 255, 255, 255], // 0xF: White
 ];
 
-/// DHIRES extracts 4-bit color from a sliding window across the 560-bit scanline.
-/// The bit-to-nibble phase rotation means nibble values map to different colors
-/// than the LoRes palette: entries 2<-8, 3<-9, 6<-C, 7<-D are swapped.
-/// Source: mii_emu (buserror/mii_emu) DHIRES CLUT
-/// Lifted ~6% to compensate for modern LCD gamma vs CRT phosphor response.
+// Derived from Apple IIc video ROM (video.bin 0x800-0xFFF) via NTSC demodulation
+// of the hardware dot patterns at 49° colorburst phase.
 #[rustfmt::skip]
 const DHIRES_PALETTE: [[u8; 4]; 16] = [
     [  0,   0,   0, 255], // 0x0: Black
-    [240,  31, 101, 255], // 0x1: Magenta/Deep Red
-    [101, 120,   3, 255], // 0x2: Brown          (LoRes 0x8)
-    [255, 112,  63, 255], // 0x3: Orange         (LoRes 0x9)
-    [  0, 172, 101, 255], // 0x4: Dark Green
-    [165, 165, 165, 255], // 0x5: Gray 1
-    [ 21, 255,  63, 255], // 0x6: Green          (LoRes 0xC)
-    [222, 224,  27, 255], // 0x7: Yellow         (LoRes 0xD)
-    [101,  82, 200, 255], // 0x8: Dark Blue      (LoRes 0x2)
-    [255,  72, 255, 255], // 0x9: Purple         (LoRes 0x3)
-    [165, 165, 165, 255], // 0xA: Gray 2
-    [255, 169, 220, 255], // 0xB: Pink
-    [  0, 190, 255, 255], // 0xC: Blue           (LoRes 0x6)
-    [220, 206, 255, 255], // 0xD: Light Blue     (LoRes 0x7)
-    [120, 255, 220, 255], // 0xE: Aqua
+    [208,   0, 100, 255], // 0x1: Magenta
+    [ 84, 103,   0, 255], // 0x2: Brown
+    [255,  87,   0, 255], // 0x3: Orange
+    [  0, 144,  28, 255], // 0x4: Dark Green
+    [127, 127, 128, 255], // 0x5: Grey 1
+    [  4, 247,   0, 255], // 0x6: Green
+    [211, 231,   0, 255], // 0x7: Yellow
+    [ 44,  24, 255, 255], // 0x8: Dark Blue
+    [251,   8, 255, 255], // 0x9: Purple
+    [128, 127, 128, 255], // 0xA: Grey 2
+    [255, 111, 227, 255], // 0xB: Pink
+    [  0, 168, 255, 255], // 0xC: Blue
+    [171, 152, 255, 255], // 0xD: Light Blue
+    [ 47, 255, 155, 255], // 0xE: Aqua
     [255, 255, 255, 255], // 0xF: White
 ];
 
@@ -201,6 +199,8 @@ impl Video {
             self.apply_comb_filter();
         }
 
+        self.apply_phosphor_spread();
+
         if !self.shader_enabled && self.scanline_intensity < 1.0 {
             self.apply_scanlines();
         }
@@ -261,6 +261,60 @@ impl Video {
                         self.framebuffer[idx] = blend_r as u8;
                         self.framebuffer[idx + 1] = blend_g as u8;
                         self.framebuffer[idx + 2] = blend_b as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    // Simulate CRT electron beam spot size: the beam illuminates a Gaussian
+    // region wider than a single phosphor, so neighboring pixels overlap.
+    // 3-tap horizontal kernel [0.15, 0.70, 0.15] softens hard 2px block
+    // edges without destroying text readability.
+    fn apply_phosphor_spread(&mut self) {
+        let aw = self.active_width;
+
+        // Process each doubled scanline pair. Row buffer avoids full framebuffer clone.
+        for y in (0..self.active_height).step_by(2) {
+            // Read the row into a temp buffer (only need RGB, 3 bytes per pixel)
+            let mut row = vec![0u8; aw * 3];
+            for x in 0..aw {
+                let idx = self.fb_index(x, y);
+                row[x * 3]     = self.framebuffer[idx];
+                row[x * 3 + 1] = self.framebuffer[idx + 1];
+                row[x * 3 + 2] = self.framebuffer[idx + 2];
+            }
+
+            for x in 0..aw {
+                let c = x * 3;
+                let cr = row[c] as f32;
+                let cg = row[c + 1] as f32;
+                let cb = row[c + 2] as f32;
+
+                let (lr, lg, lb) = if x > 0 {
+                    let l = (x - 1) * 3;
+                    (row[l] as f32, row[l + 1] as f32, row[l + 2] as f32)
+                } else {
+                    (cr, cg, cb)
+                };
+
+                let (rr, rg, rb) = if x + 1 < aw {
+                    let r = (x + 1) * 3;
+                    (row[r] as f32, row[r + 1] as f32, row[r + 2] as f32)
+                } else {
+                    (cr, cg, cb)
+                };
+
+                let nr = (lr * 0.15 + cr * 0.70 + rr * 0.15) as u8;
+                let ng = (lg * 0.15 + cg * 0.70 + rg * 0.15) as u8;
+                let nb = (lb * 0.15 + cb * 0.70 + rb * 0.15) as u8;
+
+                for dy in 0..2_usize {
+                    let idx = self.fb_index(x, y + dy);
+                    if idx + 4 <= self.framebuffer.len() {
+                        self.framebuffer[idx]     = nr;
+                        self.framebuffer[idx + 1] = ng;
+                        self.framebuffer[idx + 2] = nb;
                     }
                 }
             }
@@ -496,8 +550,8 @@ impl Video {
         }
     }
 
-    /// Palette 0 (bit 7=0): even->Violet (3), odd->Green (12)
-    /// Palette 1 (bit 7=1): even->Blue (6), odd->Orange (9)
+    // Palette 0 (bit 7=0): even->Violet (3), odd->Green (12)
+    // Palette 1 (bit 7=1): even->Blue (6), odd->Orange (9)
     #[inline]
     fn ntsc_hires_artifact_color(
         cur: bool, prev: bool, next: bool,
@@ -656,9 +710,9 @@ impl Video {
         }
     }
 
-    /// Render HiRes mode using direct NTSC artifact color palette lookup.
-    /// HiRes only has 4 possible artifact colors per palette: violet/green
-    /// (palette 0) and blue/orange (palette 1)
+    // Render HiRes mode using direct NTSC artifact color palette lookup.
+    // HiRes only has 4 possible artifact colors per palette: violet/green
+    // (palette 0) and blue/orange (palette 1)
     fn render_hires_rows(&mut self, iou: &IOU, mmu: &MMU, groups: std::ops::Range<usize>) {
         let base_vram: u16 = 0x0000;
 
@@ -747,11 +801,11 @@ impl Video {
 
     }
 
-    /// Blur I and Q channels independently in YIQ space.
-    /// Simulates analog chroma bandwidth limiting with asymmetric right-bias
-    /// matching NTSC chroma demodulator group delay. Color bleeds ~1.5px right
-    /// (the classic Apple II "rainbow tail") and ~0.5px left. Luma (Y) is
-    /// left sharp.
+    // Blur I and Q channels independently in YIQ space.
+    // Simulates analog chroma bandwidth limiting with asymmetric right-bias
+    // matching NTSC chroma demodulator group delay. Color bleeds ~1.5px right
+    // (the classic Apple II "rainbow tail") and ~0.5px left. Luma (Y) is
+    // left sharp.
     fn apply_chroma_blur(&mut self, y_start: usize, y_end: usize) {
         // 7-tap, left-heavy kernel: pixels pull strongly from left neighbors,
         // causing color to bleed ~2.5px RIGHT past edges into black — the

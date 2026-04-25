@@ -52,9 +52,6 @@ pub struct CrtRenderer {
     mip_level_count: u32,
     // Shader params
     shader_params_buffer: wgpu::Buffer,
-    // Surface format for resize (currently using texture.format() instead)
-    #[allow(dead_code)]
-    surface_format: wgpu::TextureFormat,
     // Phosphor persistence (ping-pong history buffers)
     phosphor_pipeline: wgpu::RenderPipeline,
     phosphor_bind_group_layout: wgpu::BindGroupLayout,
@@ -900,7 +897,6 @@ impl CrtRenderer {
             mipgen_vertex_buffer,
             mip_level_count,
             shader_params_buffer,
-            surface_format,
             phosphor_pipeline,
             phosphor_bind_group_layout,
             phosphor_vertex_buffer,
@@ -912,7 +908,7 @@ impl CrtRenderer {
             phosphor_bind_group_a,
             phosphor_bind_group_b,
             phosphor_frame_idx: std::cell::Cell::new(0),
-            clear_frames_remaining: std::cell::Cell::new(10),  // Clear for multiple frames
+            clear_frames_remaining: std::cell::Cell::new(10),
             chroma_pipeline,
             chroma_bind_group_layout,
             chroma_vertex_buffer,
@@ -926,7 +922,7 @@ impl CrtRenderer {
             curvature_cache: std::cell::Cell::new([3.0, 1.3, 1.0, 1.0]),
             glow_amt_cache: std::cell::Cell::new(0.0),
             curvature_on_cache: std::cell::Cell::new(1.0),
-            power_on_time_cache: std::cell::Cell::new(5.0),  // Start with effect "finished"
+            power_on_time_cache: std::cell::Cell::new(5.0),
             source_width_cache: std::cell::Cell::new(560.0),
             source_height_cache: std::cell::Cell::new(384.0),
             ntsc_pipeline,
@@ -1425,8 +1421,7 @@ impl CrtRenderer {
 
     /// Compute the content rect and bar boundary in intermediate texture UV space.
     /// The scaling renderer maps the pixel buffer to the surface with aspect-ratio
-    /// preservation, creating pillarbox/letterbox bars.  We need to know exactly
-    /// where the content sits so the shader can separate emulator from status bar.
+    /// preservation, creating pillarbox/letterbox bars.
     fn compute_uniforms(
         surface_w: u32, surface_h: u32,
         buffer_w: u32, buffer_h: u32,
@@ -1549,13 +1544,13 @@ impl CrtRenderer {
 
         // Phosphor persistence (blend current frame with decayed history)
         // Clear history/blur/glow textures for several frames after resize to remove stale GPU memory
-        // DON'T clear intermediate - it has the current frame from scaling_renderer
+        // DON'T clear intermediate as it has the current frame from scaling_renderer
         {
             let clear_remaining = self.clear_frames_remaining.get();
             if clear_remaining > 0 {
                 self.clear_frames_remaining.set(clear_remaining - 1);
                 // Clear textures that might contain garbage from resize
-                // NOTE: Don't clear intermediate_render_view - it has current frame data!
+                // NOTE: Don't clear intermediate_render_view!
                 let textures_to_clear = [
                     (&self.phosphor_history_a_view, "clear_phosphor_a"),
                     (&self.phosphor_history_b_view, "clear_phosphor_b"),

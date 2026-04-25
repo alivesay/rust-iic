@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use crate::{device::{iwm::Iwm, joystick::Joystick, keyboard::Keyboard, memexp::MemoryExpansion, mockingboard::Mockingboard, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, video::VideoModeMask};
+use crate::{device::{iwm::Iwm, paddle::Paddle, keyboard::Keyboard, memexp::MemoryExpansion, mockingboard::Mockingboard, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, timing, video::VideoModeMask};
 
 /// Even $C08x access: apply mode (never includes WRITE).
 /// Also resets the consecutive-read tracking since any even access
@@ -50,7 +50,7 @@ pub struct IOU {
   pub video_mode: Cell<u8>,
 
   pub keyboard: Keyboard,
-  pub joystick: Joystick,
+  pub paddle: Paddle,
   pub scc: Scc,      // Zilog 8530 SCC — Ch A: Modem, Ch B: Printer
   pub iwm: Iwm,
   pub mouse: Mouse,
@@ -60,7 +60,7 @@ pub struct IOU {
   pub mockingboard2: Mockingboard, // Second Mockingboard (Slot 4, conflicts with memexp)
   pub zip: ZipChip,  // ZIP Chip accelerator (optional)
   pub cycles: u64,
-  pub scan_cycle: u64,  // Position within NTSC frame (resets every 17030 cycles)
+  pub scan_cycle: u64,  // Position within NTSC frame (resets every CYCLES_PER_FRAME cycles)
   pub floating_bus: u8,  // Last byte video hardware would read from RAM at current scan position
   pub col80_switch: bool, // Physical 80/40 column slide switch (true = 80 col)
   pub disk35_mode: bool, // $C031 bit 6: false=5.25" drives, true=3.5"/SmartPort
@@ -80,7 +80,7 @@ impl IOU {
           video_mode: Cell::new(VideoModeMask::TEXT),
 
           keyboard: Keyboard::new(),
-          joystick: Joystick::new(),
+          paddle: Paddle::new(),
           scc: Scc::new(),
           iwm: Iwm::new(),
           mouse: Mouse::new(),
@@ -183,10 +183,7 @@ impl IOU {
         
         0xC019 => { 
             // Live VBL status based on scan_cycle position within NTSC frame
-            // 262 scanlines × 65 cycles = 17030 cycles/frame
-            // Active display: scanlines 0-191 (cycles 0-12479)
-            // VBL: scanlines 192-261 (cycles 12480-17029)
-            let in_vbl = self.scan_cycle >= 12480;
+            let in_vbl = self.scan_cycle >= timing::VBL_START_CYCLE;
             self.mouse.vbl_int.set(false); // Side effect: reset VBL interrupt
             (in_vbl as u8) << 7
         }, //  RSTVBL         C   R   Reset Vertical Blanking Interrupt
@@ -221,9 +218,9 @@ impl IOU {
         0xC048 => { self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00 }, // C048 49224 RSTXY          C  WR   Reset X and Y Interrupts
     
         0xC070..=0xC07F => {
-            // Trigger Paddle Timer - starts the RC timing circuit for analog inputs
+            // Trigger Paddle Timer: starts the RC timing circuit for analog inputs
             // Any access to $C070-$C07F triggers the paddle timers
-            self.joystick.trigger(self.cycles);
+            self.paddle.trigger(self.cycles);
             
             if addr == 0xC070 {
                 self.mouse.vbl_int.set(false); // Reset VBLInt
@@ -318,18 +315,18 @@ impl IOU {
           0xC061 => {
               // PB0 - Open Apple key / Joystick Button 0
               // Also wired to mouse button for mouse-aware apps
-              let pressed = self.mouse.button0.get() || (self.self_test && self.cycles < 2_000_000);
+              let pressed = self.mouse.button0.get() || self.paddle.button0.get() || (self.self_test && self.cycles < 2_000_000);
               (pressed as u8) << 7
           }, // C061 49249 RDBTN0        ECG  R7  Switch Input 0 / Solid Apple
           0xC062 => {
               // PB1 - Solid Apple key / Joystick Button 1
-              let pressed = self.mouse.button1.get() || (self.self_test && self.cycles < 2_000_000);
+              let pressed = self.mouse.button1.get() || self.paddle.button1.get() || (self.self_test && self.cycles < 2_000_000);
               (pressed as u8) << 7
           }, // C062 49250 RDBTN1        ECG  R7  Switch Input 1 / Open Apple
           0xC063 => (!self.mouse.button0.get() as u8) << 7, //                           C   R7  Bit 7 = Mouse Button Not Pressed
-          // Paddle/Joystick analog inputs - delegated to Joystick module
-          0xC064 => self.joystick.read(0, self.cycles),
-          0xC065 => self.joystick.read(1, self.cycles),
+          // Paddle analog inputs - delegated to Paddle module
+          0xC064 => self.paddle.read(0, self.cycles),
+          0xC065 => self.paddle.read(1, self.cycles),
           0xC066 => (self.mouse.x_dir.get() as u8) << 7, //           RDMOUX1        C   R7  Mouse X1 Direction (1 = right)
           0xC067 => (self.mouse.y_dir.get() as u8) << 7, //           RDMOUY1        C   R7  Mouse Y1 Direction (1 = down)
           0xC068 => 0x00, // STATEREG (IIGS) - Ignore on IIc
@@ -429,7 +426,7 @@ impl IOU {
 
           0xC070..=0xC07F => {
               // Trigger Paddle Timer - starts the RC timing circuit for analog inputs
-              self.joystick.trigger(self.cycles);
+              self.paddle.trigger(self.cycles);
               
               if addr == 0xC070 {
                   self.mouse.vbl_int.set(false); // Reset VBLInt

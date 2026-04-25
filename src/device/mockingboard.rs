@@ -23,8 +23,8 @@ use ringbuf::wrap::caching::Caching;
 pub type AudioProducer = Caching<Arc<HeapRb<f32>>, true, false>;
 
 const AMPLITUDE: f32 = 0.5;
-// Apple II clock is 14.318181 MHz / 14 = 1.022727 MHz
-const CYCLES_PER_SECOND: f64 = 1_022_727.0;
+use crate::timing;
+const CYCLES_PER_SECOND: f64 = timing::CYCLES_PER_SECOND;
 
 // AY-3-8910 PSG register indices
 mod ay_reg {

@@ -21,6 +21,7 @@ mod mmu;
 mod monitor;
 mod render;
 mod rom;
+mod timing;
 mod util;
 mod video;
 
@@ -67,7 +68,7 @@ fn main() -> Result<(), Error> {
     let mut cpu = CPU::new(
         SystemType::AppleIIc,
         CpuType::CMOS65C02,
-        (args.speed * 1_023_000.0) as u32,
+        (args.speed as f64 * timing::CYCLES_PER_SECOND) as u32,
         args.self_test,
         audio_producers.speaker,
         sample_rate,
@@ -96,7 +97,7 @@ fn main() -> Result<(), Error> {
     }
 
     if args.modem {
-        cpu.bus.iou.scc.ch_a.modem_enabled = true;
+        cpu.bus.iou.scc.ch_a.modem.enabled = true;
         cpu.bus.iou.scc.ch_a.debug = args.debug;
         println!("Virtual Hayes modem enabled on modem port (slot 2)");
         println!("Use ATDT host:port from terminal software to connect");
@@ -145,11 +146,17 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    // Register ProDOS MLI hooks (logs all ProDOS system calls)
+    // Register ProDOS MLI hooks
     hooks::register_hooks(&mut cpu.hooks);
 
+    // Paddle/gamepad input
+    if args.paddle {
+        cpu.bus.iou.paddle.enable_gamepad();
+        println!("Paddle enabled.");
+    }
+
     // Load ROM
-    let iic_rom_file = include_bytes!("../iic3.bin");
+    let iic_rom_file = include_bytes!("../assets/iic3.bin");
     let iic_rom = rom::ROM::load_from_bytes(iic_rom_file, cpu.system_type).unwrap();
     cpu.load_rom(iic_rom);
     cpu.init();
@@ -182,6 +189,17 @@ fn main() -> Result<(), Error> {
             }
             Err(e) => {
                 eprintln!("Failed to load 3.5\" disk '{}': {}", path, e);
+            }
+        }
+    }
+
+    if let Some(path) = &args.disk35_2 {
+        match cpu.bus.iou.iwm.load_disk35_drive(1, path) {
+            Ok(()) => {
+                println!("3.5\" drive 2: {}", path);
+            }
+            Err(e) => {
+                eprintln!("Failed to load 3.5\" disk 2 '{}': {}", path, e);
             }
         }
     }
@@ -242,7 +260,7 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
     let mut app = App::new(cpu, args.shader, args.fullscreen);
 
     let timeout = Some(Duration::ZERO);
-    let target_frame_time = Duration::from_micros(16667); // ~60Hz
+    let target_frame_time = Duration::from_micros(timing::FRAME_DURATION_MICROS);
 
     let mut fast_mode = args.fast_until.is_some();
     let fast_until_addr = args
@@ -257,9 +275,9 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
         .unwrap_or(0);
 
     let mut cycles_per_frame = if fast_mode {
-        (args.fast_speed * 1_023_000.0 / 60.0) as u64
+        (args.fast_speed as f64 * timing::CYCLES_PER_FRAME as f64) as u64
     } else {
-        (args.speed * 1_023_000.0 / 60.0) as u64
+        (args.speed as f64 * timing::CYCLES_PER_FRAME as f64) as u64
     };
 
     let mut next_frame_time = Instant::now();
@@ -293,23 +311,23 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
         // ZIP CHIP: multiply effective cycles when accelerated
         let zip_multiplier = app.cpu.bus.iou.zip.speed_multiplier() as u64;
         
-        let effective_cpf = if iwm_fast {
+        let effective_cpf: u64 = if iwm_fast {
             cycles_per_frame * 8
         } else {
             cycles_per_frame * zip_multiplier
         };
 
-        if app.window.is_some() {
+        if app.window.is_some() && !app.paused {
             // Scanline-interleaved execution: run ~65 cycles per scanline (262 scanlines/frame)
-            // for canline-accurate VBL timing and floating bus values.
-            let cycles_per_scanline = effective_cpf / 262;
-            let remainder = effective_cpf % 262;
+            // for scanline-accurate VBL timing and floating bus values.
+            let cycles_per_scanline = effective_cpf / timing::SCANLINES_PER_FRAME;
+            let remainder = effective_cpf % timing::SCANLINES_PER_FRAME;
             let mut cycles_run: u64 = 0;
             let mut target_cycles: u64 = 0;
 
             app.cpu.video_begin_frame();
 
-            for scanline in 0..262_usize {
+            for scanline in 0..timing::SCANLINES_PER_FRAME as usize {
                 // overshoot from one scanline naturally reduces the next
                 target_cycles += cycles_per_scanline + if (scanline as u64) < remainder { 1 } else { 0 };
 
@@ -320,7 +338,7 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
                             fast_until_addr
                         );
                         fast_mode = false;
-                        cycles_per_frame = (1.0 * 1_023_000.0 / 60.0) as u64;
+                        cycles_per_frame = timing::CYCLES_PER_FRAME;
                         app.cpu.debug = true;
                     }
 
@@ -343,6 +361,9 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
             app.cpu.bus.iou.mockingboard.update(app.cpu.bus.iou.cycles);
             app.cpu.bus.iou.mockingboard2.update(app.cpu.bus.iou.cycles);
             app.cpu.bus.iou.iwm.update_audio();
+
+            // Poll host gamepad for paddle/button input
+            app.cpu.bus.iou.paddle.poll();
         }
 
         let status = event_loop.pump_app_events(timeout, &mut app);

@@ -1,21 +1,14 @@
-//! Apple IIc Speaker Emulation
-//!
-//! Generates audio samples from speaker toggle events. The actual audio
-//! playback is handled by a platform-specific backend (cpal, SDL, I2S, etc.)
-//!
-//! This module is portable and has no platform dependencies.
-
 use std::sync::Arc;
 use ringbuf::{HeapRb, traits::*};
 use ringbuf::wrap::caching::Caching;
 use std::collections::VecDeque;
 
 const AMPLITUDE: f32 = 0.1;
-const CYCLES_PER_SECOND: f64 = 1_023_000.0;
-// Decay time in seconds — after this long without a toggle, output goes silent
+use crate::timing;
+
+const CYCLES_PER_SECOND: f64 = timing::CYCLES_PER_SECOND;
 const DECAY_SECONDS: f64 = 0.02; // ~20ms
 
-/// Audio sample producer type (platform-agnostic ringbuffer)
 pub type AudioProducer = Caching<Arc<HeapRb<f32>>, true, false>;
 
 pub struct Speaker {
@@ -29,10 +22,6 @@ pub struct Speaker {
 }
 
 impl Speaker {
-    /// Create a new speaker with the given audio producer and sample rate.
-    /// 
-    /// The producer is typically created by the audio backend (cpal, SDL, etc.)
-    /// and samples pushed here will be played by that backend.
     pub fn new(producer: AudioProducer, sample_rate: u32) -> Self {
         Self {
             producer,
@@ -45,15 +34,12 @@ impl Speaker {
         }
     }
 
-    /// Record a speaker toggle at the given cycle.
-    /// Called when $C030 is accessed.
+    // Called when $C030 is accessed.
     pub fn toggle(&mut self, cycle: u64) {
         self.toggles.push_back(cycle);
         self.last_toggle_cycle = cycle;
     }
 
-    /// Generate audio samples up to the current cycle.
-    /// Should be called once per frame.
     pub fn update(&mut self, current_cycle: u64) {
         let cycles_per_sample = CYCLES_PER_SECOND / self.sample_rate as f64;
         let decay_cycles = (DECAY_SECONDS * CYCLES_PER_SECOND) as u64;
