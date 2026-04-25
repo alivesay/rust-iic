@@ -373,6 +373,9 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
             std::process::exit(exit_code as i32);
         }
 
+        // Snap window to aspect ratio after user finishes resizing
+        app.snap_aspect_ratio();
+
         if let Some(window) = &app.window {
             window.request_redraw();
         }
