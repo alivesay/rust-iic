@@ -16,8 +16,8 @@ impl Joystick {
     pub fn new() -> Self {
         Self {
             trigger_cycle: Cell::new(u64::MAX),
-            paddle0: Cell::new(None), // No joystick connected
-            paddle1: Cell::new(None),
+            paddle0: Cell::new(Some(128)),
+            paddle1: Cell::new(Some(128)),
         }
     }
     

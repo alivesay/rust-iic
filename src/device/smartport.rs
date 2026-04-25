@@ -330,34 +330,8 @@ impl Default for SmartPort {
 }
 
 impl SmartPort {
-    fn trace_wire_enabled(&self) -> bool {
-        self.compare_trace_block.is_some()
-    }
-
-    fn trace_wire(&self, label: &str) {
-        if !self.trace_wire_enabled() {
-            return;
-        }
-
-        eprintln!(
-            "SMARTPORT WIRE: {} state={:?} bsy={} req={} ack={} ack_low={} resp_index={}/{} delay={} current_dest={} compare_block={:?}",
-            label,
-            self.state,
-            self.bsy,
-            self.req_high,
-            self.ack,
-            self.ack_low_count,
-            self.resp_index,
-            self.resp_buffer.len(),
-            self.response_delay_cycles,
-            self.current_dest,
-            self.compare_trace_block,
-        );
-    }
-
     fn make_response_ready(&mut self) {
         self.bsy = true;
-        self.trace_wire("make_response_ready");
         log::debug!(
             "SmartPort: BSY HIGH, response ready ({} bytes)",
             self.resp_buffer.len()
@@ -371,7 +345,6 @@ impl SmartPort {
 
         self.state = ProtocolState::SendingResponse;
         self.resp_index = 0;
-        self.trace_wire("maybe_start_sending_response");
         log::debug!(
             "SmartPort: REQ HIGH, sending response ({} bytes)",
             self.resp_buffer.len()
@@ -407,19 +380,6 @@ impl SmartPort {
         }
     }
 
-    pub fn start_compare_trace(&mut self, block: u32) {
-        self.compare_trace_seq = self.compare_trace_seq.wrapping_add(1);
-        self.compare_trace_block = Some(block);
-        self.compare_trace_remaining = 24;
-
-        eprintln!(
-            "COMPARE TRACE START: seq={} block={} window={}",
-            self.compare_trace_seq,
-            block,
-            self.compare_trace_remaining,
-        );
-    }
-
     // Load a 3.5" disk image into the floppy drive (unit 1)
     pub fn load_disk(&mut self, path: &str) -> Result<(), String> {
         self.floppy.load_disk(path)
@@ -453,14 +413,27 @@ impl SmartPort {
     }
 
     // Get bare SmartPortDevice by 1-based unit number.
-    // Unit 1 = floppy.device, Unit 2 = hdv_devices[0], Unit 3 = hdv_devices[1]
+    // Maps unit numbers to active (has_disk) devices dynamically:
+    // only devices with disks are assigned unit numbers, so when
+    // only an HDV is loaded (no floppy), unit 1 maps to hdv[0].
     fn get_device(&mut self, unit: u8) -> Option<&mut SmartPortDevice> {
-        match unit {
-            1 => Some(&mut self.floppy.device),
-            2 => Some(&mut self.hdv_devices[0]),
-            3 => Some(&mut self.hdv_devices[1]),
-            _ => None,
+        let mut current = 0u8;
+        if self.floppy.has_disk() {
+            current += 1;
+            if current == unit { return Some(&mut self.floppy.device); }
         }
+        for i in 0..self.hdv_devices.len() {
+            if self.hdv_devices[i].has_disk() {
+                current += 1;
+                if current == unit { return Some(&mut self.hdv_devices[i]); }
+            }
+        }
+        None
+    }
+
+    // Check if a 1-based unit number maps to the floppy drive
+    fn is_floppy_unit(&self, unit: u8) -> bool {
+        self.floppy.has_disk() && unit == 1
     }
 
     // Drain any pending drive-audio events (called by IWM after command processing)
@@ -471,7 +444,6 @@ impl SmartPort {
     // Reset SmartPort bus state (called when phase lines signal bus reset: ph0+ph2)
     pub fn bus_reset(&mut self) {
         log::debug!("SmartPort: bus reset");
-        self.trace_wire("bus_reset-before");
         self.state = ProtocolState::WaitingForSync;
         self.cmd_buffer.clear();
         self.resp_buffer.clear();
@@ -484,7 +456,6 @@ impl SmartPort {
         self.current_dest = 0;
         self.response_delay_cycles = 0;
         self.response_waiting_for_req_low = false;
-        self.trace_wire("bus_reset-after");
     }
 
     pub fn tick(&mut self, cycles: u64) {
@@ -495,16 +466,8 @@ impl SmartPort {
             return;
         }
 
-        let before = self.response_delay_cycles;
         self.response_delay_cycles = self.response_delay_cycles.saturating_sub(cycles);
         if self.response_delay_cycles == 0 {
-            if self.trace_wire_enabled() {
-                eprintln!(
-                    "SMARTPORT WIRE: response_delay_elapsed by {} cycles ({} -> 0)",
-                    cycles,
-                    before,
-                );
-            }
             self.make_response_ready();
             self.maybe_start_sending_response();
         }
@@ -527,10 +490,7 @@ impl SmartPort {
     //   ResponseDone    + REQ drops  → BSY stays LOW, return to idle
     pub fn notify_req_change(&mut self, req_high: bool) {
         self.req_high = req_high;
-        if self.trace_wire_enabled() {
-            let edge = if req_high { "REQ high" } else { "REQ low" };
-            self.trace_wire(edge);
-        }
+
         if req_high {
             self.maybe_start_sending_response();
             return;
@@ -549,7 +509,6 @@ impl SmartPort {
                 // Transfer complete
                 self.bsy = true;
                 self.state = ProtocolState::Idle;
-                self.trace_wire("notify_req_change-response_done->idle");
                 log::debug!("SmartPort: REQ dropped after response done, back to idle");
             }
             _ => {}
@@ -613,19 +572,6 @@ impl SmartPort {
             let byte = self.resp_buffer[self.resp_index];
             self.resp_index += 1;
 
-            if self.trace_wire_enabled()
-                && (self.resp_index <= 12 || self.resp_index + 8 >= self.resp_buffer.len())
-            {
-                eprintln!(
-                    "SMARTPORT WIRE: read_next_response_byte idx={} byte={:02X} state={:?} bsy={} req={}",
-                    self.resp_index - 1,
-                    byte,
-                    self.state,
-                    self.bsy,
-                    self.req_high,
-                );
-            }
-
             if self.resp_index <= 30 || self.resp_index > self.resp_buffer.len() - 10 {
                 log::debug!("SmartPort read [{}]: {:02X}", self.resp_index - 1, byte);
             }
@@ -634,7 +580,6 @@ impl SmartPort {
                 log::debug!("SmartPort: Response fully read ({} bytes)", self.resp_buffer.len());
                 self.bsy = false; // BSY LOW signals transfer complete
                 self.state = ProtocolState::ResponseDone;
-                self.trace_wire("read_next_response_byte-response_done");
             }
             Some(byte)
         } else {
@@ -701,9 +646,6 @@ impl SmartPort {
     fn try_process_command(&mut self) {
         if self.header_count < 7 { return; }
 
-        let odd_cnt = self.header[5] as usize;
-        let grp_cnt = self.header[6] as usize;
-        let expected_len = self.expected_command_len();
         let dest = self.header[0];
         let mut decoded = self.decode_payload();
         let cmd  = decoded.first().copied().unwrap_or(0);
@@ -714,33 +656,7 @@ impl SmartPort {
         let max_dest = self.device_count();
 
         self.current_dest = dest;
-        if cmd == 0x01 {
-            eprintln!(
-                "SMARTPORT WIRE: command decoded cmd={:02X} dest={} raw_unit={} state={:?} req={} bsy={} header={:02X?}",
-                cmd,
-                dest,
-                raw_unit,
-                self.state,
-                self.req_high,
-                self.bsy,
-                self.header,
-            );
-        }
-        eprintln!(
-            "SmartPort: header dest={} src={} type={:02X} aux={:02X} stat={:02X} odd={} grp={} expected_len={} buf_len={} raw_header={:02X?}",
-            self.header[0],
-            self.header[1],
-            self.header[2],
-            self.header[3],
-            self.header[4],
-            odd_cnt,
-            grp_cnt,
-            expected_len,
-            self.cmd_buffer.len(),
-            self.header,
-        );
-        eprintln!("SmartPort: try_process_command cmd={:02X} dest={} raw_unit={} max_dest={} buf_len={}", 
-            cmd, dest, raw_unit, max_dest, self.cmd_buffer.len());
+
         if dest > max_dest {
             self.state = ProtocolState::Idle;
             if self.debug {
@@ -775,9 +691,11 @@ impl SmartPort {
         log::debug!("SmartPort: CMD={:02X} dest={} raw_unit={} local_unit={} (devices={})",
             cmd, dest, raw_unit, unit, max_dest);
 
-        // Unit 1 = 3.5" floppy -> delegate to UniDisk35 device emulation
-        if unit == 1 || (unit == 0 && cmd == 0x00) {
-            if unit == 1 {
+        // Floppy gets unit 1 only when it has a disk loaded;
+        // otherwise unit 1 maps to the first HDV device.
+        let is_floppy = self.is_floppy_unit(unit);
+        if is_floppy || (unit == 0 && cmd == 0x00) {
+            if is_floppy {
                 let block = if decoded.len() >= 7 {
                     (decoded[4] as u32) | ((decoded[5] as u32) << 8) | ((decoded[6] as u32) << 16)
                 } else { 0 };
@@ -827,26 +745,21 @@ impl SmartPort {
             (decoded[4] as u32) | ((decoded[5] as u32) << 8) | ((decoded[6] as u32) << 16)
         } else { 0 };
 
-        eprintln!("SmartPort: READ_BLOCK #{} unit={} decoded_len={} decoded={:02X?}", 
-            block, unit, decoded.len(), &decoded[..decoded.len().min(10)]);
-
         // Units 2+ are HDV (get_device handles mapping)
         if let Some(dev) = self.get_device(unit) {
             let mut payload = [0u8; 512];
             match dev.read_block(block, &mut payload) {
                 Ok(()) => {
-                    eprintln!("SmartPort: READ_BLOCK #{} first16={:02X?}", block, &payload[..16]);
-                    self.start_compare_trace(block);
                     self.build_response(0x00, 0x01, 0x02, 0x00, &payload);
-                    log::debug!("SmartPort: READ_BLOCK #{} unit={} OK", block, unit);
+                    // log::debug!("SmartPort: READ_BLOCK #{} unit={} OK", block, unit);
                 }
-                Err(e) => {
-                    log::warn!("SmartPort: READ_BLOCK #{} unit={} error: {}", block, unit, e);
+                Err(_e) => {
+                    // log::warn!("SmartPort: READ_BLOCK #{} unit={} error: {}", block, unit, e);
                     self.generate_error_response(0x27);
                 }
             }
         } else {
-            log::warn!("SmartPort: READ_BLOCK to invalid unit {}", unit);
+            // log::warn!("SmartPort: READ_BLOCK to invalid unit {}", unit);
             self.generate_error_response(0x28);
         }
     }
@@ -1072,10 +985,7 @@ impl SmartPort {
         self.bsy = false; // BSY LOW signals command acknowledged
         self.response_delay_cycles = SMARTPORT_RESPONSE_DELAY_CYCLES;
         self.response_waiting_for_req_low = true;
-        self.trace_wire("build_response-response_pending");
-        eprintln!("SmartPort: build_response done, bsy={}, state→ResponsePending, resp_len={}", self.bsy, self.resp_buffer.len());
         self.state = ProtocolState::ResponsePending;
-        self.trace_wire("build_response-state_set");
     }
 
     fn generate_device_count_response(&mut self) {
