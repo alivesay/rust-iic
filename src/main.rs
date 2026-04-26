@@ -172,16 +172,7 @@ fn main() -> Result<(), Error> {
     cpu.init();
 
     // Load disks
-    let disk_path = args.disk.clone().or_else(|| {
-        let default_path = "floppies/diag.woz";
-        if std::path::Path::new(default_path).exists() {
-            Some(default_path.to_string())
-        } else {
-            None
-        }
-    });
-
-    if let Some(path) = disk_path {
+    if let Some(path) = &args.disk {
         cpu.bus.iou.iwm.load_disk(path.clone()).unwrap();
         println!("disk  {:>12} {:>8}    {}", "5.25_D1", "LOADED", path);
     }
