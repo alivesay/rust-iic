@@ -115,7 +115,7 @@ fn main() -> Result<(), Error> {
     if args.modem {
         cpu.bus.iou.scc.ch_a.modem.enabled = true;
         cpu.bus.iou.scc.ch_a.debug = args.debug;
-        println!("serial {:>12} {:>8}    Hayes modem on slot 2", "MODEM", "ONLINE");
+        println!("serial {:>11} {:>8}    Hayes modem on slot 2", "MODEM", "ONLINE");
     }
 
     if args.serial_loopback {
