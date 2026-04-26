@@ -83,7 +83,7 @@ impl Bus {
     pub fn peek_byte(&mut self, addr: u16) -> u8 {
         if self.system_type == SystemType::AppleIIc {
             if addr >= 0xC000 && addr <= 0xC0FF {
-                // TODO: For now, return 0 for soft switches to avoid side effects
+                // TODO: for now, return 0 for soft switches to avoid side effects
                 0x00
             } else {
                 self.mmu.read_byte(&mut self.iou, addr)
