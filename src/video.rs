@@ -269,8 +269,7 @@ impl Video {
 
     // Simulate CRT electron beam spot size: the beam illuminates a Gaussian
     // region wider than a single phosphor, so neighboring pixels overlap.
-    // 3-tap horizontal kernel [0.15, 0.70, 0.15] softens hard 2px block
-    // edges without destroying text readability.
+    // 3-tap horizontal kernel [0.05, 0.90, 0.05]
     fn apply_phosphor_spread(&mut self) {
         let aw = self.active_width;
 
@@ -305,9 +304,9 @@ impl Video {
                     (cr, cg, cb)
                 };
 
-                let nr = (lr * 0.15 + cr * 0.70 + rr * 0.15) as u8;
-                let ng = (lg * 0.15 + cg * 0.70 + rg * 0.15) as u8;
-                let nb = (lb * 0.15 + cb * 0.70 + rb * 0.15) as u8;
+                let nr = (lr * 0.05 + cr * 0.90 + rr * 0.05) as u8;
+                let ng = (lg * 0.05 + cg * 0.90 + rg * 0.05) as u8;
+                let nb = (lb * 0.05 + cb * 0.90 + rb * 0.05) as u8;
 
                 for dy in 0..2_usize {
                     let idx = self.fb_index(x, y + dy);
