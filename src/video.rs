@@ -222,45 +222,62 @@ impl Video {
         ((y + self.border_size) * self.width + (x + self.border_size)) * 4
     }
 
+    // 2-line comb filter in YIQ space
     fn apply_comb_filter(&mut self) {
-        let original = self.framebuffer.clone();
-        const BLEND: f32 = 0.1;
+        let aw = self.active_width;
+        const BLEND: f32 = 0.25;
+
+        // convert entire active area to YIQ rows
+        let mut yiq: Vec<(f32, f32, f32)> = Vec::with_capacity(192 * aw);
+        for src_line in 0..192_usize {
+            let y_cur = src_line * 2;
+            for x in 0..aw {
+                let idx = self.fb_index(x, y_cur);
+                let r = self.framebuffer[idx] as f32 / 255.0;
+                let g = self.framebuffer[idx + 1] as f32 / 255.0;
+                let b = self.framebuffer[idx + 2] as f32 / 255.0;
+                yiq.push((
+                    0.299 * r + 0.587 * g + 0.114 * b,
+                    0.5959 * r - 0.2746 * g - 0.3213 * b,
+                    0.2115 * r - 0.5227 * g + 0.3112 * b,
+                ));
+            }
+        }
 
         for src_line in 0..192_usize {
             let y_cur = src_line * 2;
+            let row = src_line * aw;
 
-            for x in 0..self.active_width {
-                let idx_cur = self.fb_index(x, y_cur);
-                if idx_cur + 4 > original.len() { continue; }
+            for x in 0..aw {
+                let (y_val, mut i_val, mut q_val) = yiq[row + x];
 
-                let cr = original[idx_cur] as f32;
-                let cg = original[idx_cur + 1] as f32;
-                let cb = original[idx_cur + 2] as f32;
-
-                let mut blend_r = cr;
-                let mut blend_g = cg;
-                let mut blend_b = cb;
-
+                // Blend I/Q toward neighbors (luma stays sharp)
                 if src_line > 0 {
-                    let idx = self.fb_index(x, (src_line - 1) * 2);
-                    blend_r += (original[idx] as f32 - cr) * BLEND;
-                    blend_g += (original[idx + 1] as f32 - cg) * BLEND;
-                    blend_b += (original[idx + 2] as f32 - cb) * BLEND;
+                    let prev = (src_line - 1) * aw + x;
+                    i_val += (yiq[prev].1 - i_val) * BLEND;
+                    q_val += (yiq[prev].2 - q_val) * BLEND;
+                }
+                if src_line < 191 {
+                    let next = (src_line + 1) * aw + x;
+                    i_val += (yiq[next].1 - i_val) * BLEND;
+                    q_val += (yiq[next].2 - q_val) * BLEND;
                 }
 
-                if src_line < 191 {
-                    let idx = self.fb_index(x, (src_line + 1) * 2);
-                    blend_r += (original[idx] as f32 - cr) * BLEND;
-                    blend_g += (original[idx + 1] as f32 - cg) * BLEND;
-                    blend_b += (original[idx + 2] as f32 - cb) * BLEND;
-                }
+                // YIQ → RGB
+                let r = (y_val + 0.9563 * i_val + 0.6210 * q_val).clamp(0.0, 1.0);
+                let g = (y_val - 0.2721 * i_val - 0.6474 * q_val).clamp(0.0, 1.0);
+                let b = (y_val - 1.1070 * i_val + 1.7046 * q_val).clamp(0.0, 1.0);
+
+                let rb = (r * 255.0) as u8;
+                let gb = (g * 255.0) as u8;
+                let bb = (b * 255.0) as u8;
 
                 for dy in 0..2_usize {
                     let idx = self.fb_index(x, y_cur + dy);
                     if idx + 4 <= self.framebuffer.len() {
-                        self.framebuffer[idx] = blend_r as u8;
-                        self.framebuffer[idx + 1] = blend_g as u8;
-                        self.framebuffer[idx + 2] = blend_b as u8;
+                        self.framebuffer[idx] = rb;
+                        self.framebuffer[idx + 1] = gb;
+                        self.framebuffer[idx + 2] = bb;
                     }
                 }
             }
