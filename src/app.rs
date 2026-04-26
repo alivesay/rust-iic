@@ -22,7 +22,7 @@ use crate::device::drive_audio::DriveAudioParams;
 use crate::monitor::Monitor;
 use crate::render::{
     blit_direct, blit_nearest, CrtRenderer,
-    DriveIcons, DriveStatusInfo, LcdRenderer, PostProcessor, ToolbarAction, render_toolbar_ui,
+    DriveIcons, DriveStatusInfo, LcdRenderer, PostProcessor, ToolbarAction, ToolbarLabels, render_toolbar_ui,
 };
 
 pub struct App {
@@ -53,6 +53,7 @@ pub struct App {
     pub drive_audio_params: DriveAudioParams,
     pub cpu_monitor: CpuMonitor,
     pub drive_icons: Option<DriveIcons>,
+    pub toolbar_labels: Option<ToolbarLabels>,
     pub paused: bool,
     pub window_aspect_ratio: f64,
     pub last_resize_time: Option<Instant>,
@@ -90,9 +91,42 @@ impl App {
             drive_audio_params: DriveAudioParams::default(),
             cpu_monitor: CpuMonitor::new(),
             drive_icons: None,
+            toolbar_labels: None,
             paused: false,
             window_aspect_ratio: 1.0,
             last_resize_time: None,
+        }
+    }
+
+    fn load_window_icon() -> Option<winit::window::Icon> {
+        let icon_data = include_bytes!("../assets/disk2.png");
+        let img = image::load_from_memory(icon_data).ok()?.into_rgba8();
+        let (w, h) = img.dimensions();
+        winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_macos_dock_icon() {
+        use objc2::MainThreadMarker;
+        use objc2::AnyThread;
+        use objc2_app_kit::{NSApplication, NSImage};
+        use objc2_foundation::{NSData, NSSize};
+
+        // Upscale 32x32 pixel art to 128x128 with nearest-neighbor, then encode as PNG
+        let icon_data = include_bytes!("../assets/disk2.png");
+        let src = image::load_from_memory(icon_data).unwrap().into_rgba8();
+        let scaled = image::imageops::resize(&src, 128, 128, image::imageops::FilterType::Nearest);
+        let mut png_buf = std::io::Cursor::new(Vec::new());
+        scaled.write_to(&mut png_buf, image::ImageFormat::Png).unwrap();
+
+        unsafe {
+            let mtm = MainThreadMarker::new_unchecked();
+            let data = NSData::with_bytes(png_buf.get_ref());
+            if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                image.setSize(NSSize::new(128.0, 128.0));
+                let app = NSApplication::sharedApplication(mtm);
+                app.setApplicationIconImage(Some(&image));
+            }
         }
     }
 
@@ -271,12 +305,16 @@ impl winit::application::ApplicationHandler for App {
                         .with_title("Apple //c")
                         .with_inner_size(LogicalSize::new(win_w, win_h))
                         .with_min_inner_size(LogicalSize::new(base_w, base_h))
-                        .with_enabled_buttons(window_buttons),
+                        .with_enabled_buttons(window_buttons)
+                        .with_window_icon(Self::load_window_icon()),
                 )
                 .unwrap(),
         );
 
         self.window = Some(window.clone());
+
+        #[cfg(target_os = "macos")]
+        Self::set_macos_dock_icon();
 
         #[cfg(target_os = "macos")]
         if self.start_fullscreen {
@@ -748,7 +786,10 @@ impl App {
                                 if self.drive_icons.is_none() {
                                     self.drive_icons = Some(DriveIcons::load(ctx));
                                 }
-                                toolbar_action = render_toolbar_ui(ctx, &drive_status, col80, self.paused, self.drive_icons.as_ref().unwrap());
+                                if self.toolbar_labels.is_none() {
+                                    self.toolbar_labels = Some(ToolbarLabels::load(ctx));
+                                }
+                                toolbar_action = render_toolbar_ui(ctx, &drive_status, col80, self.paused, self.drive_icons.as_ref().unwrap(), self.toolbar_labels.as_ref().unwrap());
                             }
                         });
                         egui_state.handle_platform_output(window.as_ref(), output.platform_output.clone());
@@ -816,42 +857,46 @@ impl App {
 
                 let sw = self.surface_width;
                 let sh = self.surface_height;
-                let egui_renderer = self.egui_renderer.as_mut();
+                let mut egui_renderer = self.egui_renderer.take();
 
                 let render_res = pixels.render_with(|encoder, render_target, context| {
                     crt.clear_intermediate(encoder);
                     context.scaling_renderer.render(encoder, crt.intermediate_view());
                     crt.render(encoder, render_target, device);
 
-                    if let (Some(egui_rend), Some((_, ref jobs, ppp))) = (egui_renderer, &egui_output) {
-                        let screen_desc = egui_wgpu::ScreenDescriptor {
-                            size_in_pixels: [sw, sh],
-                            pixels_per_point: *ppp,
-                        };
-                        let _ = egui_rend.update_buffers(device, queue, encoder, jobs, &screen_desc);
-                        {
-                            let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("egui_render_pass"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: render_target,
-                                    resolve_target: None,
-                                    depth_slice: None,
-                                    ops: wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    },
-                                })],
-                                depth_stencil_attachment: None,
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                            });
-                            let mut rpass = rpass.forget_lifetime();
-                            egui_rend.render(&mut rpass, jobs, &screen_desc);
+                    if let (Some(ref mut egui_rend), Some((_, ref jobs, ppp))) = (&mut egui_renderer, &egui_output) {
+                        if !jobs.is_empty() {
+                            let screen_desc = egui_wgpu::ScreenDescriptor {
+                                size_in_pixels: [sw, sh],
+                                pixels_per_point: *ppp,
+                            };
+                            let _ = egui_rend.update_buffers(device, queue, encoder, jobs, &screen_desc);
+                            {
+                                let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("egui_render_pass"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: render_target,
+                                        resolve_target: None,
+                                        depth_slice: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Load,
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                });
+                                let mut rpass = rpass.forget_lifetime();
+                                egui_rend.render(&mut rpass, jobs, &screen_desc);
+                            }
                         }
                     }
 
                     Ok(())
                 });
+
+                self.egui_renderer = egui_renderer;
 
                 // Free old egui textures
                 if let Some((ref output, _, _)) = egui_output {

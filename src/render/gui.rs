@@ -6,6 +6,80 @@ pub struct DriveStatusInfo {
     pub filename: Option<String>,
 }
 
+// Apple IIc font ROM for rendering toolbar labels
+const CHAR_ROM: &[u8; 1024] = include_bytes!("../../assets/font.bin");
+
+// Rasterize a string using the Apple IIc character ROM into an RGBA image.
+fn rasterize_apple_label(text: &str) -> (usize, usize, Vec<u8>) {
+    let scale = 2;
+    let char_w = 7 * scale;
+    let char_h = 8 * scale;
+    let img_w = text.len() * char_w;
+    let img_h = char_h;
+    let mut pixels = vec![0u8; img_w * img_h * 4];
+
+    for (ci, ch) in text.chars().enumerate() {
+        // Map ASCII to font ROM offset: uppercase A-Z at 0x40-0x5A, numbers/symbols at 0x20-0x3F
+        let code = ch as u8;
+        let font_index = if code >= 0x20 && code <= 0x7F {
+            code as usize
+        } else {
+            0x20
+        };
+        let font_offset = font_index * 8;
+
+        for row in 0..8_usize {
+            let font_byte = CHAR_ROM[font_offset + row];
+            for bit in 0..7_usize {
+                let pixel_on = (font_byte >> bit) & 1 != 0;
+                if pixel_on {
+                    for sy in 0..scale {
+                        for sx in 0..scale {
+                            let px = ci * char_w + bit * scale + sx;
+                            let py = row * scale + sy;
+                            let idx = (py * img_w + px) * 4;
+                            pixels[idx] = 255;
+                            pixels[idx + 1] = 255;
+                            pixels[idx + 2] = 255;
+                            pixels[idx + 3] = 255;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (img_w, img_h, pixels)
+}
+
+// Pre-rendered Apple IIc font labels for toolbar buttons.
+pub struct ToolbarLabels {
+    pub run: egui::TextureHandle,
+    pub stp: egui::TextureHandle,
+    pub rst: egui::TextureHandle,
+    pub pwr: egui::TextureHandle,
+    pub col80: egui::TextureHandle,
+    pub col40: egui::TextureHandle,
+}
+
+impl ToolbarLabels {
+    pub fn load(ctx: &egui::Context) -> Self {
+        fn make_label(ctx: &egui::Context, name: &str, text: &str) -> egui::TextureHandle {
+            let (w, h, pixels) = rasterize_apple_label(text);
+            let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels);
+            ctx.load_texture(name, color_image, egui::TextureOptions::NEAREST)
+        }
+        Self {
+            run: make_label(ctx, "lbl_run", "RUN"),
+            stp: make_label(ctx, "lbl_stp", "STP"),
+            rst: make_label(ctx, "lbl_rst", "RST"),
+            pwr: make_label(ctx, "lbl_pwr", "PWR"),
+            col80: make_label(ctx, "lbl_80", "80"),
+            col40: make_label(ctx, "lbl_40", "40"),
+        }
+    }
+}
+
 // Toolbar drive icon textures
 pub struct DriveIcons {
     pub disk1: egui::TextureHandle,
@@ -102,13 +176,17 @@ pub fn render_toolbar_ui(
     col80: bool,
     paused: bool,
     icons: &DriveIcons,
+    labels: &ToolbarLabels,
 ) -> ToolbarAction {
     let mut action = ToolbarAction::default();
 
     egui::TopBottomPanel::bottom("toolbar")
         .resizable(false)
+        .show_separator_line(false)
         .frame(egui::Frame::new()
             .fill(egui::Color32::from_rgb(32, 32, 32))
+            .corner_radius(0.0)
+            .stroke(egui::Stroke::NONE)
             .inner_margin(egui::Margin::symmetric(8, 0)))
         .show(ctx, |ui| {
             ui.set_min_height(48.0);
@@ -118,70 +196,57 @@ pub fn render_toolbar_ui(
                 ui.spacing_mut().button_padding = egui::vec2(4.0, 4.0);
 
                 // Pause/Run button
-                let pause_text = if paused { "\u{25B6}" } else { "\u{23F8}" };
+                let pause_tex = if paused { &labels.run } else { &labels.stp };
+                let pause_img = egui::Image::new(pause_tex)
+                    .fit_to_exact_size(egui::vec2(pause_tex.size()[0] as f32, pause_tex.size()[1] as f32))
+                    .tint(egui::Color32::WHITE);
                 if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(pause_text)
-                                .color(egui::Color32::WHITE)
-                                .size(16.0),
-                        )
-                        .min_size(egui::vec2(32.0, 32.0)),
-                    )
+                    .add(egui::Button::image(pause_img).min_size(egui::vec2(32.0, 32.0)))
                     .clicked()
                 {
                     action.toggle_pause = true;
                 }
 
                 // Reset button
+                let rst_img = egui::Image::new(&labels.rst)
+                    .fit_to_exact_size(egui::vec2(labels.rst.size()[0] as f32, labels.rst.size()[1] as f32))
+                    .tint(egui::Color32::WHITE);
                 if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("\u{21BA}")
-                                .color(egui::Color32::WHITE)
-                                .size(18.0),
-                        )
-                        .min_size(egui::vec2(32.0, 32.0)),
-                    )
+                    .add(egui::Button::image(rst_img).min_size(egui::vec2(32.0, 32.0)))
                     .clicked()
                 {
                     action.reset = true;
                 }
 
                 // Power button
+                let pwr_img = egui::Image::new(&labels.pwr)
+                    .fit_to_exact_size(egui::vec2(labels.pwr.size()[0] as f32, labels.pwr.size()[1] as f32))
+                    .tint(egui::Color32::WHITE);
                 if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("\u{26A1}")
-                                .color(egui::Color32::WHITE)
-                                .size(18.0),
-                        )
-                        .min_size(egui::vec2(32.0, 32.0)),
-                    )
+                    .add(egui::Button::image(pwr_img).min_size(egui::vec2(32.0, 32.0)))
                     .clicked()
                 {
                     action.power = true;
                 }
 
                 // 40/80 column toggle
-                let col_text = if col80 { "80" } else { "40" };
+                let col_tex = if col80 { &labels.col80 } else { &labels.col40 };
+                let col_img = egui::Image::new(col_tex)
+                    .fit_to_exact_size(egui::vec2(col_tex.size()[0] as f32, col_tex.size()[1] as f32))
+                    .tint(egui::Color32::WHITE);
                 if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new(col_text).color(egui::Color32::WHITE).size(14.0))
-                            .min_size(egui::vec2(32.0, 32.0)),
-                    )
+                    .add(egui::Button::image(col_img).min_size(egui::vec2(32.0, 32.0)))
                     .clicked()
                 {
                     action.toggle_col80 = true;
                 }
 
-                // Push drive icons to the right
+                // push drive icons to the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.spacing_mut().button_padding = egui::vec2(2.0, 2.0);
 
                     let drive_types = ["5.25\"", "5.25\"", "3.5\"", "3.5\""];
-                    // Reverse order so right-to-left layout renders disk35_2 rightmost
                     for i in (0..4).rev() {
                         let drive = &drives[i];
 
