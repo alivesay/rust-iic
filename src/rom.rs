@@ -40,7 +40,7 @@ impl ROM {
         let mut data = vec![0xFF; max_size];
         data[..bytes.len()].copy_from_slice(bytes);
 
-        println!("ROM Loaded | {:?} | {} bytes", system_type, bytes.len());
+        println!("rom   {:>12} {:>8}    {:?} {} bytes", "FIRMWARE", "LOADED", system_type, bytes.len());
 
         hexdump(&data, Some(0), Some(bytes.len().min(0x100)));
 

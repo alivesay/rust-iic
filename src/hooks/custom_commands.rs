@@ -114,7 +114,7 @@ static WATCH_ADDR: AtomicU16 = AtomicU16::new(0);
 
 /// Register ProDOS MLI hook and optional memory watches
 pub fn register_prodos_hooks(hooks: &mut HookManager) {
-    println!("ProDOS MLI hook system enabled");
+    println!("hooks {:>12} {:>8}", "PRODOS_MLI", "ONLINE");
     
     // Hook the MLI entry point - fires every time ProDOS is called
     let hook = Hook::new(

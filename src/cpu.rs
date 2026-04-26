@@ -202,18 +202,14 @@ impl CPU {
     }
 
     pub fn init(&mut self) {
-        println!("CPU INIT: Performing cold boot...");
+        println!("cpu   {:>12} {:>8}", "65C02", "COLDBOOT");
 
         self.symbol_table.load_symbols();
 
         self.bus.interrupts.clear_all();
 
         if self.system_type == SystemType::AppleIIc {
-            // self.pc = 0xFF59; // OLDRST
-            //                   // self.pc = 0xFF65; // MON
-            //                   // self.pc = 0xFF69; // MONZ
             self.pc = self.bus.read_word(0xFFFC);
-            println!("Apple IIc Cold Boot: Entry point set to {:#06X}", self.pc);
         } else {
             self.pc = self.resolve_entry_point();
         }
@@ -226,7 +222,8 @@ impl CPU {
         }
 
         println!(
-            "Initialization Complete: PC={:#06X}, SP={:#04X}, P={:08b}",
+            "cpu   {:>12} {:>8}    PC={:#06X} SP={:#04X} P={:08b}",
+            "65C02", "READY",
             self.pc,
             self.regs.sp,
             self.p.bits()
@@ -314,8 +311,6 @@ impl CPU {
     }
 
     fn initialize_soft_switches(&mut self) {
-        println!("Apple IIc: Initializing soft switches...");
-
         self.bus.handle_iic_write(0xC000, 0); // 80STORE OFF
         self.bus.handle_iic_write(0xC054, 0); // Page2 OFF
         self.bus.handle_iic_write(0xC051, 0); // TEXT ON
@@ -540,12 +535,12 @@ impl CPU {
         if self.hooks.pending_mockingboard_activate {
             self.hooks.pending_mockingboard_activate = false;
             self.bus.iou.mockingboard.activate();
-            println!("==> Mockingboard slot 4 activated");
+            log::debug!("Mockingboard slot 4 activated");
         }
         if self.hooks.pending_mockingboard2_activate {
             self.hooks.pending_mockingboard2_activate = false;
             self.bus.iou.mockingboard2.activate();
-            println!("==> Mockingboard slot 5 activated");
+            log::debug!("Mockingboard slot 5 activated");
         }
 
         let pc = self.pc;

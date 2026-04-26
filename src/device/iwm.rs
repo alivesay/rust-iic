@@ -134,6 +134,9 @@ pub struct Iwm {
 
 impl Iwm {
     pub fn new() -> Self {
+        println!("disk  {:>12} {:>8}", "IWM", "ONLINE");
+        println!("disk  {:>12} {:>8}", "5.25_D1", "ONLINE");
+        println!("disk  {:>12} {:>8}", "5.25_D2", "ONLINE");
         Self {
             motor_on: false,
             q6: false,
@@ -439,7 +442,6 @@ impl Iwm {
     /// Load a 3.5" disk image into a specific SmartPort floppy slot (0 or 1)
     pub fn load_disk35_drive<P: AsRef<Path>>(&mut self, slot: usize, path: P) -> anyhow::Result<()> {
         let path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?;
-        eprintln!("DISK35 LOADER: slot={} mode=smartport path={}", slot, path_str);
         self.smartport.load_floppy(slot, path_str).map_err(|e| anyhow::anyhow!(e))
     }
     

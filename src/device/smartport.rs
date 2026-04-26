@@ -345,6 +345,7 @@ impl SmartPort {
     }
 
     pub fn new() -> Self {
+        println!("disk  {:>12} {:>8}", "SMARTPORT", "ONLINE");
         Self {
             floppies: [UniDisk35::new(), UniDisk35::new()],
             hdv_devices: [SmartPortDevice::new(), SmartPortDevice::new()],

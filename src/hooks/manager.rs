@@ -222,16 +222,14 @@ impl HookManager {
             if hook.trigger_cycle <= current_cycle {
                 let mut hook = self.timed_hooks.remove(0);
                 self.fire_count += 1;
-                println!("==> Timed hook fired: '{}' at cycle {} (target: {})", 
+                log::debug!("Timed hook fired: '{}' at cycle {} (target: {})", 
                     hook.name, current_cycle, hook.trigger_cycle);
                 
                 // Check for special system hooks
                 if hook.name == "mockingboard_activate" {
-                    println!("==> Setting pending_mockingboard_activate = true");
                     self.pending_mockingboard_activate = true;
                 }
                 if hook.name == "mockingboard2_activate" {
-                    println!("==> Setting pending_mockingboard2_activate = true");
                     self.pending_mockingboard2_activate = true;
                 }
                 
@@ -266,8 +264,6 @@ impl HookManager {
         let hook_name = if slot == 0 { "mockingboard_activate" } else { "mockingboard2_activate" };
         let slot_num = if slot == 0 { 4 } else { 5 };
         
-        println!("Mockingboard slot {} timed activation: will activate at cycle {} (~{:.1}s from boot at 1MHz)",
-            slot_num, trigger_at, delay_cycles as f64 / 1_000_000.0);
         self.add_timed_hook(
             trigger_at,
             hook_name,
