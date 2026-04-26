@@ -4,7 +4,7 @@ pub struct Memory {
 
 impl Memory {
     pub fn new(size: usize, id: String) -> Self {
-        println!("memory {:>12} {:>8} {:>8} KB", id, "ONLINE", size);
+        println!("mem   {:>12} {:>8}    {:>8} bytes", id, "ONLINE", size);
         
         Self { data: vec![0x00; size] }
     }

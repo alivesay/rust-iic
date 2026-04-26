@@ -69,13 +69,14 @@ fn main() -> Result<(), Error> {
         audio_producers = ap;
         _dummy_mixer = Some(dm);
         _audio_mixer = None;
-        println!("Audio disabled (--no-audio)");
+        println!("audio {:>12} {:>8}", "MIXER", "OFFLINE");
     } else {
         let (am, ap) = AudioMixer::new();
         sample_rate = am.sample_rate();
         audio_producers = ap;
         _audio_mixer = Some(am);
         _dummy_mixer = None;
+        println!("audio {:>12} {:>8}    {} Hz", "MIXER", "ONLINE", sample_rate);
     }
 
     let mut cpu = CPU::new(
@@ -87,11 +88,14 @@ fn main() -> Result<(), Error> {
         sample_rate,
     );
 
-    // Initialize drive audio with mixer channel
     cpu.bus.iou.iwm.init_audio(audio_producers.drive_audio, sample_rate);
-    println!("Drive audio synthesis enabled");
+    println!("audio {:>12} {:>8}", "DRIVE_SYNTH", "ONLINE");
 
-    // Configure CPU/system based on args
+    println!("video {:>12} {:>8}    560x384 NTSC", "DISPLAY", "ONLINE");
+    println!("serial{:>12} {:>8}    Z8530 SCC", "PORT_1+2", "ONLINE");
+    println!("input {:>12} {:>8}", "KEYBOARD", "ONLINE");
+    println!("input {:>12} {:>8}", "MOUSE", "ONLINE");
+
     cpu.debug = args.debug;
     cpu.bus.debug = args.debug;
     cpu.bus.iou.debug = args.debug;
@@ -101,31 +105,32 @@ fn main() -> Result<(), Error> {
     cpu.bus.video.shader_enabled = args.shader != ShaderType::None;
     cpu.bus.video.scanline_intensity = args.scanline_intensity;
 
-    // Serial port configuration
     if let Some(ref addr) = args.serial {
         cpu.bus.iou.scc.ch_a.debug = args.debug;
         if let Err(e) = cpu.bus.iou.scc.ch_a.tcp_connect(addr) {
-            eprintln!("Failed to connect serial to {}: {}", addr, e);
+            eprintln!("serial {:>12} {:>8}    {}", "SCC_A", "ERROR", e);
         }
     }
 
     if args.modem {
         cpu.bus.iou.scc.ch_a.modem.enabled = true;
         cpu.bus.iou.scc.ch_a.debug = args.debug;
-        println!("Virtual Hayes modem enabled on modem port (slot 2)");
-        println!("Use ATDT host:port from terminal software to connect");
+        println!("serial {:>12} {:>8}    Hayes modem on slot 2", "MODEM", "ONLINE");
     }
 
     if args.serial_loopback {
         cpu.bus.iou.scc.ch_a.loopback = true;
         cpu.bus.iou.scc.ch_b.loopback = true;
-        println!("Serial loopback mode enabled on both ports");
+        println!("serial {:>12} {:>8}", "LOOPBACK", "ONLINE");
     }
 
-    // ZIP CHIP II-8 (Model 8000) accelerator
     if args.zip {
         cpu.bus.iou.set_zip_enabled(true);
-        println!("ZIP CHIP II-8 enabled (8MHz) - Press ESC during boot to disable, Ctrl+Z to toggle");
+        println!("accel {:>12} {:>8}    8 MHz", "ZIP_II-8", "ONLINE");
+    }
+
+    if !args.mockingboard2 {
+        println!("slot4 {:>12} {:>8}    1024 KB Slinky", "MEMEXP", "ONLINE");
     }
 
     // Mockingboard sound card in slot 5
@@ -137,7 +142,7 @@ fn main() -> Result<(), Error> {
         cpu.bus.iou.mockingboard.set_hook_activation(true);
         cpu.hooks.register_mockingboard_hook(1, 4_000_000);  // Slot 5
         
-        println!("Mockingboard enabled in slot 5");
+        println!("slot5 {:>12} {:>8}", "MOCKINGBRD", "ONLINE");
     }
 
     // Second Mockingboard in slot 4 (disables memory expansion)
@@ -149,20 +154,15 @@ fn main() -> Result<(), Error> {
         cpu.bus.iou.mockingboard2.set_hook_activation(true);
         cpu.hooks.register_mockingboard_hook(0, 3_000_000);  // Slot 4
         
-        if args.mockingboard {
-            println!("Second Mockingboard enabled in slot 4 (memory expansion disabled)");
-        } else {
-            println!("Mockingboard enabled in slot 4 (memory expansion disabled)");
-        }
+        println!("slot4 {:>12} {:>8}    memexp disabled", "MOCKINGBRD", "ONLINE");
     }
 
     // Register ProDOS MLI hooks
     hooks::register_hooks(&mut cpu.hooks);
 
-    // Paddle input
     if args.paddle {
         cpu.bus.iou.paddle.enable_gamepad();
-        println!("Paddle enabled.");
+        println!("input {:>12} {:>8}", "PADDLE", "ONLINE");
     }
 
     // Load ROM
@@ -182,23 +182,23 @@ fn main() -> Result<(), Error> {
     });
 
     if let Some(path) = disk_path {
-        println!("Loading disk 1: {}", path);
-        cpu.bus.iou.iwm.load_disk(path).unwrap();
+        cpu.bus.iou.iwm.load_disk(path.clone()).unwrap();
+        println!("disk  {:>12} {:>8}    {}", "5.25_D1", "LOADED", path);
     }
 
     if let Some(path) = &args.disk2 {
-        println!("Loading disk 2: {}", path);
         cpu.bus.iou.iwm.load_disk2(path).unwrap();
+        println!("disk  {:>12} {:>8}    {}", "5.25_D2", "LOADED", path);
     }
 
     // Load 3.5" disk images (ProDOS order / 2IMG)
     if let Some(path) = &args.disk35 {
         match cpu.bus.iou.iwm.load_disk35(path) {
             Ok(()) => {
-                println!("3.5\" drive 1: {}", path);
+                println!("disk  {:>12} {:>8}    {}", "3.5_D1", "LOADED", path);
             }
             Err(e) => {
-                eprintln!("Failed to load 3.5\" disk '{}': {}", path, e);
+                eprintln!("disk  {:>12} {:>8}    {}: {}", "3.5_D1", "ERROR", path, e);
             }
         }
     }
@@ -206,10 +206,10 @@ fn main() -> Result<(), Error> {
     if let Some(path) = &args.disk35_2 {
         match cpu.bus.iou.iwm.load_disk35_drive(1, path) {
             Ok(()) => {
-                println!("3.5\" drive 2: {}", path);
+                println!("disk  {:>12} {:>8}    {}", "3.5_D2", "LOADED", path);
             }
             Err(e) => {
-                eprintln!("Failed to load 3.5\" disk 2 '{}': {}", path, e);
+                eprintln!("disk  {:>12} {:>8}    {}: {}", "3.5_D2", "ERROR", path, e);
             }
         }
     }
@@ -219,10 +219,10 @@ fn main() -> Result<(), Error> {
         match cpu.bus.iou.iwm.smartport.load_hdv(path) {
             Ok(()) => {
                 let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[0];
-                println!("Hard drive 1: {} ({} blocks)", path, dev.block_count);
+                println!("disk  {:>12} {:>8}    {} ({} blocks)", "HDV_1", "LOADED", path, dev.block_count);
             }
             Err(e) => {
-                eprintln!("Failed to load HDV '{}': {}", path, e);
+                eprintln!("disk  {:>12} {:>8}    {}: {}", "HDV_1", "ERROR", path, e);
             }
         }
     }
@@ -231,10 +231,10 @@ fn main() -> Result<(), Error> {
         match cpu.bus.iou.iwm.smartport.load_hdv(path) {
             Ok(()) => {
                 let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[1];
-                println!("Hard drive 2: {} ({} blocks)", path, dev.block_count);
+                println!("disk  {:>12} {:>8}    {} ({} blocks)", "HDV_2", "LOADED", path, dev.block_count);
             }
             Err(e) => {
-                eprintln!("Failed to load HDV2 '{}': {}", path, e);
+                eprintln!("disk  {:>12} {:>8}    {}: {}", "HDV_2", "ERROR", path, e);
             }
         }
     }
