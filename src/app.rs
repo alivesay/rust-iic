@@ -39,6 +39,7 @@ pub struct App {
     pub power_on_time: Instant,
     pub modifiers: ModifiersState,
     pub last_cursor_pos: Option<(f64, f64)>,
+    pub mouse_grabbed: bool,
     pub show_toolbar: bool,
     pub is_fullscreen: bool,
     pub start_fullscreen: bool,
@@ -61,13 +62,11 @@ pub struct App {
 
 impl App {
     pub fn new(cpu: CPU, shader_type: ShaderType, start_fullscreen: bool) -> Self {
-        // Use active dimensions for initial sizing (excludes border)
         let (width, height) = cpu.bus.video.get_active_dimensions();
         Self {
             pixels: None,
             window: None,
             cpu,
-            // Initial values will be overwritten in resumed() when window is created
             surface_width: width * 2,
             surface_height: height * 2,
             buffer_width: width * 2,
@@ -78,6 +77,7 @@ impl App {
             power_on_time: Instant::now().checked_sub(Duration::from_secs(5)).unwrap_or_else(Instant::now),
             modifiers: ModifiersState::default(),
             last_cursor_pos: None,
+            mouse_grabbed: false,
             show_toolbar: false,
             is_fullscreen: false,
             start_fullscreen,
@@ -112,7 +112,6 @@ impl App {
         use objc2_app_kit::{NSApplication, NSImage};
         use objc2_foundation::{NSData, NSSize};
 
-        // Upscale 32x32 pixel art to 128x128 with nearest-neighbor, then encode as PNG
         let icon_data = include_bytes!("../assets/disk2.png");
         let src = image::load_from_memory(icon_data).unwrap().into_rgba8();
         let scaled = image::imageops::resize(&src, 128, 128, image::imageops::FilterType::Nearest);
@@ -322,6 +321,9 @@ impl winit::application::ApplicationHandler for App {
             window.set_has_shadow(false);
             let _ = window.set_simple_fullscreen(true);
             self.is_fullscreen = true;
+            window.set_cursor_visible(false);
+
+            self.grab_mouse();
         }
 
         let scale_factor = window.scale_factor();
@@ -452,6 +454,17 @@ impl winit::application::ApplicationHandler for App {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
+                    // In fullscreen, regain grab automatically when we
+                    // come back to the foreground.
+                    if self.is_fullscreen {
+                        self.grab_mouse();
+                    }
+                } else {
+                    // Lost focus (Cmd-Tab, app switcher, etc.) — release
+                    // the grab so the user can interact with the rest of
+                    // the OS. Re-grab on click (windowed) or focus regain
+                    // (fullscreen).
+                    self.release_mouse();
                 }
                 self.modifiers = ModifiersState::empty();
             }
@@ -498,17 +511,12 @@ impl winit::application::ApplicationHandler for App {
                 self.handle_redraw();
             }
 
+            WindowEvent::CursorEntered { .. } => {}
+
+            WindowEvent::CursorLeft { .. } => {}
+
             WindowEvent::CursorMoved { position, .. } => {
-                let x = position.x;
-                let y = position.y;
-                if !egui_consumed {
-                    if let Some((lx, ly)) = self.last_cursor_pos {
-                        let dx = x - lx;
-                        let dy = y - ly;
-                        self.cpu.bus.iou.mouse.add_delta(dx, dy);
-                    }
-                }
-                self.last_cursor_pos = Some((x, y));
+                self.last_cursor_pos = Some((position.x, position.y));
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
@@ -523,6 +531,39 @@ impl winit::application::ApplicationHandler for App {
             }
 
             _ => (),
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            if !self.mouse_grabbed {
+                return;
+            }
+
+            let Some(window) = self.window.as_ref() else { return };
+            let win = window.inner_size();
+            if win.width == 0 || win.height == 0 {
+                return;
+            }
+            let sf = window.scale_factor();
+            let win_w_logical = win.width as f64 / sf;
+            let win_h_logical = win.height as f64 / sf;
+
+            const IIC_CLAMP_RANGE: f64 = 1023.0;
+
+            const SENSITIVITY: f64 = 1.0;
+            let scale_x = SENSITIVITY * IIC_CLAMP_RANGE / win_w_logical;
+            let scale_y = SENSITIVITY * IIC_CLAMP_RANGE / win_h_logical;
+            self.cpu
+                .bus
+                .iou
+                .mouse
+                .add_delta(delta.0 * scale_x, delta.1 * scale_y);
         }
     }
 }
@@ -813,7 +854,6 @@ impl App {
                             self.cpu.bus.iou.col80_switch = !self.cpu.bus.iou.col80_switch;
                         }
                         if let Some(drive) = toolbar_action.load_disk {
-                            // Defer single-click so double-click (eject) can override it
                             self.last_drive_click = Some((drive, Instant::now()));
                         }
                         if let Some(drive) = toolbar_action.toggle_write_protect {
@@ -923,24 +963,49 @@ impl App {
 
     fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
         let pressed = state == ElementState::Pressed;
-        if pressed {
-            if let Some((wx, wy)) = self.last_cursor_pos {
-                let mapped = self
-                    .pixels
-                    .as_ref()
-                    .and_then(|p| p.window_pos_to_pixel((wx as f32, wy as f32)).ok());
-
-                if let Some((bx, by)) = mapped {
-                    let _px = bx as u32;
-                    let _py = by as u32;
-                }
+        if !self.mouse_grabbed {
+            if pressed && button == MouseButton::Left {
+                self.grab_mouse();
             }
+            return;
         }
         match button {
-            MouseButton::Left => self.cpu.bus.iou.mouse.set_button(0, pressed),
+            MouseButton::Left => {
+                self.cpu.bus.iou.mouse.set_button(0, pressed);
+            }
             MouseButton::Right => self.cpu.bus.iou.mouse.set_button(1, pressed),
             _ => (),
         }
+    }
+
+    fn grab_mouse(&mut self) {
+        if self.mouse_grabbed {
+            return;
+        }
+        if let Some(window) = &self.window {
+            // Locked = cursor is hidden and pinned to a fixed position;
+            // motion only flows through DeviceEvent::MouseMotion as raw
+            // deltas. This is what we want for unbounded, edge-free motion.
+            // Falls back to Confined if Locked is unsupported.
+            let result = window
+                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                .or_else(|_| window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
+            if result.is_ok() {
+                window.set_cursor_visible(false);
+                self.mouse_grabbed = true;
+            }
+        }
+    }
+
+    fn release_mouse(&mut self) {
+        if !self.mouse_grabbed {
+            return;
+        }
+        if let Some(window) = &self.window {
+            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+            window.set_cursor_visible(true);
+        }
+        self.mouse_grabbed = false;
     }
 
     fn handle_keyboard_input(
@@ -981,20 +1046,22 @@ impl App {
 
         #[cfg(target_os = "macos")]
         if event.logical_key == Key::Named(NamedKey::Enter) && self.modifiers.super_key() && event.state.is_pressed() {
+            let mut should_grab = false;
+            let mut should_release = false;
             if let Some(window) = &self.window {
                 let current = window.simple_fullscreen();
                 let entering = !current;
-                
+
                 if entering {
                     window.set_decorations(false);
                     window.set_has_shadow(false);
                 }
-                
+
                 let success = window.set_simple_fullscreen(entering);
-                
+
                 if success {
                     self.is_fullscreen = entering;
-                    
+
                     if let Some(pixels) = &mut self.pixels {
                         if entering {
                             pixels.set_scaling_mode(ScalingMode::PixelPerfect);
@@ -1002,12 +1069,18 @@ impl App {
                             pixels.set_scaling_mode(ScalingMode::Fill);
                         }
                     }
-                    
+
                     if !entering {
                         window.set_decorations(true);
                         window.set_has_shadow(true);
                         let window_buttons = WindowButtons::CLOSE | WindowButtons::MINIMIZE;
                         window.set_enabled_buttons(window_buttons);
+                    }
+
+                    if entering {
+                        should_grab = true;
+                    } else {
+                        should_release = true;
                     }
                 } else {
                     if entering {
@@ -1017,6 +1090,11 @@ impl App {
                     eprintln!("Failed to toggle fullscreen");
                 }
             }
+            if should_grab {
+                self.grab_mouse();
+            } else if should_release {
+                self.release_mouse();
+            }
             return;
         }
 
@@ -1024,20 +1102,20 @@ impl App {
             PhysicalKey::Code(KeyCode::SuperLeft) => {
                 if self.cpu.bus.iou.debug {
                     println!(
-                        "BUTTON: Left Cmd {} -> Open Apple (button0)",
+                        "BUTTON: Left Cmd {} -> Open Apple",
                         if event.state.is_pressed() { "PRESS" } else { "RELEASE" }
                     );
                 }
-                self.cpu.bus.iou.mouse.set_button(0, event.state.is_pressed());
+                self.cpu.bus.iou.mouse.open_apple.set(event.state.is_pressed());
             }
             PhysicalKey::Code(KeyCode::SuperRight) => {
                 if self.cpu.bus.iou.debug {
                     println!(
-                        "BUTTON: Right Cmd {} -> Closed Apple (button1)",
+                        "BUTTON: Right Cmd {} -> Solid Apple",
                         if event.state.is_pressed() { "PRESS" } else { "RELEASE" }
                     );
                 }
-                self.cpu.bus.iou.mouse.set_button(1, event.state.is_pressed());
+                self.cpu.bus.iou.mouse.solid_apple.set(event.state.is_pressed());
             }
             _ => {}
         }

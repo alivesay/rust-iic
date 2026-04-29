@@ -166,18 +166,16 @@ impl IOU {
         0xC014 => (check_bits_cell!(self.mem_state, MemStateMask::RAMWRT) as u8) << 7,
         
         0xC015 => { 
-            let val = (self.mouse.x_int.get() as u8) << 7;
-            self.mouse.x_int.set(false); 
-            val 
-        }, //  RSTXINT        C   R   Reset Mouse X0 Interrupt
+            let v = self.mouse.x_int.get();
+            (v as u8) << 7
+        }, //  RdXInt         C   R   Read Mouse X0 Interrupt (cleared by $C048)
         
         0xC016 => (check_bits_cell!(self.mem_state, MemStateMask::ALTZP) as u8) << 7,
 
         0xC017 => { 
-            let val = (self.mouse.y_int.get() as u8) << 7;
-            self.mouse.y_int.set(false); 
-            val 
-        }, //  RSTYINT        C   R   Reset Mouse Y0 Interrupt
+            let v = self.mouse.y_int.get();
+            (v as u8) << 7
+        }, //  RdYInt         C   R   Read Mouse Y0 Interrupt (cleared by $C048)
         
         0xC018 => (is_80store as u8) << 7,
         
@@ -215,7 +213,9 @@ impl IOU {
         0xC041 => (self.mouse.vbl_mask.get() as u8) << 7, // C041 49217 RDVBLMSK       C   R7  Read VBL Interrupt
         0xC042 => (self.mouse.x0_edge.get() as u8) << 7, // C042 49218 RDX0EDGE       C   R7  Read X0 Edge Selector
         0xC043 => (self.mouse.y0_edge.get() as u8) << 7, // C043 49219 RDY0EDGE       C   R7  Read Y0 Edge Selector
-        0xC048 => { self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00 }, // C048 49224 RSTXY          C  WR   Reset X and Y Interrupts
+        0xC048 => { 
+            self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00 
+        }, // C048 49224 RSTXY          C  WR   Reset X and Y Interrupts
     
         0xC070..=0xC07F => {
             // Trigger Paddle Timer: starts the RC timing circuit for analog inputs
@@ -266,22 +266,22 @@ impl IOU {
         },
 
         0xC058 => if !ioudis {
-          self.mouse.xy_mask.set(true); 0x00 // DISXY          C  WR   If IOUDIS off: Mask X0/Y0 Move Interrupts
+          self.mouse.xy_mask.set(false); 0x00 // DISXY          C  WR   If IOUDIS off: Mask X0/Y0 Move Interrupts
         } else {
           0x00 // AN0 OFF
         },
         0xC059 => if !ioudis {
-          self.mouse.xy_mask.set(false); 0x00 // ENBXY          C  WR   If IOUDIS off: Allow X0/Y0 Move Interrupts
+          self.mouse.xy_mask.set(true); 0x00 // ENBXY          C  WR   If IOUDIS off: Allow X0/Y0 Move Interrupts
         } else {
           0x00 // AN0 ON
         },
         0xC05A => if !ioudis {
-          self.mouse.vbl_mask.set(true); 0x00 // DISVBL         C  WR   If IOUDIS off: Disable VBL Interrupts
+          self.mouse.vbl_mask.set(false); 0x00 // DISVBL         C  WR   If IOUDIS off: Disable VBL Interrupts
         } else {
           0x00 // AN1 OFF
         },
         0xC05B => if !ioudis {
-          self.mouse.vbl_mask.set(false); 0x00 // ENVBL          C  WR   If IOUDIS off: Enable VBL Interrupts
+          self.mouse.vbl_mask.set(true); 0x00 // ENVBL          C  WR   If IOUDIS off: Enable VBL Interrupts
         } else {
           0x00 // AN1 ON
         },
@@ -313,16 +313,20 @@ impl IOU {
         },
           0xC060 => (self.col80_switch as u8) << 7, //   C   R7  Physical 80/40 Column Switch (1=80col, 0=40col)
           0xC061 => {
-              // PB0 - Open Apple key / Joystick Button 0
-              // Also wired to mouse button for mouse-aware apps
-              let pressed = self.mouse.button0.get() || self.paddle.button0.get() || (self.self_test && self.cycles < 2_000_000);
+              // PB0 - Open Apple key / Joystick Button 0.
+              // (On IIc, mouse button is exposed ONLY at $C063 — NOT here.)
+              let pressed = self.mouse.open_apple.get()
+                  || self.paddle.button0.get()
+                  || (self.self_test && self.cycles < 2_000_000);
               (pressed as u8) << 7
-          }, // C061 49249 RDBTN0        ECG  R7  Switch Input 0 / Solid Apple
+          }, // C061 49249 RDBTN0        ECG  R7  Switch Input 0 / Open Apple
           0xC062 => {
-              // PB1 - Solid Apple key / Joystick Button 1
-              let pressed = self.mouse.button1.get() || self.paddle.button1.get() || (self.self_test && self.cycles < 2_000_000);
+              // PB1 - Solid Apple key / Joystick Button 1.
+              let pressed = self.mouse.solid_apple.get()
+                  || self.paddle.button1.get()
+                  || (self.self_test && self.cycles < 2_000_000);
               (pressed as u8) << 7
-          }, // C062 49250 RDBTN1        ECG  R7  Switch Input 1 / Open Apple
+          }, // C062 49250 RDBTN1        ECG  R7  Switch Input 1 / Solid Apple
           0xC063 => (!self.mouse.button0.get() as u8) << 7, //                           C   R7  Bit 7 = Mouse Button Not Pressed
           // Paddle analog inputs - delegated to Paddle module
           0xC064 => self.paddle.read(0, self.cycles),
@@ -422,7 +426,9 @@ impl IOU {
           // Zilog 8530 SCC
           0xC038..=0xC03B => { self.scc.write(addr, val); 0x00 },
 
-          0xC048 => { self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00 }, // RSTXY
+          0xC048 => {
+              self.mouse.x_int.set(false); self.mouse.y_int.set(false); 0x00
+          }, // RSTXY
 
           0xC070..=0xC07F => {
               // Trigger Paddle Timer - starts the RC timing circuit for analog inputs
@@ -516,22 +522,22 @@ impl IOU {
           0xC068 => 0x00, // STATEREG (IIGS) - Ignore on IIc
 
           0xC058 => if !ioudis {
-            self.mouse.xy_mask.set(true); 0x00 // DISXY  If IOUDIS off: Mask X0/Y0 Move Interrupts
+            self.mouse.xy_mask.set(false); 0x00 // DISXY  If IOUDIS off: Mask X0/Y0 Move Interrupts
           } else {
             0x00 // AN0 OFF
           },
           0xC059 => if !ioudis {
-            self.mouse.xy_mask.set(false); 0x00 // ENBXY  If IOUDIS off: Allow X0/Y0 Move Interrupts
+            self.mouse.xy_mask.set(true); 0x00 // ENBXY  If IOUDIS off: Allow X0/Y0 Move Interrupts
           } else {
             0x00 // AN0 ON
           },
           0xC05A => if !ioudis {
-            self.mouse.vbl_mask.set(true); 0x00 // DISVBL  If IOUDIS off: Disable VBL Interrupts
+            self.mouse.vbl_mask.set(false); 0x00 // DISVBL  If IOUDIS off: Disable VBL Interrupts
           } else {
             0x00 // AN1 OFF
           },
           0xC05B => if !ioudis {
-            self.mouse.vbl_mask.set(false); 0x00 // ENVBL  If IOUDIS off: Enable VBL Interrupts
+            self.mouse.vbl_mask.set(true); 0x00 // ENVBL  If IOUDIS off: Enable VBL Interrupts
           } else {
             0x00 // AN1 ON
           },
@@ -602,10 +608,10 @@ impl IOU {
     pub fn check_interrupts(&self) -> bool {
         // Mouse Interrupts
         // Interrupts are active if the flag is set AND the mask is NOT set (enabled).
-        // Note: xy_mask: true = masked (disabled).
-        let mouse_irq = (self.mouse.x_int.get() && !self.mouse.xy_mask.get()) ||
-                        (self.mouse.y_int.get() && !self.mouse.xy_mask.get()) ||
-                        (self.mouse.vbl_int.get() && !self.mouse.vbl_mask.get());
+        // Note: xy_mask: true = enabled
+        let mouse_irq = (self.mouse.x_int.get() && self.mouse.xy_mask.get()) ||
+                        (self.mouse.y_int.get() && self.mouse.xy_mask.get()) ||
+                        (self.mouse.vbl_int.get() && self.mouse.vbl_mask.get());
         
         // SCC interrupts
         let scc_irq = self.scc.irq_pending();

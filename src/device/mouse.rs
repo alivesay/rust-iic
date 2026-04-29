@@ -1,16 +1,7 @@
 use std::cell::Cell;
 
-/// Cycles between quadrature edge generation.
-/// Must be fast enough that the firmware's IRQ handler becomes the
-/// bottleneck (~100 cycles to service an interrupt). We use a small
-/// value so edges drain near the hardware-natural rate.
-const MOUSE_EDGE_INTERVAL: u64 = 4;
-
-/// Maximum pending edges per axis. Caps lag to ~32 * IRQ_time cycles
-/// (~3ms at 1MHz). Fast swipes are slightly "lossy" but responsive.
-const MOUSE_PENDING_CAP: i16 = 32;
-
-/// Sensitivity multiplier for host mouse → IIc quadrature edges.
+const MOUSE_EDGE_INTERVAL: u64 = 64;
+const MOUSE_PENDING_CAP: i16 = 2048;
 const MOUSE_SENSITIVITY: f32 = 1.0;
 
 pub struct Mouse {
@@ -19,33 +10,31 @@ pub struct Mouse {
     pub button0: Cell<bool>,
     pub button1: Cell<bool>,
 
-    // Direction indicators (X1/Y1 quadrature signals)
-    // true = positive direction (right/down), false = negative (left/up)
+    pub open_apple: Cell<bool>,
+    pub solid_apple: Cell<bool>,
+
     pub x_dir: Cell<bool>,
     pub y_dir: Cell<bool>,
 
-    // Accumulated movement (fractional precision for scaling)
+    pub x0: Cell<bool>,
+    pub y0: Cell<bool>,
+
     accum_x: Cell<f32>,
     accum_y: Cell<f32>,
-    // Integer pending edges after scaling
     pending_x: Cell<i16>,
     pending_y: Cell<i16>,
+
     edge_timer: Cell<u64>,
 
-    // Interrupt Masks (1 = Masked/Disabled, 0 = Enabled)
-    // Note: softswitches.txt says "1 = mask on" for RdXYMsk
     pub xy_mask: Cell<bool>,
     pub vbl_mask: Cell<bool>,
 
-    // Edge Selectors (0 = Rising, 1 = Falling)
     pub x0_edge: Cell<bool>,
     pub y0_edge: Cell<bool>,
 
-    // Interrupt Status
     pub x_int: Cell<bool>,
     pub y_int: Cell<bool>,
     pub vbl_int: Cell<bool>,
-
 }
 
 impl Mouse {
@@ -55,39 +44,45 @@ impl Mouse {
             y: Cell::new(0),
             button0: Cell::new(false),
             button1: Cell::new(false),
+            open_apple: Cell::new(false),
+            solid_apple: Cell::new(false),
             x_dir: Cell::new(false),
             y_dir: Cell::new(false),
+            x0: Cell::new(false),
+            y0: Cell::new(false),
             accum_x: Cell::new(0.0),
             accum_y: Cell::new(0.0),
             pending_x: Cell::new(0),
             pending_y: Cell::new(0),
             edge_timer: Cell::new(MOUSE_EDGE_INTERVAL),
-            xy_mask: Cell::new(true), // Default to masked (disabled)
-            vbl_mask: Cell::new(true),
+            xy_mask: Cell::new(false),
+            vbl_mask: Cell::new(false),
             x0_edge: Cell::new(false),
             y0_edge: Cell::new(false),
             x_int: Cell::new(false),
             y_int: Cell::new(false),
             vbl_int: Cell::new(false),
-
         }
     }
 
-    /// Reset all mouse state to power-on defaults.
     pub fn reset(&self) {
         self.x.set(0);
         self.y.set(0);
         self.button0.set(false);
         self.button1.set(false);
+        self.open_apple.set(false);
+        self.solid_apple.set(false);
         self.x_dir.set(false);
         self.y_dir.set(false);
+        self.x0.set(false);
+        self.y0.set(false);
         self.accum_x.set(0.0);
         self.accum_y.set(0.0);
         self.pending_x.set(0);
         self.pending_y.set(0);
         self.edge_timer.set(MOUSE_EDGE_INTERVAL);
-        self.xy_mask.set(true);
-        self.vbl_mask.set(true);
+        self.xy_mask.set(false);
+        self.vbl_mask.set(false);
         self.x0_edge.set(false);
         self.y0_edge.set(false);
         self.x_int.set(false);
@@ -95,16 +90,10 @@ impl Mouse {
         self.vbl_int.set(false);
     }
 
-    /// Accumulate relative mouse movement from host.
-    /// dx/dy are raw host pixel deltas (positive = right/down).
-    /// Y is inverted here because Apple IIc Y increases upward
-    /// in the firmware's coordinate system.
     pub fn add_delta(&self, dx: f64, dy: f64) {
-        // Scale and accumulate with fractional precision
         let ax = self.accum_x.get() + (dx as f32) * MOUSE_SENSITIVITY;
-        let ay = self.accum_y.get() + (-dy as f32) * MOUSE_SENSITIVITY; // invert Y
+        let ay = self.accum_y.get() + (dy as f32) * MOUSE_SENSITIVITY;
 
-        // Extract integer part as pending edges
         let ix = ax as i16;
         let iy = ay as i16;
 
@@ -123,10 +112,6 @@ impl Mouse {
         }
     }
 
-    /// Feed accumulated movement as individual quadrature edges.
-    /// Called from bus.tick() each CPU cycle group.
-    /// Only generates a new edge if the previous one was acknowledged
-    /// (x_int/y_int cleared by firmware reading $C015/$C017).
     pub fn tick(&self, cycles: u64) {
         let timer = self.edge_timer.get();
         if timer > cycles {
@@ -135,29 +120,40 @@ impl Mouse {
         }
         self.edge_timer.set(MOUSE_EDGE_INTERVAL);
 
-        // Only consume pending edges when mouse interrupts are enabled.
-        // Before the game initializes the mouse firmware (which unmasks
-        // interrupts), we must not set x_int/y_int — otherwise $C015/$C017
-        // return 0x80 from stray host cursor movement, which breaks software
-        // like Infocom interpreters that read $C017 as RDC3ROM.
-        if self.xy_mask.get() {
-            return;
-        }
-
-        // Consume one pending X edge if previous was acknowledged
         let px = self.pending_x.get();
-        if px != 0 && !self.x_int.get() {
-            self.x_dir.set(px > 0);
-            self.pending_x.set(if px > 0 { px - 1 } else { px + 1 });
-            self.x_int.set(true);
+        if px != 0 {
+            if px < 0 {
+                self.pending_x.set(px + 1);
+                self.x_dir.set(false);
+            } else {
+                self.pending_x.set(px - 1);
+                self.x_dir.set(true);
+            }
+            let x0 = self.x0.get();
+            if (x0 && self.x0_edge.get()) || (!x0 && !self.x0_edge.get()) {
+                if self.xy_mask.get() {
+                    self.x_int.set(true);
+                }
+            }
+            self.x0.set(!x0);
         }
 
-        // Consume one pending Y edge if previous was acknowledged
         let py = self.pending_y.get();
-        if py != 0 && !self.y_int.get() {
-            self.y_dir.set(py > 0);
-            self.pending_y.set(if py > 0 { py - 1 } else { py + 1 });
-            self.y_int.set(true);
+        if py != 0 {
+            if py < 0 {
+                self.pending_y.set(py + 1);
+                self.y_dir.set(true);
+            } else {
+                self.pending_y.set(py - 1);
+                self.y_dir.set(false);
+            }
+            let y0 = self.y0.get();
+            if (y0 && self.y0_edge.get()) || (!y0 && !self.y0_edge.get()) {
+                if self.xy_mask.get() {
+                    self.y_int.set(true);
+                }
+            }
+            self.y0.set(!y0);
         }
     }
 
