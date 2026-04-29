@@ -1257,6 +1257,12 @@ impl App {
                 }
                 Key::Named(NamedKey::F6) => {
                     self.show_toolbar = !self.show_toolbar;
+
+                    if self.show_toolbar {
+                        self.release_mouse();
+                    } else if self.is_fullscreen {
+                        self.grab_mouse();
+                    }
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
