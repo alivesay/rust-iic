@@ -321,9 +321,6 @@ impl winit::application::ApplicationHandler for App {
             window.set_has_shadow(false);
             let _ = window.set_simple_fullscreen(true);
             self.is_fullscreen = true;
-            window.set_cursor_visible(false);
-
-            self.grab_mouse();
         }
 
         let scale_factor = window.scale_factor();
@@ -454,16 +451,7 @@ impl winit::application::ApplicationHandler for App {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
-                    // In fullscreen, regain grab automatically when we
-                    // come back to the foreground.
-                    if self.is_fullscreen {
-                        self.grab_mouse();
-                    }
                 } else {
-                    // Lost focus (Cmd-Tab, app switcher, etc.) — release
-                    // the grab so the user can interact with the rest of
-                    // the OS. Re-grab on click (windowed) or focus regain
-                    // (fullscreen).
                     self.release_mouse();
                 }
                 self.modifiers = ModifiersState::empty();
@@ -1017,6 +1005,9 @@ impl App {
         if event.logical_key == Key::Named(NamedKey::F7) && event.state.is_pressed() {
             if self.shader_type != ShaderType::None {
                 self.show_shader_ui = !self.show_shader_ui;
+                if self.show_shader_ui {
+                    self.release_mouse();
+                }
                 println!(
                     "Shader UI: {}",
                     if self.show_shader_ui { "ON" } else { "OFF" }
@@ -1027,6 +1018,9 @@ impl App {
 
         if event.logical_key == Key::Named(NamedKey::F8) && event.state.is_pressed() {
             self.show_drive_audio_ui = !self.show_drive_audio_ui;
+            if self.show_drive_audio_ui {
+                self.release_mouse();
+            }
             println!(
                 "Drive Audio UI: {}",
                 if self.show_drive_audio_ui { "ON" } else { "OFF" }
@@ -1037,6 +1031,9 @@ impl App {
         if event.logical_key == Key::Named(NamedKey::F12) && event.state.is_pressed() {
             self.cpu_monitor.toggle();
             self.cpu.capture_trace = self.cpu_monitor.enabled;
+            if self.cpu_monitor.visible {
+                self.release_mouse();
+            }
             println!(
                 "CPU Monitor: {}",
                 if self.cpu_monitor.visible { "ON" } else { "OFF" }
@@ -1046,8 +1043,6 @@ impl App {
 
         #[cfg(target_os = "macos")]
         if event.logical_key == Key::Named(NamedKey::Enter) && self.modifiers.super_key() && event.state.is_pressed() {
-            let mut should_grab = false;
-            let mut should_release = false;
             if let Some(window) = &self.window {
                 let current = window.simple_fullscreen();
                 let entering = !current;
@@ -1076,12 +1071,6 @@ impl App {
                         let window_buttons = WindowButtons::CLOSE | WindowButtons::MINIMIZE;
                         window.set_enabled_buttons(window_buttons);
                     }
-
-                    if entering {
-                        should_grab = true;
-                    } else {
-                        should_release = true;
-                    }
                 } else {
                     if entering {
                         window.set_decorations(true);
@@ -1090,11 +1079,9 @@ impl App {
                     eprintln!("Failed to toggle fullscreen");
                 }
             }
-            if should_grab {
-                self.grab_mouse();
-            } else if should_release {
-                self.release_mouse();
-            }
+            // Fullscreen toggle no longer touches grab state. If the user
+            // wants the mouse back, they click the window. macOS focus
+            // shuffles during the transition will release any current grab.
             return;
         }
 
@@ -1260,8 +1247,6 @@ impl App {
 
                     if self.show_toolbar {
                         self.release_mouse();
-                    } else if self.is_fullscreen {
-                        self.grab_mouse();
                     }
                     if let Some(window) = &self.window {
                         window.request_redraw();
