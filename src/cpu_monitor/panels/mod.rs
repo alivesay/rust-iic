@@ -1,0 +1,9 @@
+pub mod registers;
+pub mod trace;
+pub mod memory;
+pub mod stack;
+pub mod watches;
+pub mod disassembly;
+pub mod iou;
+pub mod devices;
+pub mod breakpoints;

@@ -9,7 +9,7 @@ use super::smartport::SmartPort;
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum WozFormat { Woz1, Woz2, Unknown }
 
-/// Per-drive state
+// Per-drive state
 struct DriveState {
     disk: Option<Box<dyn DiskImage>>,
     disk_path: Option<String>,
@@ -176,22 +176,22 @@ impl Iwm {
         }
     }
     
-    /// Get current 3.5" head selection (0=lower/side0, 1=upper/side1)
+    // Get current 3.5" head selection (0=lower/side0, 1=upper/side1)
     pub fn get_head35(&self) -> u8 {
         self.head35
     }
     
-    /// Set 3.5" head selection (from $C031 bit 7)
+    // Set 3.5" head selection (from $C031 bit 7)
     pub fn set_head35(&mut self, head: u8) {
         self.head35 = head & 1;
     }
 
-    /// Initialize drive audio with an audio producer
+    // Initialize drive audio with an audio producer
     pub fn init_audio(&mut self, producer: AudioProducer, sample_rate: u32) {
         self.drive_audio = DriveAudio::with_audio(producer, sample_rate);
     }
 
-    /// Update drive audio synthesis (call once per frame)
+    // Update drive audio synthesis (call once per frame)
     pub fn update_audio(&mut self) {
         self.drive_audio.update(self.audio_cycle);
         // Tick down 3.5" drive activity indicators
@@ -200,8 +200,8 @@ impl Iwm {
         }
     }
 
-    /// Reset IWM chip state as if the hardware reset line was asserted.
-    /// Disk contents and head positions are preserved.
+    // Reset IWM chip state as if the hardware reset line was asserted.
+    // Disk contents and head positions are preserved.
     pub fn reset(&mut self) {
         self.motor_on = false;
         self.q6 = false;
@@ -250,12 +250,12 @@ impl Iwm {
         }
     }
 
-    /// True when IWM reads should expose SmartPort semantics instead of the
-    /// legacy 5.25" controller path.
-    ///
-    /// A present device is not enough on its own. Otherwise any attached
-    /// SmartPort device alters ordinary C0Ex probing even when the guest is
-    /// not in an active SmartPort exchange.
+    // True when IWM reads should expose SmartPort semantics instead of the
+    // legacy 5.25" controller path.
+    //
+    // A present device is not enough on its own. Otherwise any attached
+    // SmartPort device alters ordinary C0Ex probing even when the guest is
+    // not in an active SmartPort exchange.
     fn is_smartport_data_active(&self, disk35_mode: bool) -> bool {
         disk35_mode || self.smartport.is_wire_active()
     }
@@ -293,7 +293,7 @@ impl Iwm {
         );
     }
 
-    /// Process a byte written to SmartPort device
+    // Process a byte written to SmartPort device
     fn smartport_write_byte(&mut self, val: u8) {
         if !self.has_smartport_device() {
             return;
@@ -308,7 +308,7 @@ impl Iwm {
         }
     }
     
-    /// Get next byte from SmartPort response with ACK handling
+    // Get next byte from SmartPort response with ACK handling
     fn smartport_read_byte(&mut self) -> Option<u8> {
         self.smartport.read_byte()
     }
@@ -339,7 +339,7 @@ impl Iwm {
         floating_bus
     }
 
-    /// Index of the currently selected drive (0 or 1).
+    // Index of the currently selected drive (0 or 1).
     #[inline]
     fn di(&self) -> usize {
         self.drive_select as usize
@@ -356,8 +356,8 @@ impl Iwm {
         (bytes, self.motor_on, (self.drives[d].head_pos / 2) as u8, revs, overruns)
     }
 
-    /// Drive UI status for rendering the status bar.
-    /// Returns (has_disk, is_active, is_write_protected) for the given 5.25" drive (0 or 1).
+    // Drive UI status for rendering the status bar.
+    // Returns (has_disk, is_active, is_write_protected) for the given 5.25" drive (0 or 1).
     pub fn drive_status(&self, drive: usize) -> (bool, bool, bool) {
         let has_disk = self.drives[drive].has_disk();
         // When drive_select selects drive 2 and SmartPort devices are present,
@@ -368,12 +368,27 @@ impl Iwm {
         (has_disk, is_active, wp)
     }
 
-    /// Toggle write protect for the given drive.
+    // Toggle write protect for the given drive.
     pub fn toggle_write_protect(&mut self, drive: usize) {
         self.drives[drive].write_protect = !self.drives[drive].write_protect;
     }
 
-    /// Get the disk image filename (not full path) for a 5.25" drive.
+
+    pub fn drive_head_qt(&self, drive: usize) -> u16 {
+        self.drives.get(drive).map(|d| d.head_pos).unwrap_or(0)
+    }
+
+    pub fn debug_state(&self) -> (bool, bool, u8, u8, bool, u8) {
+        (
+            self.motor_on,
+            self.motor_on35,
+            self.drive_select as u8,
+            self.phases,
+            self.write_mode,
+            self.head35,
+        )
+    }
+
     pub fn disk_filename(&self, drive: usize) -> Option<String> {
         self.drives[drive].disk_path.as_ref().map(|p| {
             std::path::Path::new(p)
@@ -383,7 +398,6 @@ impl Iwm {
         })
     }
 
-    /// Get the disk image filename (not full path) for a 3.5" SmartPort floppy.
     pub fn disk_filename_35(&self, drive: usize) -> Option<String> {
         if drive < self.smartport.floppies.len() && self.smartport.floppies[drive].has_disk() {
             let path = &self.smartport.floppies[drive].device.path;
@@ -400,7 +414,6 @@ impl Iwm {
         }
     }
 
-    /// Eject the disk from the given drive.
     pub fn eject_disk(&mut self, drive: usize) {
         if self.drives[drive].dirty {
             self.flush_track(drive);
@@ -417,8 +430,7 @@ impl Iwm {
         self.drives[drive].loaded_track = None;
         self.drives[drive].nibbles_valid = false;
         self.drives[drive].dirty = false;
-        // NOTE: Do NOT reset head_pos, real Apple IIc preserves head position
-        // across disk changes, and some programs (like disk copiers) rely on this
+        // NOTE: Do NOT reset head_pos
         self.drives[drive].bit_index = 0;
         self.drives[drive].shift_register = 0;
         self.drives[drive].data_latch = 0;
@@ -434,18 +446,18 @@ impl Iwm {
         self.load_disk_drive(1, path)
     }
     
-    /// Load a 3.5" disk image (.po, .2mg) into a SmartPort floppy slot
+    // Load a 3.5" disk image (.po, .2mg) into a SmartPort floppy slot
     pub fn load_disk35<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         self.load_disk35_drive(0, path)
     }
 
-    /// Load a 3.5" disk image into a specific SmartPort floppy slot (0 or 1)
+    // Load a 3.5" disk image into a specific SmartPort floppy slot (0 or 1)
     pub fn load_disk35_drive<P: AsRef<Path>>(&mut self, slot: usize, path: P) -> anyhow::Result<()> {
         let path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?;
         self.smartport.load_floppy(slot, path_str).map_err(|e| anyhow::anyhow!(e))
     }
     
-    /// Returns (has_disk, is_active, is_write_protected) for the given SmartPort floppy slot.
+    // Returns (has_disk, is_active, is_write_protected) for the given SmartPort floppy slot.
     pub fn drive_status_35(&self, drive: usize) -> (bool, bool, bool) {
         if drive < self.smartport.floppies.len() {
             let f = &self.smartport.floppies[drive];
@@ -465,14 +477,14 @@ impl Iwm {
         }
     }
     
-    /// Toggle write protect for the given SmartPort floppy slot.
+    // Toggle write protect for the given SmartPort floppy slot.
     pub fn toggle_write_protect_35(&mut self, drive: usize) {
         if drive < self.smartport.floppies.len() {
             self.smartport.floppies[drive].toggle_write_protect();
         }
     }
 
-    /// Eject the disk from the given SmartPort floppy slot.
+    // Eject the disk from the given SmartPort floppy slot.
     pub fn eject_disk_35(&mut self, drive: usize) {
         if drive < self.smartport.floppies.len() {
             self.smartport.floppies[drive].eject();
@@ -892,7 +904,7 @@ impl Iwm {
         })
     }
 
-    /// Load track data directly from woz_raw bytes
+    // Load track data directly from woz_raw bytes
     fn load_track_from_raw(&self, d: usize, track_num: u8) -> Option<Vec<u8>> {
         let qt = (track_num * 4) as usize;
         if qt >= 160 { return None; }
@@ -933,7 +945,7 @@ impl Iwm {
         }
     }
 
-    /// Decode and verify all sectors on the current track from the raw bitstream.
+    // Decode and verify all sectors on the current track from the raw bitstream.
     fn verify_track_sectors(&self, d: usize) {
         let track_data = &self.drives[d].track_data;
         let total_bits = self.drives[d].track_bit_count;
@@ -1226,15 +1238,15 @@ impl Iwm {
                     self.drives[d].bit_index = (self.drives[d].bit_index + 1) % total_bits;
                     bits_checked += 1;
                 }
-                // No complete nibble found in entire track - return shift register with MSB cleared
+                // No complete nibble found in entire track, return shift register with MSB cleared
                 self.drives[d].shift_register & 0x7F
             } else {
-                // BOOT_DIAG: Track data not loaded - this would cause boot to hang!
+                // BOOT_DIAG: Track data not loaded, this would cause boot to hang!
                 if self.debug && self.drives[d].track_data.is_empty() && self.bytes_read_counter < 100 {
                     log::debug!("IWM BOOT_DIAG: read_data() with EMPTY track_data! drive={} head_pos={} loaded_track={:?} fast_disk={}",
                         d + 1, self.drives[d].head_pos, self.drives[d].loaded_track, self.fast_disk);
                 }
-                // No new data ready yet - return shift register with MSB cleared.
+                // No new data ready yet, return shift register with MSB cleared.
                 // Software polls until MSB is set (new nibble arrived).
                 self.drives[d].shift_register & 0x7F
             };
@@ -1246,9 +1258,6 @@ impl Iwm {
         0
     }
 
-    /// Handle IWM access in 3.5"/SmartPort mode ($C031 bit 6 = 1)
-    /// In this mode, phase signals encode status queries and actions
-    /// instead of stepper motor control.
     fn access_35(&mut self, addr: u16, val: u8, write: bool, floating_bus: u8) -> u8 {
         let loc = addr & 0xF;
         let on = (loc & 1) != 0;

@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 
 // CRT-Geom-Deluxe shader parameters.
-// GPU layout: 7 × vec4<f32> = 28 floats.
+// GPU layout: 8 × vec4<f32> = 32 floats.
 //   group0: crt_gamma, monitor_gamma, distance, radius
 //   group1: corner_size, corner_smooth, overscan_x, overscan_y
 //   group2: aperture_strength, aperture_brightboost, scanline_weight, luminance
@@ -9,7 +9,7 @@ use bytemuck::{Pod, Zeroable};
 //   group4: blur_width, mask_type, vignette, phosphor
 //   group5: glow, glow_width, vignette_opacity, flicker
 //   group6: chromatic_aberration, unused, unused, v_roll
-//   group7: unused, unused, unused, unused
+//   group7: chroma_blur_on, comb_filter_on, phosphor_spread_on, ntsc_strength
 #[derive(Clone, Debug)]
 pub struct ShaderParams {
     // group0
@@ -45,6 +45,17 @@ pub struct ShaderParams {
     // group6
     pub chromatic_aberration: f32,
     pub v_roll: f32,  // V-Hold rolling effect speed (0=off)
+
+    // NTSC signal-chain effects.
+    pub chroma_blur: bool,      // 7-tap asymmetric I/Q blur in YIQ
+    pub comb_filter: bool,      // 2-line YIQ comb (chroma cross-bleed)
+    pub phosphor_spread: bool,  // 3-tap horizontal beam-spot spread
+    pub ntsc_strength: f32,     // 0..1 mix factor for the NTSC pass
+    pub white_preservation: f32, // 1.0 = clean white, 0.0 = NTSC
+
+    pub phosphor_spread_sigma_x: f32,    // horizontal Gaussian width
+    pub phosphor_spread_sigma_y: f32,    // vertical Gaussian width
+    pub phosphor_spread_intensity: f32,  // 0..1 mix between passthrough and blurred
 }
 
 impl Default for ShaderParams {
@@ -60,23 +71,33 @@ impl Default for ShaderParams {
             overscan_y: 100.0,
             aperture_strength: 0.50,
             aperture_brightboost: 0.16,
-            scanline_weight: 0.335,
-            luminance: 0.14,
+            scanline_weight: 0.165,
+            luminance: 0.25,
             curvature: 1.0,
 
             saturation: 1.04,
-            halation: 0.1,
+            halation: 0.2,
+            blur_width: 0.20,
             rasterbloom: 0.32,
-            blur_width: 0.57,
             mask_type: 3.0,
             vignette: 2.22,
             phosphor: 0.58,
             glow: 0.004,
             glow_width: 20.0,
-            vignette_opacity: 0.26,
+            vignette_opacity: 0.37,
             flicker: 0.4,
-            chromatic_aberration: 0.75,
+            chromatic_aberration: 0.6,
             v_roll: 0.1,
+
+            chroma_blur: true,
+            comb_filter: true,
+            phosphor_spread: true,
+            ntsc_strength: 0.7,
+            white_preservation: 0.0,
+
+            phosphor_spread_sigma_x: 0.52,
+            phosphor_spread_sigma_y: 0.15,
+            phosphor_spread_intensity: 1.0,
         }
     }
 }
@@ -89,6 +110,7 @@ pub struct ShaderParamsGpu {
 
 impl ShaderParams {
     pub fn to_gpu(&self) -> ShaderParamsGpu {
+        let b = |v: bool| if v { 1.0_f32 } else { 0.0_f32 };
         ShaderParamsGpu {
             data: [
                 self.crt_gamma, self.monitor_gamma, self.distance, self.radius,
@@ -97,8 +119,8 @@ impl ShaderParams {
                 self.curvature, self.saturation, self.halation, self.rasterbloom,
                 self.blur_width, self.mask_type, self.vignette, self.phosphor,
                 self.glow, self.glow_width, self.vignette_opacity, self.flicker,  // group5
-                self.chromatic_aberration, 0.0, 0.0, self.v_roll,  // group6
-                0.0, 0.0, 0.0, 0.0,  // group7
+                self.chromatic_aberration, self.white_preservation, 0.0, self.v_roll,  // group6
+                b(self.chroma_blur), b(self.comb_filter), b(self.phosphor_spread), self.ntsc_strength, // group7
             ],
         }
     }
@@ -155,6 +177,19 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
                 changed |= ui.add(egui::Slider::new(&mut params.flicker, 0.0..=1.0).text("CRT Flicker")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.chromatic_aberration, 0.0..=1.0).text("Chromatic Aberration")).changed();
                 changed |= ui.add(egui::Slider::new(&mut params.v_roll, 0.0..=1.0).text("V-Roll Bar")).changed();
+
+                ui.separator();
+                ui.heading("NTSC Signal Chain");
+                changed |= ui.add(egui::Slider::new(&mut params.ntsc_strength, 0.0..=1.0).text("NTSC Strength")).changed();
+                changed |= ui.add(egui::Slider::new(&mut params.white_preservation, 0.0..=1.0).text("White Preservation (1=clean, 0=NTSC)")).changed();
+                changed |= ui.checkbox(&mut params.chroma_blur, "Chroma Blur").changed();
+                changed |= ui.checkbox(&mut params.comb_filter, "Comb Filter").changed();
+                changed |= ui.checkbox(&mut params.phosphor_spread, "Phosphor Spread").changed();
+                ui.indent("phosphor_spread_params", |ui| {
+                    changed |= ui.add(egui::Slider::new(&mut params.phosphor_spread_sigma_x, 0.0..=4.0).text("Spread σ X (src px)")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut params.phosphor_spread_sigma_y, 0.0..=2.0).text("Spread σ Y (src px)")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut params.phosphor_spread_intensity, 0.0..=1.0).text("Spread Intensity")).changed();
+                });
 
                 ui.separator();
                 ui.horizontal(|ui| {

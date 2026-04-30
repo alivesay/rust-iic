@@ -1,15 +1,17 @@
 use crate::{iou::IOU, mmu::MMU, util::apple_iic_font_index};
+use rayon::prelude::*;
+use wide::{CmpGt, CmpLt};
 
 const CHAR_ROM: &[u8; 1024] = include_bytes!("../assets/font.bin");
 
-const MONO_GREEN: (u8, u8, u8) = (118, 247, 211);
+const MONO_GREEN: (u8, u8, u8) = (118, 255, 211);
 const MONO_GREEN_RGBA: [u8; 4] = [MONO_GREEN.0, MONO_GREEN.1, MONO_GREEN.2, 255];
 const MONO_BLACK_RGBA: [u8; 4] = [15, 23, 23, 255];
 
 // NTSC 16-color palette (standard LoRes/HiRes ordering)
 // Derived from Apple IIc video ROM (video.bin 0x800-0xFFF) via NTSC demodulation
 // of the hardware dot patterns at 49° colorburst phase.
-// Re-ordered from DHIRES numbering: entries 2↔8, 3↔9, 6↔C, 7↔D swapped.
+// Re-ordered from DHIRES numbering: entries 2<-8, 3<-9, 6<-C, 7<-D swapped.
 #[rustfmt::skip]
 const NTSC_PALETTE: [[u8; 4]; 16] = [
     [  0,   0,   0, 255], // 0x0: Black
@@ -30,7 +32,7 @@ const NTSC_PALETTE: [[u8; 4]; 16] = [
     [255, 255, 255, 255], // 0xF: White
 ];
 
-// Derived from Apple IIc video ROM (video.bin 0x800-0xFFF) via NTSC demodulation
+// Derived from IIc video ROM (0x800-0xFFF) via NTSC demodulation
 // of the hardware dot patterns at 49° colorburst phase.
 #[rustfmt::skip]
 const DHIRES_PALETTE: [[u8; 4]; 16] = [
@@ -57,6 +59,27 @@ pub const TEXT_MODE_BASE_ADDRESSES: [u16; 24] = [
     0x0628, 0x06A8, 0x0728, 0x07A8, 0x0450, 0x04D0, 0x0550, 0x05D0, 0x0650, 0x06D0, 0x0750, 0x07D0,
 ];
 
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEffects {
+    pub chroma_blur: bool,
+    pub comb_filter: bool,
+    pub phosphor_spread: bool,
+    pub scanlines: bool,
+    pub white_preservation: f32,
+}
+
+impl Default for VideoEffects {
+    fn default() -> Self {
+        Self {
+            chroma_blur: true,
+            comb_filter: true,
+            phosphor_spread: true,
+            scanlines: true,
+            white_preservation: 0.0,
+        }
+    }
+}
+
 pub struct VideoModeMask;
 #[rustfmt::skip]
 impl VideoModeMask {
@@ -70,7 +93,6 @@ impl VideoModeMask {
     pub const ALTCHAR: u8  = 0b1000_0000; // Alternate Character Set
 }
 
-
 pub struct Video {
     framebuffer: Vec<u8>,
     width: usize,
@@ -83,9 +105,21 @@ pub struct Video {
     pub scanline_intensity: f32,
     pub border_size: usize,
 
+    pub effects: VideoEffects,
+
     scanline_modes: [u8; 192],
     scanline_80store: [bool; 192],
     scanline_count: usize,
+
+    monitor_partial_fb: Vec<u8>,
+
+    // sRGB u8 to linear f32
+    srgb_to_linear_lut: [f32; 256],
+    // linear f32 in [0, 1] to sRGB u8, sampled at 4096 steps
+    linear_to_srgb_lut_u8: Box<[u8; 4096]>,
+    // YIQ scratch in SoA layout, sized `3 * active_width * 192`
+    // (Y region, then I, then Q), hared between the comb filter's two passes
+    yiq_buf: Vec<f32>,
 }
 
 impl Video {
@@ -99,6 +133,27 @@ impl Video {
         for i in (3..framebuffer.len()).step_by(4) {
             framebuffer[i] = 255;
         }
+
+        let mut srgb_to_linear_lut = [0.0f32; 256];
+        for (i, slot) in srgb_to_linear_lut.iter_mut().enumerate() {
+            let c = i as f32 / 255.0;
+            *slot = if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            };
+        }
+        let mut linear_to_srgb_lut_u8 = Box::new([0u8; 4096]);
+        for (i, slot) in linear_to_srgb_lut_u8.iter_mut().enumerate() {
+            let c = i as f32 / 4095.0;
+            let s = if c <= 0.0031308 {
+                c * 12.92
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            };
+            *slot = (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        }
+
         Self {
             framebuffer,
             width,
@@ -110,9 +165,14 @@ impl Video {
             shader_enabled: false,
             scanline_intensity: 0.15,
             border_size: border,
+            effects: VideoEffects::default(),
             scanline_modes: [0; 192],
             scanline_80store: [false; 192],
             scanline_count: 0,
+            monitor_partial_fb: Vec::new(),
+            srgb_to_linear_lut,
+            linear_to_srgb_lut_u8,
+            yiq_buf: Vec::with_capacity(active_width * 192 * 3),
         }
     }
 
@@ -150,17 +210,19 @@ impl Video {
             self.resize_framebuffer(new_width, new_height);
         }
 
-        // Per-scanline mode rendering: iterate by text row (8 scanlines each).
-        // Use captured scanline_modes when available, fall back to current IOU state.
         let has_snapshots = self.scanline_count >= 192;
         let mut any_graphics = false;
 
-        for text_row in 0..24_usize {
-            let scanline = text_row * 8;
+        for scanline in 0..192_usize {
             let mode = if has_snapshots {
                 self.scanline_modes[scanline]
             } else {
                 iou.video_mode.get()
+            };
+            let is_80store = if has_snapshots {
+                self.scanline_80store[scanline]
+            } else {
+                iou.is_80store.get()
             };
 
             let text_mode = (mode & VideoModeMask::TEXT) != 0;
@@ -169,43 +231,143 @@ impl Video {
             let is_dhires = (mode & VideoModeMask::DHIRES) != 0;
             let is_80col = (mode & VideoModeMask::COL80) != 0;
             let mixed_mode = (mode & VideoModeMask::MIXED) != 0;
-            let is_graphics = !text_mode && (is_hires || lo_res_mode);
 
-            // in mixed mode, rows 20-23 are always text regardless of graphics mode
-            let force_text = mixed_mode && text_row >= 20;
+            // in mixed mode, scanlines 160..192 (text rows 20-23) are
+            // always rendered as text regardless of the active graphics
+            // mode for that scanline.
+            let force_text = mixed_mode && scanline >= 160;
 
             if text_mode || force_text {
-                self.render_text_rows(iou, mmu, text_row as u16..(text_row as u16 + 1));
-                if force_text && is_graphics && text_row == 20 && !self.monochrome {
-                    self.apply_mixed_mode_text_fringing(20);
-                }
+                self.render_text_scanline(iou, mmu, scanline, mode, is_80store);
             } else if is_hires {
                 if is_dhires && is_80col {
-                    self.render_double_hires_rows(iou, mmu, text_row..text_row + 1);
+                    self.render_double_hires_scanline(iou, mmu, scanline);
                 } else {
-                    self.render_hires_rows(iou, mmu, text_row..text_row + 1);
+                    self.render_hires_scanline(iou, mmu, scanline);
                 }
                 any_graphics = true;
             } else if lo_res_mode {
-                self.render_lores_rows(iou, mmu, text_row..text_row + 1, mode);
+                self.render_lores_scanline(iou, mmu, scanline, mode, is_80store);
                 any_graphics = true;
             } else {
-                self.render_text_rows(iou, mmu, text_row as u16..(text_row as u16 + 1));
+                self.render_text_scanline(iou, mmu, scanline, mode, is_80store);
             }
         }
 
-        if any_graphics && !self.monochrome {
-            self.apply_chroma_blur(0, 192 * 2);
-            self.apply_comb_filter();
+        let final_mode = if has_snapshots {
+            self.scanline_modes[160]
+        } else {
+            iou.video_mode.get()
+        };
+        let final_mixed = (final_mode & VideoModeMask::MIXED) != 0;
+        let final_text_only = (final_mode & VideoModeMask::TEXT) != 0;
+        if final_mixed && !final_text_only && any_graphics && !self.monochrome {
+            self.apply_mixed_mode_text_fringing(20);
         }
 
-        self.apply_phosphor_spread();
 
-        if !self.shader_enabled && self.scanline_intensity < 1.0 {
+        let gpu_owns_chroma = self.shader_enabled;
+        let gpu_owns_scanlines = self.shader_enabled;
+        let gpu_owns_phosphor_spread = self.shader_enabled;
+
+        if any_graphics && !self.monochrome && !gpu_owns_chroma {
+            if self.effects.chroma_blur {
+                self.apply_chroma_blur(0, 192 * 2);
+            }
+            if self.effects.comb_filter {
+                self.apply_comb_filter();
+            }
+        }
+
+        if self.effects.phosphor_spread && !gpu_owns_phosphor_spread {
+            self.apply_phosphor_spread();
+        }
+
+        if !gpu_owns_scanlines && self.effects.scanlines && self.scanline_intensity < 1.0 {
             self.apply_scanlines();
         }
 
         true
+    }
+
+    /// Dispatch a single Apple scanline (0..192) to the appropriate
+    /// per-mode renderer using the captured `scanline_modes` /
+    /// `scanline_80store` snapshot. The rendering target is whatever
+    /// `self.framebuffer` currently points at — callers can swap a
+    /// different buffer in beforehand to redirect output (e.g. the
+    /// monitor's partial-frame buffer).
+    fn dispatch_scanline(&mut self, iou: &IOU, mmu: &MMU, scanline: usize) {
+        let mode = self.scanline_modes[scanline];
+        let is_80store = self.scanline_80store[scanline];
+
+        let text_mode = (mode & VideoModeMask::TEXT) != 0;
+        let is_hires = (mode & VideoModeMask::HIRES) != 0;
+        let lo_res_mode = (mode & VideoModeMask::LORES) != 0;
+        let is_dhires = (mode & VideoModeMask::DHIRES) != 0;
+        let is_80col = (mode & VideoModeMask::COL80) != 0;
+        let mixed_mode = (mode & VideoModeMask::MIXED) != 0;
+        let force_text = mixed_mode && scanline >= 160;
+
+        if text_mode || force_text {
+            self.render_text_scanline(iou, mmu, scanline, mode, is_80store);
+        } else if is_hires {
+            if is_dhires && is_80col {
+                self.render_double_hires_scanline(iou, mmu, scanline);
+            } else {
+                self.render_hires_scanline(iou, mmu, scanline);
+            }
+        } else if lo_res_mode {
+            self.render_lores_scanline(iou, mmu, scanline, mode, is_80store);
+        } else {
+            self.render_text_scanline(iou, mmu, scanline, mode, is_80store);
+        }
+    }
+
+    pub fn compose_monitor_partial(
+        &mut self,
+        iou: &IOU,
+        mmu: &MMU,
+        up_to_scanline: usize,
+    ) -> &[u8] {
+        let len = self.framebuffer.len();
+        if self.monitor_partial_fb.len() != len {
+            self.monitor_partial_fb.resize(len, 0);
+        }
+
+        // Seed the partial buffer with the last completed framebuffer so
+        // unrendered scanlines (and the border) carry over from the
+        // previous frame — matches what the user would expect to see on
+        // a real CRT mid-redraw.
+        self.monitor_partial_fb.copy_from_slice(&self.framebuffer);
+
+        // Clamp + dim the un-executed region so the beam frontier is
+        // visually obvious. Each Apple scanline is 2 framebuffer rows
+        // (vertical doubling). Active video starts after the top border.
+        let stride = self.width * 4;
+        let up_to = up_to_scanline.min(192);
+        let stale_y_start = self.border_size + up_to * 2;
+        let stale_y_end = (self.border_size + 192 * 2).min(self.height);
+        for y in stale_y_start..stale_y_end {
+            let row = y * stride;
+            // Halve RGB; leave alpha alone (every 4th byte).
+            for px in (row..row + stride).step_by(4) {
+                self.monitor_partial_fb[px]     >>= 1;
+                self.monitor_partial_fb[px + 1] >>= 1;
+                self.monitor_partial_fb[px + 2] >>= 1;
+            }
+        }
+
+        // Re-render the executed scanlines into the partial buffer.
+        // Trick: swap framebuffers so the existing per-scanline renderers
+        // (which write to `self.framebuffer`) paint into the partial
+        // buffer instead, then swap back.
+        std::mem::swap(&mut self.framebuffer, &mut self.monitor_partial_fb);
+        for scanline in 0..up_to {
+            self.dispatch_scanline(iou, mmu, scanline);
+        }
+        std::mem::swap(&mut self.framebuffer, &mut self.monitor_partial_fb);
+
+        &self.monitor_partial_fb
     }
 
     fn resize_framebuffer(&mut self, new_width: usize, new_height: usize) {
@@ -215,6 +377,9 @@ impl Video {
         for i in (3..self.framebuffer.len()).step_by(4) {
             self.framebuffer[i] = 255;
         }
+        // Drop any stale partial-frame buffer; it'll be re-allocated on
+        // demand at the new size next time the monitor needs it.
+        self.monitor_partial_fb.clear();
     }
 
     #[inline(always)]
@@ -224,134 +389,305 @@ impl Video {
 
     // 2-line comb filter in YIQ space
     fn apply_comb_filter(&mut self) {
+        use wide::f32x8;
         let aw = self.active_width;
         const BLEND: f32 = 0.25;
+        let stride = self.width * 4;
+        let border = self.border_size;
 
-        // convert entire active area to YIQ rows
-        let mut yiq: Vec<(f32, f32, f32)> = Vec::with_capacity(192 * aw);
-        for src_line in 0..192_usize {
-            let y_cur = src_line * 2;
-            for x in 0..aw {
-                let idx = self.fb_index(x, y_cur);
-                let r = self.framebuffer[idx] as f32 / 255.0;
-                let g = self.framebuffer[idx + 1] as f32 / 255.0;
-                let b = self.framebuffer[idx + 2] as f32 / 255.0;
-                yiq.push((
-                    0.299 * r + 0.587 * g + 0.114 * b,
-                    0.5959 * r - 0.2746 * g - 0.3213 * b,
-                    0.2115 * r - 0.5227 * g + 0.3112 * b,
-                ));
-            }
-        }
+        let total = 192 * aw;
+        self.yiq_buf.clear();
+        self.yiq_buf.resize(total * 3, 0.0);
+        let (y_buf, iq_buf) = self.yiq_buf.split_at_mut(total);
+        let (i_buf, q_buf) = iq_buf.split_at_mut(total);
 
-        for src_line in 0..192_usize {
-            let y_cur = src_line * 2;
-            let row = src_line * aw;
-
-            for x in 0..aw {
-                let (y_val, mut i_val, mut q_val) = yiq[row + x];
-
-                // Blend I/Q toward neighbors (luma stays sharp)
-                if src_line > 0 {
-                    let prev = (src_line - 1) * aw + x;
-                    i_val += (yiq[prev].1 - i_val) * BLEND;
-                    q_val += (yiq[prev].2 - q_val) * BLEND;
+        // Pass 1: gather YIQ from row 0 of each doubled scanline pair.
+        let fb = &self.framebuffer[..];
+        y_buf.par_chunks_mut(aw)
+            .zip(i_buf.par_chunks_mut(aw))
+            .zip(q_buf.par_chunks_mut(aw))
+            .enumerate()
+            .for_each(|(src_line, ((yr, ir), qr))| {
+                let y_cur = src_line * 2;
+                let fb_row = (y_cur + border) * stride + border * 4;
+                for x in 0..aw {
+                    let p = fb_row + x * 4;
+                    let r = fb[p] as f32 * (1.0 / 255.0);
+                    let g = fb[p + 1] as f32 * (1.0 / 255.0);
+                    let b = fb[p + 2] as f32 * (1.0 / 255.0);
+                    yr[x] = 0.299 * r + 0.587 * g + 0.114 * b;
+                    ir[x] = 0.5959 * r - 0.2746 * g - 0.3213 * b;
+                    qr[x] = 0.2115 * r - 0.5227 * g + 0.3112 * b;
                 }
-                if src_line < 191 {
-                    let next = (src_line + 1) * aw + x;
-                    i_val += (yiq[next].1 - i_val) * BLEND;
-                    q_val += (yiq[next].2 - q_val) * BLEND;
-                }
+            });
 
-                // YIQ → RGB
-                let r = (y_val + 0.9563 * i_val + 0.6210 * q_val).clamp(0.0, 1.0);
-                let g = (y_val - 0.2721 * i_val - 0.6474 * q_val).clamp(0.0, 1.0);
-                let b = (y_val - 1.1070 * i_val + 1.7046 * q_val).clamp(0.0, 1.0);
+        // Pass 2: blend with prev/next row and write back to the framebuffer.
+        let y_buf_ref: &[f32] = y_buf;
+        let i_buf_ref: &[f32] = i_buf;
+        let q_buf_ref: &[f32] = q_buf;
+        let fb_active_start = border * stride + border * 4;
+        let active_bytes = 192 * 2 * stride;
 
-                let rb = (r * 255.0) as u8;
-                let gb = (g * 255.0) as u8;
-                let bb = (b * 255.0) as u8;
+        let blend_v = f32x8::splat(BLEND);
+        let zero_v = f32x8::splat(0.0);
+        let one_v = f32x8::splat(1.0);
+        let m255 = f32x8::splat(255.0);
+        let cy_r = f32x8::splat(0.9563);
+        let cy_g = f32x8::splat(-0.2721);
+        let cy_b = f32x8::splat(-1.1070);
+        let cq_r = f32x8::splat(0.6210);
+        let cq_g = f32x8::splat(-0.6474);
+        let cq_b = f32x8::splat(1.7046);
 
-                for dy in 0..2_usize {
-                    let idx = self.fb_index(x, y_cur + dy);
-                    if idx + 4 <= self.framebuffer.len() {
-                        self.framebuffer[idx] = rb;
-                        self.framebuffer[idx + 1] = gb;
-                        self.framebuffer[idx + 2] = bb;
+        let simd_chunks = aw / 8;
+        let simd_end = simd_chunks * 8;
+
+        self.framebuffer[fb_active_start..fb_active_start + active_bytes]
+            .par_chunks_mut(2 * stride)
+            .enumerate()
+            .for_each(|(src_line, chunk)| {
+                let row = src_line * aw;
+                let prev_row = src_line.saturating_sub(1) * aw;
+                let next_row = (src_line + 1).min(191) * aw;
+                let has_prev = src_line > 0;
+                let has_next = src_line < 191;
+
+                for blk in 0..simd_chunks {
+                    let x = blk * 8;
+                    let y_arr: [f32; 8] = y_buf_ref[row + x..row + x + 8].try_into().unwrap();
+                    let i_arr: [f32; 8] = i_buf_ref[row + x..row + x + 8].try_into().unwrap();
+                    let q_arr: [f32; 8] = q_buf_ref[row + x..row + x + 8].try_into().unwrap();
+                    let y_v = f32x8::from(y_arr);
+                    let mut i_v = f32x8::from(i_arr);
+                    let mut q_v = f32x8::from(q_arr);
+
+                    if has_prev {
+                        let pi: [f32; 8] = i_buf_ref[prev_row + x..prev_row + x + 8].try_into().unwrap();
+                        let pq: [f32; 8] = q_buf_ref[prev_row + x..prev_row + x + 8].try_into().unwrap();
+                        i_v = i_v + (f32x8::from(pi) - i_v) * blend_v;
+                        q_v = q_v + (f32x8::from(pq) - q_v) * blend_v;
+                    }
+                    if has_next {
+                        let ni: [f32; 8] = i_buf_ref[next_row + x..next_row + x + 8].try_into().unwrap();
+                        let nq: [f32; 8] = q_buf_ref[next_row + x..next_row + x + 8].try_into().unwrap();
+                        i_v = i_v + (f32x8::from(ni) - i_v) * blend_v;
+                        q_v = q_v + (f32x8::from(nq) - q_v) * blend_v;
+                    }
+
+                    let r_v = (y_v + i_v * cy_r + q_v * cq_r).fast_max(zero_v).fast_min(one_v);
+                    let g_v = (y_v + i_v * cy_g + q_v * cq_g).fast_max(zero_v).fast_min(one_v);
+                    let b_v = (y_v + i_v * cy_b + q_v * cq_b).fast_max(zero_v).fast_min(one_v);
+
+                    let r_arr = (r_v * m255).to_array();
+                    let g_arr = (g_v * m255).to_array();
+                    let b_arr = (b_v * m255).to_array();
+                    for j in 0..8 {
+                        let rb = r_arr[j] as u8;
+                        let gb = g_arr[j] as u8;
+                        let bb = b_arr[j] as u8;
+                        let off_top = (x + j) * 4;
+                        let off_bot = stride + (x + j) * 4;
+                        chunk[off_top]     = rb;
+                        chunk[off_top + 1] = gb;
+                        chunk[off_top + 2] = bb;
+                        chunk[off_bot]     = rb;
+                        chunk[off_bot + 1] = gb;
+                        chunk[off_bot + 2] = bb;
                     }
                 }
-            }
-        }
+
+                for x in simd_end..aw {
+                    let y_val = y_buf_ref[row + x];
+                    let mut i_val = i_buf_ref[row + x];
+                    let mut q_val = q_buf_ref[row + x];
+                    if has_prev {
+                        i_val += (i_buf_ref[prev_row + x] - i_val) * BLEND;
+                        q_val += (q_buf_ref[prev_row + x] - q_val) * BLEND;
+                    }
+                    if has_next {
+                        i_val += (i_buf_ref[next_row + x] - i_val) * BLEND;
+                        q_val += (q_buf_ref[next_row + x] - q_val) * BLEND;
+                    }
+
+                    let r = (y_val + 0.9563 * i_val + 0.6210 * q_val).clamp(0.0, 1.0);
+                    let g = (y_val - 0.2721 * i_val - 0.6474 * q_val).clamp(0.0, 1.0);
+                    let b = (y_val - 1.1070 * i_val + 1.7046 * q_val).clamp(0.0, 1.0);
+
+                    let rb = (r * 255.0) as u8;
+                    let gb = (g * 255.0) as u8;
+                    let bb = (b * 255.0) as u8;
+
+                    let off_top = x * 4;
+                    let off_bot = stride + x * 4;
+                    chunk[off_top]     = rb;
+                    chunk[off_top + 1] = gb;
+                    chunk[off_top + 2] = bb;
+                    chunk[off_bot]     = rb;
+                    chunk[off_bot + 1] = gb;
+                    chunk[off_bot + 2] = bb;
+                }
+            });
     }
 
-    // Simulate CRT electron beam spot size: the beam illuminates a Gaussian
-    // region wider than a single phosphor, so neighboring pixels overlap.
-    // 3-tap horizontal kernel [0.05, 0.90, 0.05]
+    // CRT electron beam spot simulation. Applies a 3-tap horizontal kernel
+    // `[0.05, 0.90, 0.05]` to soften adjacent pixel edges. Each doubled
+    // scanline pair is fully independent, so this runs rayon-parallel across
+    // pairs with f32x8 SIMD across the scanline.
     fn apply_phosphor_spread(&mut self) {
+        use wide::f32x8;
         let aw = self.active_width;
+        let stride = self.width * 4;
+        let border = self.border_size;
+        let n_lines = self.active_height / 2;
 
-        // Process each doubled scanline pair. Row buffer avoids full framebuffer clone.
-        for y in (0..self.active_height).step_by(2) {
-            // Read the row into a temp buffer (only need RGB, 3 bytes per pixel)
-            let mut row = vec![0u8; aw * 3];
-            for x in 0..aw {
-                let idx = self.fb_index(x, y);
-                row[x * 3]     = self.framebuffer[idx];
-                row[x * 3 + 1] = self.framebuffer[idx + 1];
-                row[x * 3 + 2] = self.framebuffer[idx + 2];
-            }
+        let fb_active_start = border * stride + border * 4;
+        let active_bytes = n_lines * 2 * stride;
 
-            for x in 0..aw {
-                let c = x * 3;
-                let cr = row[c] as f32;
-                let cg = row[c + 1] as f32;
-                let cb = row[c + 2] as f32;
+        let center = f32x8::splat(0.90);
+        let side = f32x8::splat(0.05);
+        let zero_v = f32x8::splat(0.0);
+        let m255 = f32x8::splat(255.0);
 
-                let (lr, lg, lb) = if x > 0 {
-                    let l = (x - 1) * 3;
-                    (row[l] as f32, row[l + 1] as f32, row[l + 2] as f32)
-                } else {
-                    (cr, cg, cb)
-                };
+        // SIMD inner range: x in [1, aw - 1) so x-1 and x+1 reads are in bounds.
+        let inner_count = (aw - 2) / 8;
+        let inner_end = 1 + inner_count * 8;
 
-                let (rr, rg, rb) = if x + 1 < aw {
-                    let r = (x + 1) * 3;
-                    (row[r] as f32, row[r + 1] as f32, row[r + 2] as f32)
-                } else {
-                    (cr, cg, cb)
-                };
-
-                let nr = (lr * 0.05 + cr * 0.90 + rr * 0.05) as u8;
-                let ng = (lg * 0.05 + cg * 0.90 + rg * 0.05) as u8;
-                let nb = (lb * 0.05 + cb * 0.90 + rb * 0.05) as u8;
-
-                for dy in 0..2_usize {
-                    let idx = self.fb_index(x, y + dy);
-                    if idx + 4 <= self.framebuffer.len() {
-                        self.framebuffer[idx]     = nr;
-                        self.framebuffer[idx + 1] = ng;
-                        self.framebuffer[idx + 2] = nb;
+        self.framebuffer[fb_active_start..fb_active_start + active_bytes]
+            .par_chunks_mut(2 * stride)
+            .for_each_init(
+                || (vec![0.0f32; aw], vec![0.0f32; aw], vec![0.0f32; aw]),
+                |(rch, gch, bch), chunk| {
+                    for x in 0..aw {
+                        let p = x * 4;
+                        rch[x] = chunk[p] as f32;
+                        gch[x] = chunk[p + 1] as f32;
+                        bch[x] = chunk[p + 2] as f32;
                     }
-                }
-            }
-        }
+
+                    // Left edge: clamp missing left neighbor to center.
+                    {
+                        let cr = rch[0]; let cg = gch[0]; let cb = bch[0];
+                        let rr_ = if aw > 1 { rch[1] } else { cr };
+                        let rg_ = if aw > 1 { gch[1] } else { cg };
+                        let rb_ = if aw > 1 { bch[1] } else { cb };
+                        let nr = (cr * 0.05 + cr * 0.90 + rr_ * 0.05) as u8;
+                        let ng = (cg * 0.05 + cg * 0.90 + rg_ * 0.05) as u8;
+                        let nb = (cb * 0.05 + cb * 0.90 + rb_ * 0.05) as u8;
+                        chunk[0] = nr; chunk[1] = ng; chunk[2] = nb;
+                        chunk[stride] = nr; chunk[stride + 1] = ng; chunk[stride + 2] = nb;
+                    }
+
+                    for blk in 0..inner_count {
+                        let x = 1 + blk * 8;
+                        let rl: [f32; 8] = rch[x - 1..x - 1 + 8].try_into().unwrap();
+                        let rc: [f32; 8] = rch[x..x + 8].try_into().unwrap();
+                        let rr: [f32; 8] = rch[x + 1..x + 1 + 8].try_into().unwrap();
+                        let gl: [f32; 8] = gch[x - 1..x - 1 + 8].try_into().unwrap();
+                        let gc: [f32; 8] = gch[x..x + 8].try_into().unwrap();
+                        let gr: [f32; 8] = gch[x + 1..x + 1 + 8].try_into().unwrap();
+                        let bl: [f32; 8] = bch[x - 1..x - 1 + 8].try_into().unwrap();
+                        let bc: [f32; 8] = bch[x..x + 8].try_into().unwrap();
+                        let br: [f32; 8] = bch[x + 1..x + 1 + 8].try_into().unwrap();
+
+                        let r_v = (f32x8::from(rl) + f32x8::from(rr)) * side
+                            + f32x8::from(rc) * center;
+                        let g_v = (f32x8::from(gl) + f32x8::from(gr)) * side
+                            + f32x8::from(gc) * center;
+                        let b_v = (f32x8::from(bl) + f32x8::from(br)) * side
+                            + f32x8::from(bc) * center;
+
+                        let r_arr = r_v.fast_max(zero_v).fast_min(m255).to_array();
+                        let g_arr = g_v.fast_max(zero_v).fast_min(m255).to_array();
+                        let b_arr = b_v.fast_max(zero_v).fast_min(m255).to_array();
+                        for j in 0..8 {
+                            let nr = r_arr[j] as u8;
+                            let ng = g_arr[j] as u8;
+                            let nb = b_arr[j] as u8;
+                            let p_top = (x + j) * 4;
+                            let p_bot = stride + (x + j) * 4;
+                            chunk[p_top]     = nr;
+                            chunk[p_top + 1] = ng;
+                            chunk[p_top + 2] = nb;
+                            chunk[p_bot]     = nr;
+                            chunk[p_bot + 1] = ng;
+                            chunk[p_bot + 2] = nb;
+                        }
+                    }
+
+                    // Scalar tail and right edge (clamps missing right neighbor to center).
+                    for x in inner_end..aw {
+                        let cr = rch[x]; let cg = gch[x]; let cb = bch[x];
+                        let (lr, lg, lb) = (rch[x - 1], gch[x - 1], bch[x - 1]);
+                        let (rr_, rg_, rb_) = if x + 1 < aw {
+                            (rch[x + 1], gch[x + 1], bch[x + 1])
+                        } else {
+                            (cr, cg, cb)
+                        };
+                        let nr = (lr * 0.05 + cr * 0.90 + rr_ * 0.05) as u8;
+                        let ng = (lg * 0.05 + cg * 0.90 + rg_ * 0.05) as u8;
+                        let nb = (lb * 0.05 + cb * 0.90 + rb_ * 0.05) as u8;
+                        let p_top = x * 4;
+                        let p_bot = stride + x * 4;
+                        chunk[p_top]     = nr;
+                        chunk[p_top + 1] = ng;
+                        chunk[p_top + 2] = nb;
+                        chunk[p_bot]     = nr;
+                        chunk[p_bot + 1] = ng;
+                        chunk[p_bot + 2] = nb;
+                    }
+                },
+            );
     }
 
     fn apply_scanlines(&mut self) {
+        use wide::f32x8;
         let intensity = self.scanline_intensity.clamp(0.0, 1.0);
+        let aw = self.active_width;
+        let width = self.width;
+        let border = self.border_size;
+        let active_height = self.active_height;
+        let stride = width * 4;
 
-        for y in (1..self.active_height).step_by(2) {
-            let abs_y = y + self.border_size;
-            let row_start = (abs_y * self.width + self.border_size) * 4;
-            let row_end = row_start + self.active_width * 4;
-            if row_end <= self.framebuffer.len() {
-                for i in (row_start..row_end).step_by(4) {
-                    self.framebuffer[i]     = (self.framebuffer[i]     as f32 * intensity) as u8;
-                    self.framebuffer[i + 1] = (self.framebuffer[i + 1] as f32 * intensity) as u8;
-                    self.framebuffer[i + 2] = (self.framebuffer[i + 2] as f32 * intensity) as u8;
+        let fb_active_start = border * stride + border * 4;
+        let intensity_v = f32x8::splat(intensity);
+        let m255 = f32x8::splat(255.0);
+        let zero_v = f32x8::splat(0.0);
+
+        self.framebuffer[fb_active_start..fb_active_start + active_height * stride]
+            .par_chunks_mut(2 * stride)
+            .for_each(|chunk| {
+                // top row kept, dim only the bottom row of the pair
+                let bot = &mut chunk[stride..stride + aw * 4];
+                let simd_chunks = aw / 8;
+                let simd_end = simd_chunks * 8;
+                for blk in 0..simd_chunks {
+                    let x0 = blk * 8;
+                    let mut r_arr = [0.0f32; 8];
+                    let mut g_arr = [0.0f32; 8];
+                    let mut b_arr = [0.0f32; 8];
+                    for j in 0..8 {
+                        let p = (x0 + j) * 4;
+                        r_arr[j] = bot[p] as f32;
+                        g_arr[j] = bot[p + 1] as f32;
+                        b_arr[j] = bot[p + 2] as f32;
+                    }
+                    let r_v = (f32x8::from(r_arr) * intensity_v).fast_max(zero_v).fast_min(m255).to_array();
+                    let g_v = (f32x8::from(g_arr) * intensity_v).fast_max(zero_v).fast_min(m255).to_array();
+                    let b_v = (f32x8::from(b_arr) * intensity_v).fast_max(zero_v).fast_min(m255).to_array();
+                    for j in 0..8 {
+                        let p = (x0 + j) * 4;
+                        bot[p]     = r_v[j] as u8;
+                        bot[p + 1] = g_v[j] as u8;
+                        bot[p + 2] = b_v[j] as u8;
+                    }
                 }
-            }
-        }
+                for x in simd_end..aw {
+                    let p = x * 4;
+                    bot[p]     = (bot[p]     as f32 * intensity) as u8;
+                    bot[p + 1] = (bot[p + 1] as f32 * intensity) as u8;
+                    bot[p + 2] = (bot[p + 2] as f32 * intensity) as u8;
+                }
+            });
     }
 
     fn read_hires_memory(&self, iou: &IOU, mmu: &MMU, addr: u16) -> u8 {
@@ -375,58 +711,71 @@ impl Video {
         }
     }
    
-    fn render_text_rows(&mut self, iou: &IOU, mmu: &MMU, rows: std::ops::Range<u16>) {
-        let video_mode = iou.video_mode.get();
-        let is_80col = check_bits_u8!(video_mode, VideoModeMask::COL80);
-        let is_altchar = check_bits_u8!(video_mode, VideoModeMask::ALTCHAR);
-        let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
-        let is_80store = iou.is_80store.get();
 
+    fn render_text_scanline(
+        &mut self,
+        _iou: &IOU,
+        mmu: &MMU,
+        scanline: usize,
+        mode: u8,
+        is_80store: bool,
+    ) {
+        let is_80col = check_bits_u8!(mode, VideoModeMask::COL80);
+        let is_altchar = check_bits_u8!(mode, VideoModeMask::ALTCHAR);
+        let is_page2 = check_bits_u8!(mode, VideoModeMask::PAGE2);
         let double_width = !is_80col;
 
-        for row in rows {
-            let row_base = TEXT_MODE_BASE_ADDRESSES[row as usize];
+        let text_row = (scanline / 8) as u16;
+        let char_row = (scanline % 8) as u16;
+        let row_base = TEXT_MODE_BASE_ADDRESSES[text_row as usize];
 
-            if is_80col {
-                for col_pair in 0..40_u16 {
-                    let addr = row_base + col_pair;
-                    
-                    // Even column (0, 2, 4...) -> AUX Memory
-                    let char_even = mmu.read_aux_byte(addr);
-                    self.draw_char(row, col_pair * 2, char_even, is_altchar, double_width);
+        if is_80col {
+            for col_pair in 0..40_u16 {
+                let addr = row_base + col_pair;
 
-                    // Odd column (1, 3, 5...) -> MAIN Memory
-                    let char_odd = mmu.read_main_byte(addr);
-                    self.draw_char(row, col_pair * 2 + 1, char_odd, is_altchar, double_width);
-                }
-            } else {
-                for col in 0..40_u16 {
-                    // Handle Page 2 offset if 80STORE is OFF
-                    let (effective_addr, use_aux) = if !is_80store && is_page2 {
-                        (row_base + 0x0400 + col, false)
-                    } else if is_80store && is_page2 {
-                        (row_base + col, true)
-                    } else {
-                        (row_base + col, false)
-                    };
+                // Even column (0, 2, 4...) -> AUX Memory
+                let char_even = mmu.read_aux_byte(addr);
+                self.draw_char_scanline(text_row, col_pair * 2, char_even, char_row, is_altchar, double_width);
 
-                    let vram_code = if use_aux {
-                        mmu.read_aux_byte(effective_addr)
-                    } else {
-                        mmu.read_main_byte(effective_addr)
-                    };
-                    self.draw_char(row, col, vram_code, is_altchar, double_width);
-                }
+                // Odd column (1, 3, 5...) -> MAIN Memory
+                let char_odd = mmu.read_main_byte(addr);
+                self.draw_char_scanline(text_row, col_pair * 2 + 1, char_odd, char_row, is_altchar, double_width);
+            }
+        } else {
+            for col in 0..40_u16 {
+                // Handle Page 2 offset if 80STORE is OFF
+                let (effective_addr, use_aux) = if !is_80store && is_page2 {
+                    (row_base + 0x0400 + col, false)
+                } else if is_80store && is_page2 {
+                    (row_base + col, true)
+                } else {
+                    (row_base + col, false)
+                };
+
+                let vram_code = if use_aux {
+                    mmu.read_aux_byte(effective_addr)
+                } else {
+                    mmu.read_main_byte(effective_addr)
+                };
+                self.draw_char_scanline(text_row, col, vram_code, char_row, is_altchar, double_width);
             }
         }
     }
 
-    fn draw_char(&mut self, row: u16, col: u16, char_code: u8, is_altchar: bool, double_width: bool) {
+    fn draw_char_scanline(
+        &mut self,
+        row: u16,
+        col: u16,
+        char_code: u8,
+        char_row: u16,
+        is_altchar: bool,
+        double_width: bool,
+    ) {
         let (font_offset, mut invert) = apple_iic_font_index(char_code, is_altchar);
 
-       // Flashing range in VRAM: 0x40-0x7F (when not in AltChar/MouseText mode)
+        // Flashing range in VRAM: 0x40-0x7F (when not in AltChar/MouseText mode).
+        // Flash rate ~2 Hz: 60 fps / 32 ≈ 1.8 Hz.
         if !is_altchar && (char_code >= 0x40 && char_code <= 0x7F) {
-            // Flash rate: approx 2Hz. 60fps / 32 = ~1.8Hz
             let flash_on = (self.frame_count / 16) % 2 == 0;
             if !flash_on {
                 invert = false;
@@ -435,121 +784,91 @@ impl Video {
 
         let char_width = if double_width { 14 } else { 7 };
 
-        for char_row in 0..8_u16 {
-            let mut font_byte = CHAR_ROM[font_offset + char_row as usize];
-            
-            if invert {
-                font_byte = !font_byte;
-            }
+        let mut font_byte = CHAR_ROM[font_offset + char_row as usize];
+        if invert {
+            font_byte = !font_byte;
+        }
 
-            let y = (row * 8 + char_row) * 2;
-            let x = col * char_width; 
+        let y = (row * 8 + char_row) * 2;
+        let x = col * char_width;
 
-            let mut rgba_row = [0u8; 14 * 4];
+        let mut rgba_row = [0u8; 14 * 4];
 
-            for bit in 0..7 {
-                let pixel_on = (font_byte >> bit) & 1 != 0;
-                let (r, g, b) = if pixel_on {
-                    if self.monochrome {
-                        (MONO_GREEN.0, MONO_GREEN.1, MONO_GREEN.2)
-                    } else {
-                        (255, 255, 255)
-                    }
+        for bit in 0..7 {
+            let pixel_on = (font_byte >> bit) & 1 != 0;
+            let (r, g, b) = if pixel_on {
+                if self.monochrome {
+                    (MONO_GREEN.0, MONO_GREEN.1, MONO_GREEN.2)
+                } else {
+                    (255, 255, 255)
+                }
+            } else {
+                if self.monochrome {
+                    (MONO_BLACK_RGBA[0], MONO_BLACK_RGBA[1], MONO_BLACK_RGBA[2])
                 } else {
                     (0, 0, 0)
-                };
-
-                if double_width {
-                    // draw 2 pixels for each font bit
-                    let base_index = bit * 8; // bit * 2 pixels * 4 bytes
-                    
-                    // Pixel 1
-                    rgba_row[base_index] = r;
-                    rgba_row[base_index + 1] = g;
-                    rgba_row[base_index + 2] = b;
-                    rgba_row[base_index + 3] = 255;
-
-                    // Pixel 2
-                    rgba_row[base_index + 4] = r;
-                    rgba_row[base_index + 5] = g;
-                    rgba_row[base_index + 6] = b;
-                    rgba_row[base_index + 7] = 255;
-                } else {
-                    // draw 1 pixel for each font bit
-                    let base_index = bit * 4; // bit * 1 pixel * 4 bytes
-                    
-                    rgba_row[base_index] = r;
-                    rgba_row[base_index + 1] = g;
-                    rgba_row[base_index + 2] = b;
-                    rgba_row[base_index + 3] = 255;
                 }
+            };
+
+            if double_width {
+                // 2 fb pixels per font bit
+                let base_index = bit * 8;
+                rgba_row[base_index]     = r;
+                rgba_row[base_index + 1] = g;
+                rgba_row[base_index + 2] = b;
+                rgba_row[base_index + 3] = 255;
+                rgba_row[base_index + 4] = r;
+                rgba_row[base_index + 5] = g;
+                rgba_row[base_index + 6] = b;
+                rgba_row[base_index + 7] = 255;
+            } else {
+                let base_index = bit * 4;
+                rgba_row[base_index]     = r;
+                rgba_row[base_index + 1] = g;
+                rgba_row[base_index + 2] = b;
+                rgba_row[base_index + 3] = 255;
             }
+        }
 
-            for dy in 0..2 {
-                let start_index = self.fb_index(x as usize, y as usize + dy);
-                let end_index = start_index + (char_width as usize) * 4;
+        for dy in 0..2 {
+            let start_index = self.fb_index(x as usize, y as usize + dy);
+            let end_index = start_index + (char_width as usize) * 4;
 
-                if end_index <= self.framebuffer.len() {
-                    self.framebuffer[start_index..end_index].copy_from_slice(&rgba_row[0..(char_width as usize * 4)]);
-                }
+            if end_index <= self.framebuffer.len() {
+                self.framebuffer[start_index..end_index]
+                    .copy_from_slice(&rgba_row[0..(char_width as usize * 4)]);
             }
         }
     }
 
     fn apply_mixed_mode_text_fringing(&mut self, start_text_row: usize) {
-        let fringe_alpha: f32 = 0.25; // blend strength (~25%)
-        let y_start = start_text_row * 8 * 2;
-        let y_end = 24 * 8 * 2;
+        let seam_y = start_text_row * 8 * 2;
 
-        for y in (y_start..y_end).step_by(2) {
-            for x in 1..self.active_width - 1 {
+        for x in 0..self.active_width {
+            let mut top_bright_y: Option<usize> = None;
+            for dy in 0..16 {
+                let y = seam_y + dy;
                 let idx = self.fb_index(x, y);
                 if idx + 4 > self.framebuffer.len() { continue; }
-
-                let r = self.framebuffer[idx] as u16;
-                let g = self.framebuffer[idx + 1] as u16;
-                let b = self.framebuffer[idx + 2] as u16;
-                let is_bright = r + g + b > 400;
-
-                if !is_bright { continue; }
-
-                // right neighbor
-                let ridx = self.fb_index(x + 1, y);
-                if ridx + 4 <= self.framebuffer.len() {
-                    let rr = self.framebuffer[ridx] as u16;
-                    let rg = self.framebuffer[ridx + 1] as u16;
-                    let rb = self.framebuffer[ridx + 2] as u16;
-                    if rr + rg + rb < 100 {
-                        // phase-based fringe
-                        let fringe = Self::ntsc_fringe_color((x + 1) % 4);
-                        for dy in 0..2 {
-                            let fi = self.fb_index(x + 1, y + dy);
-                            if fi + 4 <= self.framebuffer.len() {
-                                self.framebuffer[fi]     = (fringe[0] as f32 * fringe_alpha) as u8;
-                                self.framebuffer[fi + 1] = (fringe[1] as f32 * fringe_alpha) as u8;
-                                self.framebuffer[fi + 2] = (fringe[2] as f32 * fringe_alpha) as u8;
-                            }
-                        }
-                    }
+                let lum = self.framebuffer[idx] as u16
+                        + self.framebuffer[idx + 1] as u16
+                        + self.framebuffer[idx + 2] as u16;
+                if lum > 400 {
+                    top_bright_y = Some(y);
+                    break;
                 }
+            }
+            let Some(top_y) = top_bright_y else { continue };
 
-                // left neighbor
-                let lidx = self.fb_index(x - 1, y);
-                if lidx + 4 <= self.framebuffer.len() {
-                    let lr = self.framebuffer[lidx] as u16;
-                    let lg = self.framebuffer[lidx + 1] as u16;
-                    let lb = self.framebuffer[lidx + 2] as u16;
-                    if lr + lg + lb < 100 {
-                        let fringe = Self::ntsc_fringe_color((x - 1) % 4);
-                        for dy in 0..2 {
-                            let fi = self.fb_index(x - 1, y + dy);
-                            if fi + 4 <= self.framebuffer.len() {
-                                self.framebuffer[fi]     = (fringe[0] as f32 * fringe_alpha) as u8;
-                                self.framebuffer[fi + 1] = (fringe[1] as f32 * fringe_alpha) as u8;
-                                self.framebuffer[fi + 2] = (fringe[2] as f32 * fringe_alpha) as u8;
-                            }
-                        }
-                    }
+            let fringe = Self::ntsc_fringe_color(x % 4);
+
+            for k in 0..2 {
+                let y = top_y + k;
+                let fi = self.fb_index(x, y);
+                if fi + 4 <= self.framebuffer.len() {
+                    self.framebuffer[fi]     = fringe[0];
+                    self.framebuffer[fi + 1] = fringe[1];
+                    self.framebuffer[fi + 2] = fringe[2];
                 }
             }
         }
@@ -571,154 +890,166 @@ impl Video {
     #[inline]
     fn ntsc_hires_artifact_color(
         cur: bool, prev: bool, next: bool,
+        prev2: bool, next2: bool,
         phase_column: usize, palette: bool,
+        shader_smears: bool,
     ) -> [u8; 4] {
+        let even_phase = phase_column % 2 == 0;
+        let dim_phase = phase_column % 4 >= 2;
+        let truly_isolated = !prev && !next && !prev2 && !next2;
+
+        // Palette 0 even = violet family (bright [3] / dark [2])
+        // Palette 0 odd  = green  family (bright [12] / dark [4])
+        // Palette 1 even = blue   family (bright [6]  / dark [2])
+        // Palette 1 odd  = orange family (bright [9]  / dark [8])
+        let bright_color = if palette {
+            if even_phase { NTSC_PALETTE[6] } else { NTSC_PALETTE[9] }
+        } else {
+            if even_phase { NTSC_PALETTE[3] } else { NTSC_PALETTE[12] }
+        };
+        let dark_color = if palette {
+            if even_phase { NTSC_PALETTE[2] } else { NTSC_PALETTE[8] }
+        } else {
+            if even_phase { NTSC_PALETTE[2] } else { NTSC_PALETTE[4] }
+        };
+        let pixel_color = if truly_isolated && dim_phase {
+            dark_color
+        } else {
+            bright_color
+        };
+
+        let opposite_bright = if palette {
+            if even_phase { NTSC_PALETTE[9] } else { NTSC_PALETTE[6] }
+        } else {
+            if even_phase { NTSC_PALETTE[12] } else { NTSC_PALETTE[3] }
+        };
+
         if cur {
             if prev || next {
                 // adjacent ON pixels cancel chroma
                 NTSC_PALETTE[15]
             } else {
-                if palette {
-                    if phase_column % 2 == 0 { NTSC_PALETTE[6] } else { NTSC_PALETTE[9] }
-                } else {
-                    if phase_column % 2 == 0 { NTSC_PALETTE[3] } else { NTSC_PALETTE[12] }
-                }
+                pixel_color
             }
         } else if prev && next {
             // between two ON pixels
-            if palette {
-                if phase_column % 2 == 0 { NTSC_PALETTE[9] } else { NTSC_PALETTE[6] }
-            } else {
-                if phase_column % 2 == 0 { NTSC_PALETTE[12] } else { NTSC_PALETTE[3] }
-            }
+            opposite_bright
         } else if prev || next {
-            // single neighbor edge
-            let base = if palette {
-                if phase_column % 2 == 0 { NTSC_PALETTE[9] } else { NTSC_PALETTE[6] }
+            if shader_smears {
+                // Discrete-decode mode: let the GPU chroma blur produce
+                // the single-neighbor fringe. Emit black here.
+                NTSC_PALETTE[0]
             } else {
-                if phase_column % 2 == 0 { NTSC_PALETTE[12] } else { NTSC_PALETTE[3] }
-            };
-            [
-                (base[0] as f32 * 0.56) as u8,
-                (base[1] as f32 * 0.56) as u8,
-                (base[2] as f32 * 0.56) as u8,
-                255,
-            ]
+                [
+                    (opposite_bright[0] as f32 * 0.56) as u8,
+                    (opposite_bright[1] as f32 * 0.56) as u8,
+                    (opposite_bright[2] as f32 * 0.56) as u8,
+                    255,
+                ]
+            }
         } else {
             NTSC_PALETTE[0] // black
         }
     }
 
-    fn render_lores_rows(&mut self, iou: &IOU, mmu: &MMU, text_rows: std::ops::Range<usize>, video_mode: u8) {
-        let is_page2 = (video_mode & VideoModeMask::PAGE2) != 0;
-        let is_80col = (video_mode & VideoModeMask::COL80) != 0;
-        let is_dhires = (video_mode & VideoModeMask::DHIRES) != 0;
+    fn render_lores_scanline(
+        &mut self,
+        _iou: &IOU,
+        mmu: &MMU,
+        scanline: usize,
+        mode: u8,
+        is_80store: bool,
+    ) {
+        let is_page2 = (mode & VideoModeMask::PAGE2) != 0;
+        let is_80col = (mode & VideoModeMask::COL80) != 0;
+        let is_dhires = (mode & VideoModeMask::DHIRES) != 0;
         let is_double_lores = is_80col && is_dhires;
-        let is_80store = iou.is_80store.get();
-        let mixed_mode = (video_mode & VideoModeMask::MIXED) != 0;
+        let mixed_mode = (mode & VideoModeMask::MIXED) != 0;
 
         let base_vram: u16 = if !is_80store && is_page2 { 0x0800 } else { 0x0400 };
 
-        // Convert text rows to half-rows (each text row = 2 half-rows)
-        let half_row_start = text_rows.start * 2;
-        let half_row_end_max = if mixed_mode { 40 } else { 48 };
-        let half_row_end = (text_rows.end * 2).min(half_row_end_max);
+        // The original renderer carved the screen into "half-rows" — each
+        // 4 Apple scanlines tall, corresponding to either the low or
+        // high nibble of a VRAM byte. Map the input scanline back to its
+        // half-row index so the lookup table stays unchanged.
+        let half_row = scanline / 4;
+        if mixed_mode && half_row >= 40 { return; }
+        if half_row >= 48 { return; }
 
-        for row in half_row_start..half_row_end {
-            let base_address = base_vram
-                + match row / 2 {
-                    0 => 0x000,
-                    1 => 0x080,
-                    2 => 0x100,
-                    3 => 0x180,
-                    4 => 0x200,
-                    5 => 0x280,
-                    6 => 0x300,
-                    7 => 0x380,
-                    8 => 0x028,
-                    9 => 0x0A8,
-                    10 => 0x128,
-                    11 => 0x1A8,
-                    12 => 0x228,
-                    13 => 0x2A8,
-                    14 => 0x328,
-                    15 => 0x3A8,
-                    16 => 0x050,
-                    17 => 0x0D0,
-                    18 => 0x150,
-                    19 => 0x1D0,
-                    20 => 0x250,
-                    21 => 0x2D0,
-                    22 => 0x350,
-                    23 => 0x3D0,
-                    _ => unreachable!(),
+        let base_address = base_vram
+            + match half_row / 2 {
+                0  => 0x000, 1  => 0x080, 2  => 0x100, 3  => 0x180,
+                4  => 0x200, 5  => 0x280, 6  => 0x300, 7  => 0x380,
+                8  => 0x028, 9  => 0x0A8, 10 => 0x128, 11 => 0x1A8,
+                12 => 0x228, 13 => 0x2A8, 14 => 0x328, 15 => 0x3A8,
+                16 => 0x050, 17 => 0x0D0, 18 => 0x150, 19 => 0x1D0,
+                20 => 0x250, 21 => 0x2D0, 22 => 0x350, 23 => 0x3D0,
+                _  => unreachable!(),
+            };
+
+        // 2 fb rows per Apple scanline.
+        let y_fb = scanline * 2;
+
+        if is_double_lores {
+            for col in 0..80_u16 {
+                let mem_addr = base_address + (col / 2);
+                let is_aux = (col % 2) == 0;
+
+                let color_byte = if is_aux {
+                    mmu.read_aux_byte(mem_addr)
+                } else {
+                    mmu.read_main_byte(mem_addr)
                 };
 
-            if is_double_lores {
-                for col in 0..80_u16 {
-                    let mem_addr = base_address + (col / 2);
-                    let is_aux = (col % 2) == 0;
+                let nibble = if half_row % 2 == 0 {
+                    color_byte & 0x0F
+                } else {
+                    (color_byte >> 4) & 0x0F
+                };
 
-                    let color_byte = if is_aux {
-                        mmu.read_aux_byte(mem_addr)
-                    } else {
-                        mmu.read_main_byte(mem_addr)
-                    };
+                let color_code = if is_aux {
+                    (nibble << 1 | nibble >> 3) & 0x0F
+                } else {
+                    nibble
+                };
 
-                    let nibble = if row % 2 == 0 {
-                        color_byte & 0x0F
-                    } else {
-                        (color_byte >> 4) & 0x0F
-                    };
+                let color = self.lores_color_lookup(color_code);
 
-                    let color_code = if is_aux {
-                        (nibble << 1 | nibble >> 3) & 0x0F
-                    } else {
-                        nibble
-                    };
-
-                    let color = self.lores_color_lookup(color_code);
-
-                    let x = col * 7;
-                    let y = row * 8;
-                    
-                    for dy in 0..8 {
-                        for dx in 0..7 {
-                            let index = self.fb_index(x as usize + dx as usize, y as usize + dy as usize);
-                            if index + 4 <= self.framebuffer.len() {
-                                self.framebuffer[index..index + 4].copy_from_slice(&color);
-                            }
+                let x = (col * 7) as usize;
+                for dy in 0..2 {
+                    for dx in 0..7 {
+                        let index = self.fb_index(x + dx, y_fb + dy);
+                        if index + 4 <= self.framebuffer.len() {
+                            self.framebuffer[index..index + 4].copy_from_slice(&color);
                         }
                     }
                 }
-            } else {
-                for col in 0..40_u16 {
-                    let addr = base_address + col;
-                    
-                    let use_aux = is_80store && is_page2;
-                    let color_byte = if use_aux {
-                        mmu.read_aux_byte(addr)
-                    } else {
-                        mmu.read_main_byte(addr)
-                    };
+            }
+        } else {
+            for col in 0..40_u16 {
+                let addr = base_address + col;
 
-                    let color_code = if row % 2 == 0 {
-                        color_byte & 0x0F
-                    } else {
-                        (color_byte >> 4) & 0x0F
-                    };
+                let use_aux = is_80store && is_page2;
+                let color_byte = if use_aux {
+                    mmu.read_aux_byte(addr)
+                } else {
+                    mmu.read_main_byte(addr)
+                };
 
-                    let color = self.lores_color_lookup(color_code);
+                let color_code = if half_row % 2 == 0 {
+                    color_byte & 0x0F
+                } else {
+                    (color_byte >> 4) & 0x0F
+                };
 
-                    let x = col * 14;
-                    let y = row * 8;
-                    
-                    for dy in 0..8 {
-                        for dx in 0..14 {
-                            let index = self.fb_index(x as usize + dx as usize, y as usize + dy as usize);
-                            if index + 4 <= self.framebuffer.len() {
-                                self.framebuffer[index..index + 4].copy_from_slice(&color);
-                            }
+                let color = self.lores_color_lookup(color_code);
+
+                let x = (col * 14) as usize;
+                for dy in 0..2 {
+                    for dx in 0..14 {
+                        let index = self.fb_index(x + dx, y_fb + dy);
+                        if index + 4 <= self.framebuffer.len() {
+                            self.framebuffer[index..index + 4].copy_from_slice(&color);
                         }
                     }
                 }
@@ -729,326 +1060,433 @@ impl Video {
     // Render HiRes mode using direct NTSC artifact color palette lookup.
     // HiRes only has 4 possible artifact colors per palette: violet/green
     // (palette 0) and blue/orange (palette 1)
-    fn render_hires_rows(&mut self, iou: &IOU, mmu: &MMU, groups: std::ops::Range<usize>) {
+    fn render_hires_scanline(&mut self, iou: &IOU, mmu: &MMU, scanline: usize) {
         let base_vram: u16 = 0x0000;
 
-        for group in groups {
-            let group16 = group as u16;
-            for row in 0..8_u16 {
-                let row_base = base_vram
-                    .wrapping_add(row.wrapping_mul(1024))
-                    .wrapping_add((group16 % 8).wrapping_mul(128))
-                    .wrapping_add((group16 / 8).wrapping_mul(40));
+        let group = scanline / 8;
+        let row_in_group = (scanline % 8) as u16;
+        let group16 = group as u16;
 
-                let y = (group * 8 + (row as usize)) * 2;
+        let row_base = base_vram
+            .wrapping_add(row_in_group.wrapping_mul(1024))
+            .wrapping_add((group16 % 8).wrapping_mul(128))
+            .wrapping_add((group16 / 8).wrapping_mul(40));
 
-                if self.monochrome {
-                    for col in 0..40_u16 {
-                        let addr = row_base.wrapping_add(col);
-                        let byte = self.read_hires_memory(iou, mmu, addr);
-                        for bit in 0..7_usize {
-                            let pixel_on = (byte >> bit) & 1 != 0;
-                            let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
-                            let x = col as usize * 14 + bit * 2;
-                            for dy in 0..2_usize {
-                                for dx in 0..2_usize {
-                                    if x + dx < self.active_width {
-                                        let index = self.fb_index(x + dx, y + dy);
-                                        if index + 4 <= self.framebuffer.len() {
-                                            self.framebuffer[index..index + 4]
-                                                .copy_from_slice(&color);
-                                        }
-                                    }
+        let y = scanline * 2;
+
+        if self.monochrome {
+            for col in 0..40_u16 {
+                let addr = row_base.wrapping_add(col);
+                let byte = self.read_hires_memory(iou, mmu, addr);
+                for bit in 0..7_usize {
+                    let pixel_on = (byte >> bit) & 1 != 0;
+                    let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
+                    let x = col as usize * 14 + bit * 2;
+                    for dy in 0..2_usize {
+                        for dx in 0..2_usize {
+                            if x + dx < self.active_width {
+                                let index = self.fb_index(x + dx, y + dy);
+                                if index + 4 <= self.framebuffer.len() {
+                                    self.framebuffer[index..index + 4]
+                                        .copy_from_slice(&color);
                                 }
                             }
                         }
                     }
-                    continue;
-                }
-
-                // Color HiRes: direct palette lookup from pixel context
-                let mut prev_byte: u8 = 0;
-                for col in 0..40_usize {
-                    let addr = row_base.wrapping_add(col as u16);
-                    let byte = self.read_hires_memory(iou, mmu, addr);
-                    let next_byte = if col < 39 {
-                        self.read_hires_memory(iou, mmu, row_base.wrapping_add(col as u16 + 1))
-                    } else {
-                        0
-                    };
-
-                    let palette = (byte & 0x80) != 0;
-
-                    for bit in 0..7_usize {
-                        let cur = (byte >> bit) & 1 != 0;
-                        let prev = if bit == 0 {
-                            (prev_byte >> 6) & 1 != 0
-                        } else {
-                            (byte >> (bit - 1)) & 1 != 0
-                        };
-                        let next = if bit == 6 {
-                            (next_byte >> 0) & 1 != 0
-                        } else {
-                            (byte >> (bit + 1)) & 1 != 0
-                        };
-
-                        let phase_column = col * 7 + bit;
-                        let color = Self::ntsc_hires_artifact_color(
-                            cur, prev, next, phase_column, palette,
-                        );
-
-                        let x = col * 14 + bit * 2;
-                        for dy in 0..2_usize {
-                            for dx in 0..2_usize {
-                                if x + dx < self.active_width {
-                                    let index = self.fb_index(x + dx, y + dy);
-                                    if index + 4 <= self.framebuffer.len() {
-                                        self.framebuffer[index..index + 4]
-                                            .copy_from_slice(&color);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    prev_byte = byte;
                 }
             }
+            return;
         }
 
+        // Color HiRes: direct palette lookup from pixel context.
+        let mut prev_byte: u8 = 0;
+        for col in 0..40_usize {
+            let addr = row_base.wrapping_add(col as u16);
+            let byte = self.read_hires_memory(iou, mmu, addr);
+            let next_byte = if col < 39 {
+                self.read_hires_memory(iou, mmu, row_base.wrapping_add(col as u16 + 1))
+            } else {
+                0
+            };
+
+            let palette = (byte & 0x80) != 0;
+
+            for bit in 0..7_usize {
+                let cur = (byte >> bit) & 1 != 0;
+                let prev = if bit == 0 {
+                    (prev_byte >> 6) & 1 != 0
+                } else {
+                    (byte >> (bit - 1)) & 1 != 0
+                };
+                let next = if bit == 6 {
+                    (next_byte >> 0) & 1 != 0
+                } else {
+                    (byte >> (bit + 1)) & 1 != 0
+                };
+
+                let prev2 = if bit >= 2 {
+                    (byte >> (bit - 2)) & 1 != 0
+                } else if bit == 1 {
+                    (prev_byte >> 6) & 1 != 0
+                } else {
+                    (prev_byte >> 5) & 1 != 0
+                };
+                let next2 = if bit + 2 <= 6 {
+                    (byte >> (bit + 2)) & 1 != 0
+                } else if bit == 5 {
+                    (next_byte >> 0) & 1 != 0
+                } else {
+                    (next_byte >> 1) & 1 != 0
+                };
+
+                let phase_column = col * 7 + bit;
+                let color = Self::ntsc_hires_artifact_color(
+                    cur, prev, next, prev2, next2,
+                    phase_column, palette, self.shader_enabled,
+                );
+
+                let x = col * 14 + bit * 2;
+                for dy in 0..2_usize {
+                    for dx in 0..2_usize {
+                        if x + dx < self.active_width {
+                            let index = self.fb_index(x + dx, y + dy);
+                            if index + 4 <= self.framebuffer.len() {
+                                self.framebuffer[index..index + 4]
+                                    .copy_from_slice(&color);
+                            }
+                        }
+                    }
+                }
+            }
+            prev_byte = byte;
+        }
     }
 
-    // Blur I and Q channels independently in YIQ space.
-    // Simulates analog chroma bandwidth limiting with asymmetric right-bias
-    // matching NTSC chroma demodulator group delay. Color bleeds ~1.5px right
-    // (the classic Apple II "rainbow tail") and ~0.5px left. Luma (Y) is
-    // left sharp.
+    // Blur the I and Q channels independently in YIQ space to simulate analog
+    // chroma bandwidth limiting. The kernel is asymmetric and right-biased to
+    // match NTSC chroma demodulator group delay: color bleeds about 1.5 pixels
+
     fn apply_chroma_blur(&mut self, y_start: usize, y_end: usize) {
-        // 7-tap, left-heavy kernel: pixels pull strongly from left neighbors,
-        // causing color to bleed ~2.5px RIGHT past edges into black — the
-        // classic Apple II "rainbow tail". Left tail (0.15+0.2) = 0.35 pulls
-        // hard; right tail (0.07+0.03) = 0.10 is minimal.
         const I_KERNEL: [f32; 7] = [0.15, 0.2, 0.25, 0.2, 0.1, 0.07, 0.03];
         const Q_KERNEL: [f32; 7] = [0.15, 0.2, 0.25, 0.2, 0.1, 0.07, 0.03];
-
-        #[inline]
-        fn srgb_to_linear(c: f32) -> f32 {
-            if c <= 0.04045 { c / 12.92 }
-            else { ((c + 0.055) / 1.055).powf(2.4) }
-        }
-
-        #[inline]
-        fn linear_to_srgb(c: f32) -> f32 {
-            if c <= 0.0031308 { c * 12.92 }
-            else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
-        }
-
-        #[inline]
-        fn rgb_to_yiq(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-            let r = srgb_to_linear(r as f32 / 255.0);
-            let g = srgb_to_linear(g as f32 / 255.0);
-            let b = srgb_to_linear(b as f32 / 255.0);
-            (
-                0.299 * r + 0.587 * g + 0.114 * b,
-                0.5959 * r - 0.2746 * g - 0.3213 * b,
-                0.2115 * r - 0.5227 * g + 0.3112 * b,
-            )
-        }
-
-        #[inline]
-        fn yiq_to_rgb(y: f32, i: f32, q: f32) -> (u8, u8, u8) {
-            let r = (y + 0.9563 * i + 0.6210 * q).clamp(0.0, 1.0);
-            let g = (y - 0.2721 * i - 0.6474 * q).clamp(0.0, 1.0);
-            let b = (y - 1.1070 * i + 1.7046 * q).clamp(0.0, 1.0);
-            // threshold before gamma encoding
-            let encode = |c: f32| if c < 0.0003 { 0.0 } else { linear_to_srgb(c) };
-            ((encode(r) * 255.0) as u8, (encode(g) * 255.0) as u8, (encode(b) * 255.0) as u8)
-        }
-
+        const HALF: usize = 3;
         let aw = self.active_width;
-        let i_half = 3_usize; // center tap at index 3 (right-biased)
-        let q_half = 3_usize;
+        let stride = self.width * 4;
+        let border = self.border_size;
 
-        for y in (y_start..y_end).step_by(2) {
-            let row_yiq: Vec<(f32, f32, f32)> = (0..aw)
-                .map(|x| {
-                    let idx = self.fb_index(x, y);
-                    rgb_to_yiq(
-                        self.framebuffer[idx],
-                        self.framebuffer[idx + 1],
-                        self.framebuffer[idx + 2],
-                    )
-                })
-                .collect();
+        // Per-x kernel sums for edge pixels where the kernel is truncated;
+        // interior pixels share `i_full` / `q_full`.
+        let mut i_wsum_left = [0.0f32; HALF];
+        let mut q_wsum_left = [0.0f32; HALF];
+        let i_full: f32 = I_KERNEL.iter().sum();
+        let q_full: f32 = Q_KERNEL.iter().sum();
+        for x in 0..HALF {
+            let mut si = 0.0f32;
+            let mut sq = 0.0f32;
+            for k in 0..7 {
+                let sx = x as i32 - HALF as i32 + k as i32;
+                if sx >= 0 {
+                    si += I_KERNEL[k];
+                    sq += Q_KERNEL[k];
+                }
+            }
+            i_wsum_left[x] = si;
+            q_wsum_left[x] = sq;
+        }
+        let mut i_wsum_right = [0.0f32; HALF];
+        let mut q_wsum_right = [0.0f32; HALF];
+        for j in 0..HALF {
+            let x = aw - HALF + j;
+            let mut si = 0.0f32;
+            let mut sq = 0.0f32;
+            for k in 0..7 {
+                let sx = x as i32 - HALF as i32 + k as i32;
+                if sx < aw as i32 {
+                    si += I_KERNEL[k];
+                    sq += Q_KERNEL[k];
+                }
+            }
+            i_wsum_right[j] = si;
+            q_wsum_right[j] = sq;
+        }
 
-            for x in 0..aw {
-                let y_val = row_yiq[x].0;
+        let s2l = self.srgb_to_linear_lut;
+        let l2s = *self.linear_to_srgb_lut_u8;
 
-                // White protection with subtle chroma bleed: near-white pixels
-                // get ~15% of neighbor chroma for realistic color fringe at
-                // white/color boundaries, plus a slight luma boost matching
-                // CRT behavior where adjacent ON pixels produce max composite
-                // amplitude with no chroma modulation.
-                if y_val > 0.85 {
-                    let mut bi = 0.0f32;
-                    let mut bw_i = 0.0f32;
-                    for (k, &w) in I_KERNEL.iter().enumerate() {
-                        let sx = x as i32 - i_half as i32 + k as i32;
-                        if sx >= 0 && sx < aw as i32 {
-                            bi += row_yiq[sx as usize].1 * w;
-                            bw_i += w;
+        let n_lines = (y_end - y_start) / 2;
+        let fb_active_start = (y_start + border) * stride + border * 4;
+        let active_bytes = n_lines * 2 * stride;
+
+        use wide::f32x8;
+        let inv_i_full = f32x8::splat(1.0 / i_full);
+        let inv_q_full = f32x8::splat(1.0 / q_full);
+        let i_kern_v: [f32x8; 7] = [
+            f32x8::splat(I_KERNEL[0]), f32x8::splat(I_KERNEL[1]), f32x8::splat(I_KERNEL[2]),
+            f32x8::splat(I_KERNEL[3]), f32x8::splat(I_KERNEL[4]), f32x8::splat(I_KERNEL[5]),
+            f32x8::splat(I_KERNEL[6]),
+        ];
+        let q_kern_v: [f32x8; 7] = [
+            f32x8::splat(Q_KERNEL[0]), f32x8::splat(Q_KERNEL[1]), f32x8::splat(Q_KERNEL[2]),
+            f32x8::splat(Q_KERNEL[3]), f32x8::splat(Q_KERNEL[4]), f32x8::splat(Q_KERNEL[5]),
+            f32x8::splat(Q_KERNEL[6]),
+        ];
+        let zero_v = f32x8::splat(0.0);
+        let one_v = f32x8::splat(1.0);
+        let f4095 = f32x8::splat(4095.0);
+        let thresh_white = f32x8::splat(0.85);
+        let inv_015 = f32x8::splat(1.0 / 0.15);
+        let tint_max = f32x8::splat(0.20);
+        let y_boost = f32x8::splat(1.03);
+        let wp_v = f32x8::splat(self.effects.white_preservation.clamp(0.0, 1.0));
+        let wp_scalar = self.effects.white_preservation.clamp(0.0, 1.0);
+        let cy_r = f32x8::splat(0.9563);
+        let cy_g = f32x8::splat(-0.2721);
+        let cy_b = f32x8::splat(-1.1070);
+        let cq_r = f32x8::splat(0.6210);
+        let cq_g = f32x8::splat(-0.6474);
+        let cq_b = f32x8::splat(1.7046);
+        let f0003 = f32x8::splat(0.0003);
+
+        // SIMD interior [HALF, mid_end) uses the full 7-tap kernel.
+        // Edges and any tail fall back to the scalar pixel macro.
+        let mid_count = (aw - 2 * HALF) / 8;
+        let mid_end = HALF + mid_count * 8;
+
+        self.framebuffer[fb_active_start..fb_active_start + active_bytes]
+            .par_chunks_mut(2 * stride)
+            .for_each_init(
+                || (vec![0.0f32; aw], vec![0.0f32; aw], vec![0.0f32; aw]),
+                |scratch, chunk| {
+                    let y_row = &mut scratch.0;
+                    let i_row = &mut scratch.1;
+                    let q_row = &mut scratch.2;
+                    // sRGB row -> linear YIQ via LUT, in SoA layout.
+                    for x in 0..aw {
+                        let p = x * 4;
+                        let r = s2l[chunk[p] as usize];
+                        let g = s2l[chunk[p + 1] as usize];
+                        let b = s2l[chunk[p + 2] as usize];
+                        y_row[x] = 0.299 * r + 0.587 * g + 0.114 * b;
+                        i_row[x] = 0.5959 * r - 0.2746 * g - 0.3213 * b;
+                        q_row[x] = 0.2115 * r - 0.5227 * g + 0.3112 * b;
+                    }
+
+                    // Scalar fallback for one pixel; used at edges and the SIMD tail.
+                    macro_rules! scalar_pixel { ($x:expr) => {{
+                        let x = $x;
+                        let y_val = y_row[x];
+                        let (wsum_i, wsum_q) = if x < HALF {
+                            (i_wsum_left[x], q_wsum_left[x])
+                        } else if x >= aw - HALF {
+                            let j = x - (aw - HALF);
+                            (i_wsum_right[j], q_wsum_right[j])
+                        } else {
+                            (i_full, q_full)
+                        };
+
+                        let mut bi = 0.0f32;
+                        let mut bq = 0.0f32;
+                        let kx_lo = (x as i32 - HALF as i32).max(0) as usize;
+                        let kx_hi = (x as i32 - HALF as i32 + 7).min(aw as i32) as usize;
+                        let kshift = (kx_lo as i32 - (x as i32 - HALF as i32)) as usize;
+                        for (k, sx) in (kx_lo..kx_hi).enumerate() {
+                            bi += i_row[sx] * I_KERNEL[k + kshift];
+                            bq += q_row[sx] * Q_KERNEL[k + kshift];
+                        }
+
+                        let (i_val, q_val);
+                        let mut boosted_y = y_val;
+                        if y_val > 0.85 {
+                            let proximity = ((1.0 - y_val) * (1.0 / 0.15)).clamp(0.0, 1.0);
+                            // protected_tint=0.20*prox; with wp=0 use full blur (tint=1).
+                            let protected_tint = 0.20f32 * proximity;
+                            let tint = wp_scalar * protected_tint + (1.0 - wp_scalar);
+                            i_val = i_row[x] * (1.0 - tint) + (bi / wsum_i) * tint;
+                            q_val = q_row[x] * (1.0 - tint) + (bq / wsum_q) * tint;
+                            let y_boosted = (y_val * 1.03).min(1.0);
+                            boosted_y = y_val + (y_boosted - y_val) * wp_scalar;
+                        } else {
+                            i_val = bi / wsum_i;
+                            q_val = bq / wsum_q;
+                        }
+
+                        let r_lin = (boosted_y + 0.9563 * i_val + 0.6210 * q_val).clamp(0.0, 1.0);
+                        let g_lin = (boosted_y - 0.2721 * i_val - 0.6474 * q_val).clamp(0.0, 1.0);
+                        let b_lin = (boosted_y - 1.1070 * i_val + 1.7046 * q_val).clamp(0.0, 1.0);
+
+                        let encode = |c: f32| -> u8 {
+                            if c < 0.0003 { 0 } else { l2s[(c * 4095.0) as usize] }
+                        };
+                        let rb = encode(r_lin);
+                        let gb = encode(g_lin);
+                        let bb = encode(b_lin);
+
+                        let p_top = x * 4;
+                        let p_bot = stride + x * 4;
+                        chunk[p_top]     = rb;
+                        chunk[p_top + 1] = gb;
+                        chunk[p_top + 2] = bb;
+                        chunk[p_bot]     = rb;
+                        chunk[p_bot + 1] = gb;
+                        chunk[p_bot + 2] = bb;
+                    }}; }
+
+                    for x in 0..HALF { scalar_pixel!(x); }
+
+                    for blk in 0..mid_count {
+                        let x = HALF + blk * 8;
+
+                        let raw_i_arr: [f32; 8] = i_row[x..x + 8].try_into().unwrap();
+                        let raw_q_arr: [f32; 8] = q_row[x..x + 8].try_into().unwrap();
+                        let y_arr: [f32; 8] = y_row[x..x + 8].try_into().unwrap();
+                        let raw_i = f32x8::from(raw_i_arr);
+                        let raw_q = f32x8::from(raw_q_arr);
+                        let y_v = f32x8::from(y_arr);
+
+                        // Convolve 7 taps; tap k reads from x - 3 + k.
+                        let mut bi_v = zero_v;
+                        let mut bq_v = zero_v;
+                        for k in 0..7 {
+                            let off = x + k - HALF;
+                            let ii: [f32; 8] = i_row[off..off + 8].try_into().unwrap();
+                            let qq: [f32; 8] = q_row[off..off + 8].try_into().unwrap();
+                            bi_v = f32x8::from(ii).mul_add(i_kern_v[k], bi_v);
+                            bq_v = f32x8::from(qq).mul_add(q_kern_v[k], bq_v);
+                        }
+
+                        let i_blur = bi_v * inv_i_full;
+                        let q_blur = bq_v * inv_q_full;
+
+                        // White-protection: where Y is near white, blend back toward
+                        // raw I/Q so bright pixels don't get tinted by the chroma blur.
+                        // Scaled by white_preservation: 1.0 = full protection,
+                        // 0.0 = no protection (real NTSC bleed).
+                        let white_mask = y_v.cmp_gt(thresh_white);
+                        let proximity = ((one_v - y_v) * inv_015).fast_max(zero_v).fast_min(one_v);
+                        let protected_tint = tint_max * proximity;
+                        // tint = wp*protected_tint + (1-wp); at wp=0, tint=1 -> alpha=0 -> full blur.
+                        let tint = protected_tint * wp_v + (one_v - wp_v);
+                        let alpha = white_mask.blend(one_v - tint, zero_v);
+                        let i_val = i_blur + (raw_i - i_blur) * alpha;
+                        let q_val = q_blur + (raw_q - q_blur) * alpha;
+                        let y_boosted = (y_v * y_boost).fast_min(one_v);
+                        let y_lerped = y_v + (y_boosted - y_v) * wp_v;
+                        let y_eff = white_mask.blend(y_lerped, y_v);
+
+                        let r_lin = (y_eff + i_val * cy_r + q_val * cq_r).fast_max(zero_v).fast_min(one_v);
+                        let g_lin = (y_eff + i_val * cy_g + q_val * cq_g).fast_max(zero_v).fast_min(one_v);
+                        let b_lin = (y_eff + i_val * cy_b + q_val * cq_b).fast_max(zero_v).fast_min(one_v);
+
+                        // Per-lane bitmask for values below the 0.0003 floor;
+                        // remaining lanes gather their u8 from the LUT.
+                        let r_idx_arr = (r_lin * f4095).fast_trunc_int().to_array();
+                        let g_idx_arr = (g_lin * f4095).fast_trunc_int().to_array();
+                        let b_idx_arr = (b_lin * f4095).fast_trunc_int().to_array();
+                        let r_tiny = r_lin.cmp_lt(f0003).move_mask() as u32;
+                        let g_tiny = g_lin.cmp_lt(f0003).move_mask() as u32;
+                        let b_tiny = b_lin.cmp_lt(f0003).move_mask() as u32;
+
+                        for j in 0..8 {
+                            let bit = 1u32 << j;
+                            let rb = if (r_tiny & bit) != 0 { 0 } else { l2s[r_idx_arr[j] as usize] };
+                            let gb = if (g_tiny & bit) != 0 { 0 } else { l2s[g_idx_arr[j] as usize] };
+                            let bb = if (b_tiny & bit) != 0 { 0 } else { l2s[b_idx_arr[j] as usize] };
+                            let p_top = (x + j) * 4;
+                            let p_bot = stride + (x + j) * 4;
+                            chunk[p_top]     = rb;
+                            chunk[p_top + 1] = gb;
+                            chunk[p_top + 2] = bb;
+                            chunk[p_bot]     = rb;
+                            chunk[p_bot + 1] = gb;
+                            chunk[p_bot + 2] = bb;
                         }
                     }
-                    let mut bq = 0.0f32;
-                    let mut bw_q = 0.0f32;
-                    for (k, &w) in Q_KERNEL.iter().enumerate() {
-                        let sx = x as i32 - q_half as i32 + k as i32;
-                        if sx >= 0 && sx < aw as i32 {
-                            bq += row_yiq[sx as usize].2 * w;
-                            bw_q += w;
+
+                    for x in mid_end..aw { scalar_pixel!(x); }
+                },
+            );
+    }
+
+    fn render_double_hires_scanline(&mut self, _iou: &IOU, mmu: &MMU, scanline: usize) {
+        let base_vram: u16 = 0x2000;
+
+        let group = scanline / 8;
+        let row_in_group = (scanline % 8) as u16;
+        let group16 = group as u16;
+
+        let row_base = base_vram
+            .wrapping_add(row_in_group.wrapping_mul(1024))
+            .wrapping_add((group16 % 8).wrapping_mul(128))
+            .wrapping_add((group16 / 8).wrapping_mul(40));
+
+        let y = scanline * 2; // double height
+
+        if self.monochrome {
+            // monochrome: 560 pixels (1 bit = 1 pixel)
+            for col in 0..40_u16 {
+                let addr = row_base.wrapping_add(col);
+                let aux_byte = mmu.read_aux_byte(addr);
+                let main_byte = mmu.read_main_byte(addr);
+
+                for bit in 0..7_u16 {
+                    let pixel_on = (aux_byte >> bit) & 1 != 0;
+                    let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
+                    let x = col as usize * 14 + bit as usize;
+                    for dy in 0..2 {
+                        let index = self.fb_index(x, y + dy);
+                        if index + 4 <= self.framebuffer.len() {
+                            self.framebuffer[index..index + 4].copy_from_slice(&color);
                         }
                     }
-                    // Graduated tint: pixels near the threshold (Y~0.85) get
-                    // more chroma bleed, pure white (Y~1.0) gets almost none.
-                    // This softens the transition instead of a hard cutoff.
-                    let proximity = ((1.0 - y_val) / 0.15).clamp(0.0, 1.0); // 1.0 at Y=0.85, 0.0 at Y=1.0
-                    let tint = 0.20f32 * proximity;
-                    let i_val = row_yiq[x].1 * (1.0 - tint) + (bi / bw_i) * tint;
-                    let q_val = row_yiq[x].2 * (1.0 - tint) + (bq / bw_q) * tint;
-                    let boosted_y = (y_val * 1.03).min(1.0);
-                    let (r, g, b) = yiq_to_rgb(boosted_y, i_val, q_val);
-
-                    for dy in 0..2_usize {
-                        let idx = self.fb_index(x, y + dy);
-                        if idx + 4 <= self.framebuffer.len() {
-                            self.framebuffer[idx] = r;
-                            self.framebuffer[idx + 1] = g;
-                            self.framebuffer[idx + 2] = b;
-                        }
-                    }
-                } else {
-                    let mut bi = 0.0f32;
-                    let mut bw_i = 0.0f32;
-                    for (k, &w) in I_KERNEL.iter().enumerate() {
-                        let sx = x as i32 - i_half as i32 + k as i32;
-                        if sx >= 0 && sx < aw as i32 {
-                            bi += row_yiq[sx as usize].1 * w;
-                            bw_i += w;
-                        }
-                    }
-                    let i_val = bi / bw_i;
-
-                    let mut bq = 0.0f32;
-                    let mut bw_q = 0.0f32;
-                    for (k, &w) in Q_KERNEL.iter().enumerate() {
-                        let sx = x as i32 - q_half as i32 + k as i32;
-                        if sx >= 0 && sx < aw as i32 {
-                            bq += row_yiq[sx as usize].2 * w;
-                            bw_q += w;
-                        }
-                    }
-                    let q_val = bq / bw_q;
-
-                    let (r, g, b) = yiq_to_rgb(y_val, i_val, q_val);
-
-                    for dy in 0..2_usize {
-                        let idx = self.fb_index(x, y + dy);
-                        if idx + 4 <= self.framebuffer.len() {
-                            self.framebuffer[idx] = r;
-                            self.framebuffer[idx + 1] = g;
-                            self.framebuffer[idx + 2] = b;
+                }
+                for bit in 0..7_u16 {
+                    let pixel_on = (main_byte >> bit) & 1 != 0;
+                    let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
+                    let x = col as usize * 14 + 7 + bit as usize;
+                    for dy in 0..2 {
+                        let index = self.fb_index(x, y + dy);
+                        if index + 4 <= self.framebuffer.len() {
+                            self.framebuffer[index..index + 4].copy_from_slice(&color);
                         }
                     }
                 }
             }
+            return;
         }
-    }
 
-    fn render_double_hires_rows(&mut self, _iou: &IOU, mmu: &MMU, groups: std::ops::Range<usize>) {
-        let base_vram: u16 = 0x2000;
 
-        for group in groups {
-            let group16 = group as u16;
-            for row in 0..8_u16 {
-                let row_base = base_vram
-                        .wrapping_add(row.wrapping_mul(1024))
-                        .wrapping_add((group16 % 8).wrapping_mul(128))
-                        .wrapping_add((group16 / 8).wrapping_mul(40));
+        // Build 560-bit scanline from interleaved aux/main bytes
+        let mut scanline_bits = [false; 564]; // +4 for sliding window
+        for col in 0..40_usize {
+            let addr = row_base.wrapping_add(col as u16);
+            let aux_byte = mmu.read_aux_byte(addr);
+            let main_byte = mmu.read_main_byte(addr);
+            for bit in 0..7_usize {
+                scanline_bits[col * 14 + bit] = (aux_byte >> bit) & 1 != 0;
+                scanline_bits[col * 14 + 7 + bit] = (main_byte >> bit) & 1 != 0;
+            }
+        }
 
-                let y = (group * 8 + row as usize) * 2; // double height
+        // Extract 4-bit color using a sliding window with phase rotation.
+        // Each pixel gets its own nibble from a 4-bit window centered on
+        // its position. The phase term rotates which bit maps to which
+        // nibble position, so a repeating 4-bit pattern (e.g. 0,0,1,1
+        // for blue) maps to the same palette index at every pixel.
+        for i in 0..560_usize {
+            let phase = i % 4;
+            let mut nibble: u8 = 0;
+            for j in 0..4_usize {
+                if scanline_bits[i + j] {
+                    nibble |= 1 << (3 - ((phase + j) % 4));
+                }
+            }
 
-                if self.monochrome {
-                    // monochrome: 560 pixels (1 bit = 1 pixel)
-                    for col in 0..40_u16 {
-                        let addr = row_base.wrapping_add(col);
-                        let aux_byte = mmu.read_aux_byte(addr);
-                        let main_byte = mmu.read_main_byte(addr);
+            let rgba = DHIRES_PALETTE[nibble as usize];
 
-                        for bit in 0..7_u16 {
-                            let pixel_on = (aux_byte >> bit) & 1 != 0;
-                            let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
-                            let x = col as usize * 14 + bit as usize;
-                            for dy in 0..2 {
-                                let index = self.fb_index(x, y as usize + dy);
-                                if index + 4 <= self.framebuffer.len() {
-                                    self.framebuffer[index..index + 4].copy_from_slice(&color);
-                                }
-                            }
-                        }
-                        for bit in 0..7_u16 {
-                            let pixel_on = (main_byte >> bit) & 1 != 0;
-                            let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
-                            let x = col as usize * 14 + 7 + bit as usize;
-                            for dy in 0..2 {
-                                let index = self.fb_index(x, y as usize + dy);
-                                if index + 4 <= self.framebuffer.len() {
-                                    self.framebuffer[index..index + 4].copy_from_slice(&color);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Color DHIRES: sliding-window 4-bit color extraction.
-                    // Each of 560 output pixels gets its own 4-bit color nibble
-                    // from a phase-rotated window of 4 bits in the scanline.
-                    // This matches how an NTSC decoder extracts color from the
-                    // composite signal: the 4 bits map to different nibble
-                    // positions depending on their phase in the color clock.
-
-                    // Build 560-bit scanline from interleaved aux/main bytes
-                    let mut scanline_bits = [false; 564]; // +4 for sliding window
-                    for col in 0..40_usize {
-                        let addr = row_base.wrapping_add(col as u16);
-                        let aux_byte = mmu.read_aux_byte(addr);
-                        let main_byte = mmu.read_main_byte(addr);
-                        for bit in 0..7_usize {
-                            scanline_bits[col * 14 + bit] = (aux_byte >> bit) & 1 != 0;
-                            scanline_bits[col * 14 + 7 + bit] = (main_byte >> bit) & 1 != 0;
-                        }
-                    }
-
-                    // Extract 4-bit color using a sliding window with phase rotation.
-                    // Each pixel gets its own nibble from a 4-bit window centered on
-                    // its position. The phase term rotates which bit maps to which
-                    // nibble position, so a repeating 4-bit pattern (e.g. 0,0,1,1
-                    // for blue) maps to the same palette index at every pixel.
-                    for i in 0..560_usize {
-                        let phase = i % 4;
-                        let mut nibble: u8 = 0;
-                        for j in 0..4_usize {
-                            if scanline_bits[i + j] {
-                                nibble |= 1 << (3 - ((phase + j) % 4));
-                            }
-                        }
-
-                        let rgba = DHIRES_PALETTE[nibble as usize];
-
-                        for dy in 0..2 {
-                            let index = self.fb_index(i, y as usize + dy);
-                            if index + 4 <= self.framebuffer.len() {
-                                self.framebuffer[index..index + 4].copy_from_slice(&rgba);
-                            }
-                        }
-                    }
+            for dy in 0..2 {
+                let index = self.fb_index(i, y + dy);
+                if index + 4 <= self.framebuffer.len() {
+                    self.framebuffer[index..index + 4].copy_from_slice(&rgba);
                 }
             }
         }

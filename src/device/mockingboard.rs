@@ -513,7 +513,11 @@ pub struct Mockingboard {
     
     // When true, use hook-based activation instead of countdown timer
     use_hook_activation: bool,
+
+    scope: std::collections::VecDeque<f32>,
 }
+
+pub const SCOPE_HISTORY_LEN: usize = 4096;
 
 // Pre-computed cycles per sample in 8.24 fixed point: (1022727 / 44100) * 256 ≈ 5942
 const DEFAULT_CYCLES_PER_SAMPLE_FRAC: u32 = ((CYCLES_PER_SECOND / 44100.0) * 256.0) as u32;
@@ -534,6 +538,7 @@ impl Default for Mockingboard {
             activated: false,
             activation_countdown: ACTIVATION_DELAY_CYCLES,
             use_hook_activation: false,
+            scope: std::collections::VecDeque::with_capacity(SCOPE_HISTORY_LEN),
         }
     }
 }
@@ -793,7 +798,23 @@ impl Mockingboard {
             if let Some(producer) = &mut self.producer {
                 let _ = producer.push_slice(&samples);
             }
+
+            // Mirror into the scope history (stereo interleaved).
+            for &s in &samples {
+                if self.scope.len() >= SCOPE_HISTORY_LEN {
+                    self.scope.pop_front();
+                }
+                self.scope.push_back(s);
+            }
         }
+    }
+
+    pub fn scope_snapshot(&self, out: &mut Vec<f32>, max: usize) -> usize {
+        out.clear();
+        let take = self.scope.len().min(max);
+        let skip = self.scope.len() - take;
+        out.extend(self.scope.iter().skip(skip).copied());
+        take
     }
     
     // Called once per frame for bookkeeping, audio is in tick_n()

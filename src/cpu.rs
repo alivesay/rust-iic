@@ -480,6 +480,10 @@ impl CPU {
         self.bus.video_snapshot_scanline(scanline);
     }
 
+    pub fn video_compose_monitor_partial(&mut self, up_to_scanline: usize) -> &[u8] {
+        self.bus.video_compose_monitor_partial(up_to_scanline)
+    }
+
     pub fn step(&mut self) -> u64 {
         if self.handle_interrupt() {
             self.bus.tick(7);
@@ -544,7 +548,10 @@ impl CPU {
         }
 
         let pc = self.pc;
-        self.bus.iou.current_pc.set(pc);
+
+        if self.capture_trace {
+            self.bus.iou.current_pc.set(pc);
+        }
 
         let instruction = if self.debug {
             Disassembler::disassemble(&mut self.bus, pc)

@@ -11,6 +11,7 @@ debug-mode = []
 [dependencies]
 a2kit = "4.0.1"
 anyhow = "1.0.100"
+arboard = "3"
 bitflags = "2.8.0"
 bytemuck = { version = "1", features = ["derive"] }
 clap = { version = "4.5.27", features = ["derive"] }
@@ -27,11 +28,14 @@ image = "0.25.5"
 log = "0.4.25"
 owo-colors = "4.1.0"
 pixels = "0.16.0"
+pollster = "0.4"
+rayon = "1.10"
 regex = "1.11.1"
 rfd = "0.15"
 ringbuf = "0.4.8"
 shader_ui = { path = "src/render/shader_ui" }
 wgpu = "27.0.1"
+wide = "0.7"
 winit = "0.30.13"
 json = "0.12.4"
 

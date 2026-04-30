@@ -93,6 +93,10 @@ pub struct CrtRenderer {
     ntsc_view: wgpu::TextureView,
     ntsc_strength: std::cell::Cell<f32>,
     text_only: std::cell::Cell<bool>,  // Text-only mode (no color burst, skip NTSC)
+    // Phosphor beam-spot spread pass. Shares the NTSC bind group + scratch
+    // texture (`ntsc_view`) since the two passes never run in parallel.
+    phosphor_spread_pipeline: wgpu::RenderPipeline,
+    phosphor_spread_on: std::cell::Cell<bool>,
 }
 
 #[repr(C)]
@@ -832,8 +836,15 @@ impl CrtRenderer {
             cache: None,
         });
 
-        // NTSC uniforms: params (filter_strength, source_width, source_height, is_mono) + content_rect
-        let ntsc_uniforms: [f32; 8] = [0.0, source_width, source_height, 0.0, 0.0, 0.0, 1.0, 1.0];
+        // NTSC uniforms: params (filter_strength, src_w, src_h, is_mono),
+        // content_rect (l, t, r, b), toggles (chroma_blur, comb, spread, reserved),
+        // spread (sigma_x, sigma_y, intensity, reserved).
+        let ntsc_uniforms: [f32; 16] = [
+            0.0, source_width, source_height, 0.0,
+            0.0, 0.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 0.0,
+            1.4, 0.0, 1.0, 0.0,
+        ];
         let ntsc_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ntsc_uniform_buffer"),
             contents: bytemuck::cast_slice(&ntsc_uniforms),
@@ -860,6 +871,39 @@ impl CrtRenderer {
         let ntsc_bind_group = Self::create_ntsc_bind_group(
             device, &ntsc_bind_group_layout, &intermediate_view, &sampler, &ntsc_uniform_buffer,
         );
+
+        // Phosphor beam-spot spread. Uses the same bind group layout / uniforms
+        // as the NTSC pass so it can share `ntsc_bind_group` and `ntsc_view`.
+        let phosphor_spread_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/phosphor_spread.wgsl"));
+        let phosphor_spread_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("phosphor_spread_render_pipeline"),
+            layout: Some(&ntsc_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &phosphor_spread_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &phosphor_spread_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         Self {
             pipeline,
@@ -933,6 +977,8 @@ impl CrtRenderer {
             ntsc_view,
             ntsc_strength: std::cell::Cell::new(0.0),
             text_only: std::cell::Cell::new(false),
+            phosphor_spread_pipeline,
+            phosphor_spread_on: std::cell::Cell::new(true),
         }
     }
 
@@ -1337,15 +1383,19 @@ impl CrtRenderer {
             curvature: self.curvature_cache.get(),
         };
         queue.write_buffer(&self.chroma_uniform_buffer, 0, bytemuck::bytes_of(&chroma_uniforms));
-        // Update NTSC filter uniforms: disabled (NTSC artifact colors handled in software)
-        self.ntsc_strength.set(0.0);
+        // NTSC + spread uniforms. Strength and per-stage toggles come from the F7 panel.
+        self.ntsc_strength.set(params.ntsc_strength);
+        self.phosphor_spread_on.set(params.phosphor_spread);
         let content_rect = self.content_rect_cache.get();
-        let ntsc_uniforms: [f32; 8] = [
-            0.0,
+        let b = |v: bool| if v { 1.0_f32 } else { 0.0_f32 };
+        let ntsc_uniforms: [f32; 16] = [
+            params.ntsc_strength,
             self.source_width_cache.get(),
             self.source_height_cache.get(),
             self.is_mono.get(),
             content_rect[0], content_rect[1], content_rect[2], content_rect[3],
+            b(params.chroma_blur), b(params.comb_filter), b(params.phosphor_spread), params.white_preservation,
+            params.phosphor_spread_sigma_x, params.phosphor_spread_sigma_y, params.phosphor_spread_intensity, 0.0,
         ];
         queue.write_buffer(&self.ntsc_uniform_buffer, 0, bytemuck::bytes_of(&ntsc_uniforms));
     }
@@ -1487,43 +1537,25 @@ impl CrtRenderer {
     /// 1. Bloom: blur intermediate → bloom texture (1/4 res)
     /// 2. Composite: CRT shader with intermediate + bloom → final surface
     pub fn render(&self, encoder: &mut wgpu::CommandEncoder, render_target: &wgpu::TextureView, device: &wgpu::Device) {
-        // Pass 0: Generate mip chain for the intermediate texture
-        if self.mip_level_count > 1 {
-            let mut mip_w = self.tex_width;
-            let mut mip_h = self.tex_height;
-            for level in 1..self.mip_level_count {
-                let src_view = self.intermediate_texture.create_view(&wgpu::TextureViewDescriptor {
-                    base_mip_level: level - 1,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                });
-                let dst_view = self.intermediate_texture.create_view(&wgpu::TextureViewDescriptor {
-                    base_mip_level: level,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                });
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("mipgen_bind_group"),
-                    layout: &self.mipgen_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&src_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                    ],
-                });
+        // Pipeline order (matches real CRT signal chain):
+        //   Pass 0   NTSC decode      (intermediate raw   -> intermediate, copy back)
+        //   Pass 1   Phosphor history (intermediate + history -> intermediate, copy back)
+        //   Pass 2   Mipgen           (intermediate (final) -> mip chain)  used by bloom + rasterbloom
+        //   Pass 3-4 Gauss H/V        halation blur (1/2 res)
+        //   Pass 5-6 Glow  H/V        fullscreen glow (1/8 res)
+        //   Pass 7   CRT composite    intermediate + blur + glow -> chroma texture
+        //   Pass 8   Chromatic + glow chroma + glow -> screen
 
-                mip_w = (mip_w / 2).max(1);
-                mip_h = (mip_h / 2).max(1);
-
+        // Pass 0: NTSC filter (intermediate -> ntsc_texture -> intermediate)
+        // Color mode only; skipped in mono and text-only.
+        let is_mono = self.is_mono.get() > 0.5;
+        let run_ntsc = self.ntsc_strength.get() > 0.01 && !self.text_only.get() && !is_mono;
+        if run_ntsc {
+            {
                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("mipgen_render_pass"),
+                    label: Some("ntsc_render_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &dst_view,
+                        view: &self.ntsc_view,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -1535,22 +1567,85 @@ impl CrtRenderer {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                rpass.set_pipeline(&self.mipgen_pipeline);
-                rpass.set_bind_group(0, &bind_group, &[]);
-                rpass.set_vertex_buffer(0, self.mipgen_vertex_buffer.slice(..));
+                rpass.set_pipeline(&self.ntsc_pipeline);
+                rpass.set_bind_group(0, &self.ntsc_bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
                 rpass.draw(0..3, 0..1);
             }
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.ntsc_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.intermediate_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.tex_width,
+                    height: self.tex_height,
+                    depth_or_array_layers: 1,
+                },
+            );
         }
 
-        // Phosphor persistence (blend current frame with decayed history)
-        // Clear history/blur/glow textures for several frames after resize to remove stale GPU memory
-        // DON'T clear intermediate as it has the current frame from scaling_renderer
+        // Pass 0.5: Phosphor beam-spot spread (9-tap 2D). Reuses the
+        // NTSC scratch texture and bind group.
+        let run_spread = self.phosphor_spread_on.get();
+        if run_spread {
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("phosphor_spread_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.ntsc_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rpass.set_pipeline(&self.phosphor_spread_pipeline);
+                rpass.set_bind_group(0, &self.ntsc_bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+                rpass.draw(0..3, 0..1);
+            }
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.ntsc_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.intermediate_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.tex_width,
+                    height: self.tex_height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        // Pass 1: Phosphor persistence (blend NTSC-decoded current frame with decayed history).
+        // Clears history/blur/glow textures for several frames after a resize to drop stale GPU memory.
+        // Don't clear intermediate: it carries the current frame from scaling_renderer.
         {
             let clear_remaining = self.clear_frames_remaining.get();
             if clear_remaining > 0 {
                 self.clear_frames_remaining.set(clear_remaining - 1);
-                // Clear textures that might contain garbage from resize
-                // NOTE: Don't clear intermediate_render_view!
                 let textures_to_clear = [
                     (&self.phosphor_history_a_view, "clear_phosphor_a"),
                     (&self.phosphor_history_b_view, "clear_phosphor_b"),
@@ -1578,12 +1673,11 @@ impl CrtRenderer {
                         occlusion_query_set: None,
                     });
                 }
-                // Skip phosphor blending during clear phase to prevent ghosting
-                // Just advance the frame index so the alternating pattern stays in sync
+                // Skip phosphor blending during clear phase to prevent ghosting; advance the
+                // ping-pong index so the alternating pattern stays in sync.
                 let frame_idx = self.phosphor_frame_idx.get();
                 self.phosphor_frame_idx.set(1 - frame_idx);
             } else {
-                // Normal phosphor blending (runs every frame when not clearing)
                 let frame_idx = self.phosphor_frame_idx.get();
                 let (bind_group, dst_view, dst_texture) = if frame_idx == 0 {
                     (&self.phosphor_bind_group_a, &self.phosphor_history_b_view, &self.phosphor_history_b)
@@ -1592,7 +1686,6 @@ impl CrtRenderer {
                 };
                 self.phosphor_frame_idx.set(1 - frame_idx);
 
-                // Phosphor blend pass
                 {
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("phosphor_render_pass"),
@@ -1615,7 +1708,7 @@ impl CrtRenderer {
                     rpass.draw(0..3, 0..1);
                 }
 
-                // Copy phosphor result back to intermediate (level 0 only)
+                // Copy phosphor result back to intermediate (level 0 only).
                 encoder.copy_texture_to_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: dst_texture,
@@ -1638,18 +1731,39 @@ impl CrtRenderer {
             }
         }
 
-        // Pass 0.5: NTSC filter (intermediate → ntsc_texture → intermediate)
-        // Color mode only: YIQ decode with luma/chroma filtering for authentic artifact colors
-        // Skip in mono mode (no NTSC artifacts) and text-only mode (no color burst)
-        let is_mono = self.is_mono.get() > 0.5;
-        let run_ntsc = self.ntsc_strength.get() > 0.01 && !self.text_only.get() && !is_mono;
-        if run_ntsc {
-            // NTSC filter pass
-            {
+        // Pass 2: Generate the mip chain from the final intermediate (post NTSC + phosphor).
+        // Bloom/halation/rasterbloom all sample these mips; building them last keeps them in sync.
+        if self.mip_level_count > 1 {
+            for level in 1..self.mip_level_count {
+                let src_view = self.intermediate_texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: level - 1,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                });
+                let dst_view = self.intermediate_texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                });
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mipgen_bind_group"),
+                    layout: &self.mipgen_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&src_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+
                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("ntsc_render_pass"),
+                    label: Some("mipgen_render_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.ntsc_view,
+                        view: &dst_view,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -1661,32 +1775,11 @@ impl CrtRenderer {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                rpass.set_pipeline(&self.ntsc_pipeline);
-                rpass.set_bind_group(0, &self.ntsc_bind_group, &[]);
-                rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));  // Reuse vertex buffer
+                rpass.set_pipeline(&self.mipgen_pipeline);
+                rpass.set_bind_group(0, &bind_group, &[]);
+                rpass.set_vertex_buffer(0, self.mipgen_vertex_buffer.slice(..));
                 rpass.draw(0..3, 0..1);
             }
-
-            // Copy NTSC result back to intermediate so all subsequent passes use filtered colors
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.ntsc_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.intermediate_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: self.tex_width,
-                    height: self.tex_height,
-                    depth_or_array_layers: 1,
-                },
-            );
         }
 
         // Pass 1: Gaussian horizontal blur (intermediate → gaussx_texture)

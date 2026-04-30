@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::VecDeque;
 
 use crate::{device::{iwm::Iwm, paddle::Paddle, keyboard::Keyboard, memexp::MemoryExpansion, mockingboard::Mockingboard, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, timing, video::VideoModeMask};
 
@@ -66,7 +67,19 @@ pub struct IOU {
   pub disk35_mode: bool, // $C031 bit 6: false=5.25" drives, true=3.5"/SmartPort
   pub debug: bool,
   pub self_test: bool,
+  pub access_log: VecDeque<IouAccessEntry>,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct IouAccessEntry {
+    pub addr: u16,
+    pub pc: u16,
+    pub cycle: u64,
+    pub value: u8,
+    pub write: bool,
+}
+
+pub const IOU_ACCESS_LOG_CAP: usize = 64;
 
 impl IOU {
     pub fn new(self_test: bool, audio_producer: AudioProducer, sample_rate: u32) -> Self {
@@ -96,7 +109,22 @@ impl IOU {
           disk35_mode: false, // Start in 5.25" mode
           debug: false,
           self_test,
+          access_log: VecDeque::with_capacity(IOU_ACCESS_LOG_CAP),
       }
+    }
+
+    #[inline]
+    fn log_access(&mut self, addr: u16, value: u8, write: bool) {
+        if self.access_log.len() == IOU_ACCESS_LOG_CAP {
+            self.access_log.pop_front();
+        }
+        self.access_log.push_back(IouAccessEntry {
+            addr,
+            pc: self.current_pc.get(),
+            cycle: self.cycles,
+            value,
+            write,
+        });
     }
 
     /// Enable or disable the ZIP Chip accelerator.
@@ -134,6 +162,7 @@ impl IOU {
         self.zip.reset();
         self.mockingboard.reset();
         self.mockingboard2.reset();
+        self.access_log.clear();
     }
 
     #[rustfmt::skip]
@@ -366,8 +395,45 @@ impl IOU {
             0x00
           },
         };
-        
+
+        self.log_access(addr, result, false);
         result
+    }
+
+    pub fn peek_softswitch(&self, addr: u16) -> Option<u8> {
+        let bit7 = |b: bool| -> u8 { (b as u8) << 7 };
+        let mem = self.mem_state.get();
+        let vm  = self.video_mode.get();
+        let has = |byte: u8, mask: u8| -> bool { (byte & mask) != 0 };
+        Some(match addr {
+            0xC011 => bit7(has(mem, MemStateMask::RDBNK)),
+            0xC012 => bit7(has(mem, MemStateMask::LCRAM)),
+            0xC013 => bit7(has(mem, MemStateMask::RAMRD)),
+            0xC014 => bit7(has(mem, MemStateMask::RAMWRT)),
+            0xC015 => bit7(self.mouse.x_int.get()),
+            0xC016 => bit7(has(mem, MemStateMask::ALTZP)),
+            0xC017 => bit7(self.mouse.y_int.get()),
+            0xC018 => bit7(self.is_80store.get()),
+            0xC01A => bit7(has(vm, VideoModeMask::TEXT)),
+            0xC01B => bit7(has(vm, VideoModeMask::MIXED)),
+            0xC01C => bit7(has(vm, VideoModeMask::PAGE2)),
+            0xC01D => bit7(has(vm, VideoModeMask::HIRES)),
+            0xC01E => bit7(has(vm, VideoModeMask::ALTCHAR)),
+            0xC01F => bit7(has(vm, VideoModeMask::COL80)),
+            0xC031 => ((self.disk35_mode as u8) << 6) | ((self.iwm.get_head35() & 1) << 7),
+            0xC040 => bit7(self.mouse.xy_mask.get()),
+            0xC041 => bit7(self.mouse.vbl_mask.get()),
+            0xC042 => bit7(self.mouse.x0_edge.get()),
+            0xC043 => bit7(self.mouse.y0_edge.get()),
+            0xC060 => bit7(self.col80_switch),
+            0xC061 => bit7(self.mouse.open_apple.get() || self.paddle.button0.get()),
+            0xC062 => bit7(self.mouse.solid_apple.get() || self.paddle.button1.get()),
+            0xC063 => bit7(!self.mouse.button0.get()),
+            0xC066 => bit7(self.mouse.x_dir.get()),
+            0xC067 => bit7(self.mouse.y_dir.get()),
+            0xC068 => 0x00,
+            _ => return None,
+        })
     }
 
     // Write Annunciator State
@@ -602,6 +668,7 @@ impl IOU {
             },
         };
 
+        self.log_access(addr, val, true);
         result
     }
 

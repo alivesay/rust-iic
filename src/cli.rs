@@ -50,6 +50,22 @@ pub struct Args {
     #[arg(long, default_value_t = 0.5)]
     pub scanline_intensity: f32,
 
+    /// Disable NTSC chroma blur
+    #[arg(long)]
+    pub no_chroma_blur: bool,
+
+    /// Disable 2-line YIQ comb filter
+    #[arg(long)]
+    pub no_comb_filter: bool,
+
+    /// Disable horizontal phosphor spread
+    #[arg(long)]
+    pub no_phosphor_spread: bool,
+
+    /// NTSC pass strength, 0.0..=1.0
+    #[arg(long, default_value_t = 1.0)]
+    pub ntsc_strength: f32,
+
     /// Show performance metrics
     #[arg(long)]
     pub perf: bool,
@@ -101,6 +117,10 @@ pub struct Args {
     /// Enable virtual Hayes modem on slot 1 (use ATDT from terminal software to connect)
     #[arg(long)]
     pub modem: bool,
+
+    /// Enable Apple //c mouse emulation
+    #[arg(long)]
+    pub mouse: bool,
 
     /// Enable serial loopback mode (for diagnostic testing with loopback cable)
     #[arg(long, conflicts_with = "modem")]

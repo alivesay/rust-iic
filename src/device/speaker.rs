@@ -11,6 +11,8 @@ const DECAY_SECONDS: f64 = 0.02; // ~20ms
 
 pub type AudioProducer = Caching<Arc<HeapRb<f32>>, true, false>;
 
+pub const SCOPE_HISTORY_LEN: usize = 2048;
+
 pub struct Speaker {
     producer: AudioProducer,
     sample_rate: u32,
@@ -19,6 +21,8 @@ pub struct Speaker {
     filtered: f32, // Single-pole low-pass filter state
     last_toggle_cycle: u64, // Cycle of most recent toggle (for idle detection)
     toggles: VecDeque<u64>, // Cycle counts when toggles occurred
+
+    scope: VecDeque<f32>,
 }
 
 impl Speaker {
@@ -31,6 +35,7 @@ impl Speaker {
             filtered: 0.0,
             last_toggle_cycle: 0,
             toggles: VecDeque::new(),
+            scope: VecDeque::with_capacity(SCOPE_HISTORY_LEN),
         }
     }
 
@@ -103,6 +108,21 @@ impl Speaker {
         // Batch push all samples at once
         let _ = self.producer.push_slice(&samples);
 
+        for &s in &samples {
+            if self.scope.len() >= SCOPE_HISTORY_LEN {
+                self.scope.pop_front();
+            }
+            self.scope.push_back(s);
+        }
+
         self.last_cycle = current_cycle;
+    }
+
+    pub fn scope_snapshot(&self, out: &mut Vec<f32>, max: usize) -> usize {
+        out.clear();
+        let take = self.scope.len().min(max);
+        let skip = self.scope.len() - take;
+        out.extend(self.scope.iter().skip(skip).copied());
+        take
     }
 }

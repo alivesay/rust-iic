@@ -44,6 +44,15 @@ impl Keyboard {
         self.first_repeat_done.set(false);
     }
 
+    pub fn debug_state(&self) -> (u8, bool, usize, usize) {
+        (
+            self.last_key.get(),
+            self.strobe.get(),
+            self.key_queue.borrow().len(),
+            self.held_keys.borrow().len(),
+        )
+    }
+
     // Handle key press event
     // 
     // # Arguments
@@ -211,6 +220,52 @@ impl Keyboard {
     // Write to $C010, also clears strobe
     pub fn write_strobe(&self) {
         self.strobe.set(false);
+        self.strobe_read.set(false);
+        // Advance the paste/typeahead queue. Real keyboard hardware has
+        // no notion of a queue, but Applesoft's KEYIN at $FD1B clears
+        // the strobe via `STA $C010` (write), not `LDA $C010` (read),
+        // so without this hook a pasted multi-char sequence would stop
+        // after the first character.
+        let mut queue = self.key_queue.borrow_mut();
+        if let Some(queued_key) = queue.pop_front() {
+            drop(queue);
+            self.last_key.set(queued_key);
+            self.strobe.set(true);
+            self.strobe_read.set(false);
+        }
+    }
+
+    /// Inject a sequence of Apple-ASCII bytes into the keyboard queue
+    /// as if typed by the user. Each byte is delivered one at a time:
+    /// the running program reads $C000 / clears $C010, which dequeues
+    /// the next byte. This is how clipboard paste works — Applesoft's
+    /// own input loop provides natural rate limiting (a CR triggers
+    /// tokenization, during which $C010 is not read, so the next line
+    /// waits automatically).
+    ///
+    /// Bytes are appended to whatever is already queued. If no key is
+    /// currently latched, the first byte is set as the live strobe so
+    /// it is picked up immediately on the next $C000 read.
+    pub fn paste_bytes(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut queue = self.key_queue.borrow_mut();
+        let strobe_pending = self.strobe.get();
+        let mut iter = bytes.iter().copied();
+        if !strobe_pending {
+            // No key latched — promote the first byte to live strobe.
+            if let Some(first) = iter.next() {
+                drop(queue);
+                self.last_key.set(first);
+                self.strobe.set(true);
+                self.strobe_read.set(false);
+                queue = self.key_queue.borrow_mut();
+            }
+        }
+        for b in iter {
+            queue.push_back(b);
+        }
     }
 }
 

@@ -18,6 +18,7 @@ use winit::platform::macos::WindowExtMacOS;
 use crate::cli::ShaderType;
 use crate::cpu::CPU;
 use crate::cpu_monitor::{CpuMonitor, CpuState};
+use crate::cpu_monitor_window::CpuMonitorWindow;
 use crate::device::drive_audio::DriveAudioParams;
 use crate::monitor::Monitor;
 use crate::render::{
@@ -40,6 +41,7 @@ pub struct App {
     pub modifiers: ModifiersState,
     pub last_cursor_pos: Option<(f64, f64)>,
     pub mouse_grabbed: bool,
+    pub mouse_enabled: bool,
     pub show_toolbar: bool,
     pub is_fullscreen: bool,
     pub start_fullscreen: bool,
@@ -53,15 +55,25 @@ pub struct App {
     pub show_drive_audio_ui: bool,
     pub drive_audio_params: DriveAudioParams,
     pub cpu_monitor: CpuMonitor,
+    pub monitor_window: Option<CpuMonitorWindow>,
     pub drive_icons: Option<DriveIcons>,
     pub toolbar_labels: Option<ToolbarLabels>,
     pub paused: bool,
     pub window_aspect_ratio: f64,
     pub last_resize_time: Option<Instant>,
+    pub frame_progress: FrameProgress,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FrameProgress {
+    pub active: bool,
+    pub scanline: usize,
+    pub cycles_run: u64,
+    pub target_cycles: u64,
 }
 
 impl App {
-    pub fn new(cpu: CPU, shader_type: ShaderType, start_fullscreen: bool) -> Self {
+    pub fn new(cpu: CPU, shader_type: ShaderType, start_fullscreen: bool, mouse_enabled: bool) -> Self {
         let (width, height) = cpu.bus.video.get_active_dimensions();
         Self {
             pixels: None,
@@ -78,6 +90,7 @@ impl App {
             modifiers: ModifiersState::default(),
             last_cursor_pos: None,
             mouse_grabbed: false,
+            mouse_enabled,
             show_toolbar: false,
             is_fullscreen: false,
             start_fullscreen,
@@ -90,11 +103,13 @@ impl App {
             show_drive_audio_ui: false,
             drive_audio_params: DriveAudioParams::default(),
             cpu_monitor: CpuMonitor::new(),
+            monitor_window: None,
             drive_icons: None,
             toolbar_labels: None,
             paused: false,
             window_aspect_ratio: 1.0,
             last_resize_time: None,
+            frame_progress: FrameProgress::default(),
         }
     }
 
@@ -419,8 +434,15 @@ impl winit::application::ApplicationHandler for App {
         };
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let egui_consumed = if self.show_shader_ui || self.show_drive_audio_ui || self.cpu_monitor.visible || self.show_toolbar {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some(mw) = self.monitor_window.as_mut() {
+            if mw.id() == id {
+                self.handle_monitor_event(event);
+                return;
+            }
+        }
+
+        let egui_consumed = if self.show_shader_ui || self.show_drive_audio_ui || self.show_toolbar {
             if let Some(egui_state) = self.egui_state.as_mut() {
                 if let Some(window) = self.window.as_ref() {
                     let response = egui_state.on_window_event(window.as_ref(), &event);
@@ -557,6 +579,312 @@ impl winit::application::ApplicationHandler for App {
 }
 
 impl App {
+    fn paste_clipboard_to_keyboard(&mut self) {
+        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Clipboard paste failed: {e}");
+                return;
+            }
+        };
+        if text.is_empty() {
+            return;
+        }
+        let mut bytes: Vec<u8> = Vec::with_capacity(text.len());
+        let mut prev_was_cr = false;
+        for c in text.chars() {
+            let b: Option<u8> = match c {
+                '\r' => {
+                    prev_was_cr = true;
+                    Some(0x0D)
+                }
+                '\n' => {
+                    if prev_was_cr {
+                        prev_was_cr = false;
+                        None // swallow LF half of CRLF
+                    } else {
+                        Some(0x0D)
+                    }
+                }
+                '\t' => {
+                    prev_was_cr = false;
+                    Some(b' ')
+                }
+                c if (' '..='~').contains(&c) => {
+                    prev_was_cr = false;
+                    Some(c.to_ascii_uppercase() as u8)
+                }
+                _ => {
+                    prev_was_cr = false;
+                    None
+                }
+            };
+            if let Some(b) = b {
+                bytes.push(b);
+            }
+        }
+        if bytes.is_empty() {
+            return;
+        }
+        println!("Pasting {} byte(s) to keyboard", bytes.len());
+        self.cpu.bus.iou.keyboard.paste_bytes(&bytes);
+    }
+
+    pub fn toggle_monitor_window(&mut self, event_loop: &ActiveEventLoop) {
+        if self.monitor_window.is_some() {
+            self.monitor_window = None;
+            self.cpu_monitor.visible = false;
+            self.cpu_monitor.enabled = false;
+            self.cpu_monitor.paused = false;
+            self.cpu_monitor.on_window_closed();
+            self.cpu.capture_trace = false;
+            return;
+        }
+        match CpuMonitorWindow::new(event_loop) {
+            Ok(mw) => {
+                self.monitor_window = Some(mw);
+                self.cpu_monitor.visible = true;
+                self.cpu_monitor.enabled = true;
+                self.cpu.capture_trace = true;
+                self.release_mouse();
+            }
+            Err(e) => {
+                error!("Failed to open CPU monitor window: {e}");
+            }
+        }
+    }
+
+    fn handle_monitor_event(&mut self, event: WindowEvent) {
+        if let Some(mw) = self.monitor_window.as_mut() {
+            let _consumed = mw.on_window_event(&event);
+        }
+
+        match event {
+            WindowEvent::CloseRequested => {
+                self.monitor_window = None;
+                self.cpu_monitor.visible = false;
+                self.cpu_monitor.enabled = false;
+                self.cpu_monitor.paused = false;
+                self.cpu_monitor.on_window_closed();
+                self.cpu.capture_trace = false;
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(mw) = self.monitor_window.as_mut() {
+                    mw.resize(size.width, size.height);
+                    mw.request_redraw();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(mw) = self.monitor_window.as_ref() {
+                    mw.request_redraw();
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                self.handle_monitor_redraw();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_monitor_redraw(&mut self) {
+        // Build per-frame snapshots for the monitor UI.
+        let cpu_state = CpuState {
+            pc: self.cpu.pc,
+            a: self.cpu.regs.a,
+            x: self.cpu.regs.x,
+            y: self.cpu.regs.y,
+            sp: self.cpu.regs.sp,
+            p: self.cpu.p.bits(),
+            cycles: self.cpu.cycles,
+        };
+
+        let mut memory_snapshot = [0u8; 768];
+        for i in 0..256 {
+            memory_snapshot[i] = self.cpu.bus.read_byte(0x0100 + i as u16);
+        }
+        let mem_page = self.cpu_monitor.memory.page;
+        let page_base = (mem_page as u16) << 8;
+        for i in 0..256 {
+            memory_snapshot[256 + i] = self.cpu.bus.read_byte(page_base + i as u16);
+        }
+        let pc_base = cpu_state.pc.wrapping_sub(32) & 0xFF00;
+        for i in 0..256 {
+            memory_snapshot[512 + i] = self.cpu.bus.read_byte(pc_base.wrapping_add(i as u16));
+        }
+
+        let iou_snapshot = {
+            let iou = &self.cpu.bus.iou;
+            let mut softswitches = [None; 256];
+            for i in 0..256 {
+                softswitches[i] = iou.peek_softswitch(0xC000 + i as u16);
+            }
+            // Mirror the tail of the IOU access log into the snapshot so the
+            // monitor panel can render it without holding a borrow into the
+            // emulator. `recent_accesses` is fixed-size to keep IouSnapshot
+            // `Copy`; `recent_access_count` tells the renderer how many of
+            // those slots are valid (newest last).
+            let mut recent_accesses =
+                [crate::cpu_monitor::IouAccessSample::default(); 32];
+            let log_len = iou.access_log.len();
+            let take = log_len.min(recent_accesses.len());
+            let start = log_len - take;
+            for (dst, entry) in recent_accesses
+                .iter_mut()
+                .zip(iou.access_log.iter().skip(start))
+            {
+                *dst = crate::cpu_monitor::IouAccessSample {
+                    addr: entry.addr,
+                    pc: entry.pc,
+                    cycle: entry.cycle,
+                    value: entry.value,
+                    write: entry.write,
+                };
+            }
+            let kbd = iou.keyboard.debug_state();
+            crate::cpu_monitor::IouSnapshot {
+                mem_state: iou.mem_state.get(),
+                video_mode: iou.video_mode.get(),
+                is_80store: iou.is_80store.get(),
+                ioudis: iou.ioudis.get(),
+                col80_switch: iou.col80_switch,
+                disk35_mode: iou.disk35_mode,
+                self_test: iou.self_test,
+                scan_cycle: iou.scan_cycle,
+                floating_bus: iou.floating_bus,
+                irq_pending: self.cpu.bus.interrupts.irq,
+                nmi_pending: self.cpu.bus.interrupts.nmi,
+                mouse_x_int: iou.mouse.x_int.get(),
+                mouse_y_int: iou.mouse.y_int.get(),
+                mouse_vbl_int: iou.mouse.vbl_int.get(),
+                mouse_xy_mask: iou.mouse.xy_mask.get(),
+                mouse_vbl_mask: iou.mouse.vbl_mask.get(),
+                mouse_x: iou.mouse.x.get(),
+                mouse_y: iou.mouse.y.get(),
+                mouse_button0: iou.mouse.button0.get(),
+                mouse_button1: iou.mouse.button1.get(),
+                kbd_last_key: kbd.0,
+                kbd_strobe: kbd.1,
+                kbd_queued: kbd.2 as u16,
+                kbd_held: kbd.3 as u16,
+                scc_crossloop: iou.scc.crossloop,
+                scc_a: iou.scc.ch_a.debug_state(),
+                scc_b: iou.scc.ch_b.debug_state(),
+                softswitches,
+                recent_accesses,
+                recent_access_count: take as u8,
+            }
+        };
+
+        // Per-frame Devices snapshot: drive activity LEDs + audio scopes.
+        let devices_snapshot = {
+            let iou = &self.cpu.bus.iou;
+            let mut drive_active = [false; 4];
+            let mut drive_present = [false; 4];
+            let mut drive_write_protect = [false; 4];
+            let mut drive_head_qt = [0u16; 4];
+            for d in 0..2 {
+                let (has, act, wp) = iou.iwm.drive_status(d);
+                drive_present[d] = has;
+                drive_active[d] = act;
+                drive_write_protect[d] = wp;
+                drive_head_qt[d] = iou.iwm.drive_head_qt(d);
+            }
+            for d in 0..2 {
+                let (has, act, wp) = iou.iwm.drive_status_35(d);
+                drive_present[d + 2] = has;
+                drive_active[d + 2] = act;
+                drive_write_protect[d + 2] = wp;
+            }
+            let (iwm_motor_on, iwm_motor_on35, iwm_drive_select, iwm_phases,
+                 iwm_write_mode, iwm_head35) = iou.iwm.debug_state();
+
+            const SCOPE_FRAMES: usize = 1024;
+            let mut speaker_scope = Vec::with_capacity(SCOPE_FRAMES);
+            iou.speaker.scope_snapshot(&mut speaker_scope, SCOPE_FRAMES);
+
+            let mut mb1 = Vec::new();
+            if iou.mockingboard.is_enabled() {
+                iou.mockingboard.scope_snapshot(&mut mb1, SCOPE_FRAMES * 2);
+            }
+            let mut mb2 = Vec::new();
+            if iou.mockingboard2.is_enabled() {
+                iou.mockingboard2.scope_snapshot(&mut mb2, SCOPE_FRAMES * 2);
+            }
+
+            crate::cpu_monitor::DevicesSnapshot {
+                drive_active,
+                drive_present,
+                drive_write_protect,
+                drive_head_qt,
+                iwm_motor_on,
+                iwm_motor_on35,
+                iwm_drive_select,
+                iwm_phases,
+                iwm_write_mode,
+                iwm_head35,
+                speaker_scope,
+                mockingboard1_scope: mb1,
+                mockingboard2_scope: mb2,
+                mockingboard1_enabled: iou.mockingboard.is_enabled(),
+                mockingboard2_enabled: iou.mockingboard2.is_enabled(),
+            }
+        };
+
+        // Take the window out so we can mutably borrow self.cpu_monitor inside the closure.
+        let mut mw = self.monitor_window.take();
+        // Snapshot framebuffer pixels for the monitor's Video pane preview.
+        // Cheap clone (~860 KB at 560x384x4) and avoids borrowing self twice.
+        //
+        // When the monitor has halted execution mid-frame (BP hit, single
+        // step), compose a "beam frontier" view: scanlines 0..N are
+        // re-rendered fresh from the captured per-scanline modes (so any
+        // in-flight mid-frame mode flips are visible), and scanlines
+        // N..192 are dimmed copies of the last completed frame to mark
+        // them as stale. The main window keeps showing the last
+        // completed frame untouched.
+        let (fb_w, fb_h) = self.cpu.bus.video.get_dimensions();
+        let fb_pixels: Vec<u8> = if self.frame_progress.active && self.frame_progress.scanline > 0 {
+            let scanline = self.frame_progress.scanline;
+            self.cpu.video_compose_monitor_partial(scanline).to_vec()
+        } else {
+            self.cpu.bus.video.get_pixels().to_vec()
+        };
+        if let Some(ref mut mw) = mw {
+            let cpu_monitor = &mut self.cpu_monitor;
+            mw.redraw(|ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
+                    .show(ctx, |ui| {
+                        let memory_reader = |addr: u16| -> u8 {
+                            if addr >= 0x0100 && addr < 0x0200 {
+                                memory_snapshot[(addr - 0x0100) as usize]
+                            } else if addr >= page_base && addr < page_base + 256 {
+                                memory_snapshot[256 + (addr - page_base) as usize]
+                            } else if addr >= pc_base && addr < pc_base.wrapping_add(256) {
+                                memory_snapshot[512 + addr.wrapping_sub(pc_base) as usize]
+                            } else {
+                                0x00
+                            }
+                        };
+                        let fb_view = crate::cpu_monitor::FramebufferView {
+                            pixels: &fb_pixels,
+                            width: fb_w,
+                            height: fb_h,
+                        };
+                        cpu_monitor.render_inline(
+                            ui,
+                            &cpu_state,
+                            &iou_snapshot,
+                            &devices_snapshot,
+                            &memory_reader,
+                            Some(fb_view),
+                        );
+                    });
+            });
+        }
+        self.monitor_window = mw;
+    }
+
     fn handle_redraw(&mut self) {
         if let Some((drive, click_time)) = self.last_drive_click {
             if click_time.elapsed() >= Duration::from_millis(400) {
@@ -609,6 +937,11 @@ impl App {
                 }
                 return;
             }
+
+            self.cpu.bus.video.effects.chroma_blur        = self.shader_params.chroma_blur;
+            self.cpu.bus.video.effects.comb_filter        = self.shader_params.comb_filter;
+            self.cpu.bus.video.effects.phosphor_spread    = self.shader_params.phosphor_spread;
+            self.cpu.bus.video.effects.white_preservation = self.shader_params.white_preservation;
 
             self.cpu.video_update();
 
@@ -737,35 +1070,11 @@ impl App {
             let render_result = if let Some(crt) = &self.post_processor {
                 crt.update_shader_params(pixels.queue(), &self.shader_params);
 
-                let egui_output = if self.show_shader_ui || self.show_drive_audio_ui || self.cpu_monitor.visible || self.show_toolbar {
+                let egui_output = if self.show_shader_ui || self.show_drive_audio_ui || self.show_toolbar {
                     if let Some(egui_state) = self.egui_state.as_mut() {
                         let window = self.window.as_ref().unwrap();
                         let raw_input = egui_state.take_egui_input(window.as_ref());
-                        
-                        let cpu_state = CpuState {
-                            pc: self.cpu.pc,
-                            a: self.cpu.regs.a,
-                            x: self.cpu.regs.x,
-                            y: self.cpu.regs.y,
-                            sp: self.cpu.regs.sp,
-                            p: self.cpu.p.bits(),
-                            cycles: self.cpu.cycles,
-                        };
-                        
-                        if self.cpu.capture_trace && self.cpu_monitor.enabled {
-                            self.cpu_monitor.record(self.cpu.last_trace);
-                        }
-                        
-                        let mut memory_snapshot = [0u8; 512];
-                        for i in 0..256 {
-                            memory_snapshot[i] = self.cpu.bus.read_byte(0x0100 + i as u16);
-                        }
-                        let mem_page = self.cpu_monitor.memory_page;
-                        let page_base = (mem_page as u16) << 8;
-                        for i in 0..256 {
-                            memory_snapshot[256 + i] = self.cpu.bus.read_byte(page_base + i as u16);
-                        }
-                        
+
                         let col80 = self.cpu.bus.iou.col80_switch;
                         let drive_status: [DriveStatusInfo; 4] = [
                             {
@@ -789,7 +1098,7 @@ impl App {
                                 DriveStatusInfo { has_disk, is_active, is_write_protected: wp, filename }
                             },
                         ];
-                        
+
                         let mut drive_audio_changed = false;
                         let mut toolbar_action = ToolbarAction::default();
                         let output = self.egui_ctx.run(raw_input, |ctx| {
@@ -798,18 +1107,6 @@ impl App {
                             }
                             if self.show_drive_audio_ui {
                                 drive_audio_changed = render_drive_audio_ui(ctx, &mut self.drive_audio_params, &mut self.show_drive_audio_ui);
-                            }
-                            if self.cpu_monitor.visible {
-                                let memory_reader = |addr: u16| -> u8 {
-                                    if addr >= 0x0100 && addr < 0x0200 {
-                                        memory_snapshot[(addr - 0x0100) as usize]
-                                    } else if addr >= page_base && addr < page_base + 256 {
-                                        memory_snapshot[256 + (addr - page_base) as usize]
-                                    } else {
-                                        0x00
-                                    }
-                                };
-                                self.cpu_monitor.render(ctx, &cpu_state, &memory_reader);
                             }
                             if self.show_toolbar {
                                 if self.drive_icons.is_none() {
@@ -950,6 +1247,9 @@ impl App {
     }
 
     fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
+        if !self.mouse_enabled {
+            return;
+        }
         let pressed = state == ElementState::Pressed;
         if !self.mouse_grabbed {
             if pressed && button == MouseButton::Left {
@@ -967,14 +1267,10 @@ impl App {
     }
 
     fn grab_mouse(&mut self) {
-        if self.mouse_grabbed {
+        if !self.mouse_enabled || self.mouse_grabbed {
             return;
         }
         if let Some(window) = &self.window {
-            // Locked = cursor is hidden and pinned to a fixed position;
-            // motion only flows through DeviceEvent::MouseMotion as raw
-            // deltas. This is what we want for unbounded, edge-free motion.
-            // Falls back to Confined if Locked is unsupported.
             let result = window
                 .set_cursor_grab(winit::window::CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
@@ -998,7 +1294,7 @@ impl App {
 
     fn handle_keyboard_input(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         event: &winit::event::KeyEvent,
         egui_consumed: bool,
     ) {
@@ -1029,16 +1325,25 @@ impl App {
         }
 
         if event.logical_key == Key::Named(NamedKey::F12) && event.state.is_pressed() {
-            self.cpu_monitor.toggle();
-            self.cpu.capture_trace = self.cpu_monitor.enabled;
-            if self.cpu_monitor.visible {
-                self.release_mouse();
-            }
+            self.toggle_monitor_window(event_loop);
             println!(
                 "CPU Monitor: {}",
-                if self.cpu_monitor.visible { "ON" } else { "OFF" }
+                if self.monitor_window.is_some() { "ON" } else { "OFF" }
             );
             return;
+        }
+
+        if !egui_consumed && event.state.is_pressed() {
+            #[cfg(target_os = "macos")]
+            let paste_modifier = self.modifiers.super_key();
+            #[cfg(not(target_os = "macos"))]
+            let paste_modifier = self.modifiers.control_key();
+            if paste_modifier {
+                if let PhysicalKey::Code(KeyCode::KeyV) = event.physical_key {
+                    self.paste_clipboard_to_keyboard();
+                    return;
+                }
+            }
         }
 
         #[cfg(target_os = "macos")]
@@ -1079,9 +1384,7 @@ impl App {
                     eprintln!("Failed to toggle fullscreen");
                 }
             }
-            // Fullscreen toggle no longer touches grab state. If the user
-            // wants the mouse back, they click the window. macOS focus
-            // shuffles during the transition will release any current grab.
+
             return;
         }
 

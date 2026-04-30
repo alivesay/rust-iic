@@ -72,6 +72,10 @@ impl Bus {
         );
     }
 
+    pub fn video_compose_monitor_partial(&mut self, up_to_scanline: usize) -> &[u8] {
+        self.video.compose_monitor_partial(&self.iou, &self.mmu, up_to_scanline)
+    }
+
     pub fn load_rom(&mut self, rom: ROM) {
         if self.system_type == SystemType::AppleIIc {
             self.mmu.load_rom(rom);

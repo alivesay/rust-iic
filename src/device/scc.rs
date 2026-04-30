@@ -70,6 +70,22 @@ pub struct SccChannel {
     pub modem: HayesModem,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SccChannelSnap {
+    pub connected: bool,
+    pub dcd: bool,
+    pub cts: bool,
+    pub rx_ready: bool,
+    pub tx_empty: bool,
+    pub irq_pending: bool,
+    pub loopback: bool,
+    /// 0 = command, 1 = online, 2 = escape.
+    pub modem_state: u8,
+    pub rx_depth: u16,
+    /// Baud rate decoded from WR12/WR13 (0 if BR generator disabled).
+    pub baud: u32,
+}
+
 impl SccChannel {
     fn new(id: &'static str) -> Self {
         Self {
@@ -564,6 +580,41 @@ impl SccChannel {
                 }
                 self.drain_modem_rx();
             }
+        }
+    }
+
+    /// CPU-monitor observability: cheap, side-effect-free snapshot of
+    /// channel state. See [`SccChannelSnap`] for field meanings.
+    pub fn debug_state(&self) -> SccChannelSnap {
+        // Decode baud from WR12 (low) + WR13 (high) using the standard
+        // formula `clock / (2 * (TC + 2) * clk_mode)`. 3.6864 MHz crystal
+        // and ÷16 clock mode are typical IIc settings; if the BR gen
+        // isn't enabled (WR14 bit 0) we just report 0.
+        let br_enable = (self.wr[14] & 0x01) != 0;
+        let baud = if br_enable {
+            let tc = (self.wr[12] as u32) | ((self.wr[13] as u32) << 8);
+            let pclk: u32 = 3_686_400;
+            // Assume ÷16 mode (default for async); if TC=0 avoid div-by-0.
+            let div = (tc + 2).saturating_mul(2 * 16);
+            if div == 0 { 0 } else { pclk / div }
+        } else {
+            0
+        };
+        SccChannelSnap {
+            connected: self.connected,
+            dcd: self.dcd,
+            cts: self.cts,
+            rx_ready: !self.rx_buffer.is_empty(),
+            tx_empty: self.tx_empty,
+            irq_pending: self.rx_ip || self.tx_ip || self.ext_ip,
+            loopback: self.loopback,
+            modem_state: match self.modem.state {
+                ModemState::Command => 0,
+                ModemState::Online => 1,
+                ModemState::Escape => 2,
+            },
+            rx_depth: self.rx_buffer.len() as u16,
+            baud,
         }
     }
 }

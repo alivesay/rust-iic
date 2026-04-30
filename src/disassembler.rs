@@ -1,7 +1,30 @@
 use regex::Regex;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::bus::Bus;
+
+static SYS_SYMBOLS: OnceLock<HashMap<u16, String>> = OnceLock::new();
+
+fn sys_symbols() -> &'static HashMap<u16, String> {
+    SYS_SYMBOLS.get_or_init(|| {
+        let mut map = HashMap::new();
+        let data = include_str!("../APPLE2E.SYM").replace("\r", "");
+        for line in data.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(address) = u16::from_str_radix(parts[0], 16) {
+                    map.insert(address, parts[1].to_string());
+                }
+            }
+        }
+        map
+    })
+}
+
+pub fn lookup_system_symbol(addr: u16) -> Option<&'static str> {
+    sys_symbols().get(&addr).map(|s| s.as_str())
+}
 
 pub struct SymbolTable {
     symbols: HashMap<u16, String>,
@@ -387,6 +410,24 @@ impl Disassembler {
             .find(|&&(code, _, _)| code == opcode)
             .map(|&(_, mnemonic, mode)| (mnemonic, mode))
             .unwrap_or(("???", AddressingMode::Implied))
+    }
+
+    pub fn disassemble_peek(addr: u16, peek: &dyn Fn(u16) -> u8) -> (String, u8) {
+        let opcode = peek(addr);
+        let (mnemonic, mode) = Disassembler::lookup_opcode(opcode);
+        let operand_bytes = mode.operand_bytes();
+        let operand1 = peek(addr.wrapping_add(1));
+        let operand2 = peek(addr.wrapping_add(2));
+
+        let formatted_operand = match operand_bytes {
+            0 => String::new(),
+            1 => Disassembler::format_operands(addr, mode, operand1, 0x00),
+            2 => Disassembler::format_operands(addr, mode, operand1, operand2),
+            _ => String::new(),
+        };
+
+        let text = format!("{:<4} {}", mnemonic, formatted_operand);
+        (text, (1 + operand_bytes) as u8)
     }
 
     pub fn format_operands(addr: u16, mode: AddressingMode, operand1: u8, operand2: u8) -> String {
