@@ -1,156 +1,156 @@
-//! Command-line argument parsing for the Apple IIc emulator.
-
 use clap::{Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
 
-/// Display shader type for post-processing effects.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+// Display shader type for post-processing effects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ShaderType {
-    /// No post-processing shader (raw pixels)
+    // No post-processing shader (raw pixels)
     #[default]
     None,
-    /// CRT monitor effect (scanlines, curvature, bloom)
+    // CRT monitor effect (scanlines, curvature, bloom)
     Crt,
-    /// Apple IIc LCD flat panel effect
+    // Apple IIc LCD flat panel effect
     Lcd,
 }
 
-/// Apple //c Emulator command-line arguments.
+// Apple //c Emulator command-line arguments.
 #[derive(Parser)]
 #[command(version, about = "Apple //c Emulator")]
 pub struct Args {
-    /// Run without video output (headless mode)
+    // Run without video output (headless mode)
     #[arg(long)]
     pub no_video: bool,
 
-    /// Run without audio output
+    // Run without audio output
     #[arg(long)]
     pub no_audio: bool,
 
-    /// Start in interactive monitor/debugger mode
+    // Start in interactive monitor/debugger mode
     #[arg(long)]
     pub monitor: bool,
 
-    /// ROM type selection (auto, 3, 4, etc.)
+    // ROM type selection (auto, 3, 4, etc.)
     #[arg(long, default_value = "auto")]
     pub rom_type: String,
 
-    /// Enable debug logging
+    // Enable debug logging
     #[arg(long, short)]
     pub debug: bool,
 
-    /// CPU speed multiplier
+    // CPU speed multiplier
     #[arg(long, default_value_t = 1.0)]
     pub speed: f32,
 
-    /// Enable monochrome (green phosphor) display
+    // Enable monochrome (green phosphor) display
     #[arg(long)]
     pub monochrome: bool,
 
-    /// Scanline intensity for CRT shader (0.0 - 1.0)
+    // Scanline intensity for CRT shader (0.0 - 1.0)
     #[arg(long, default_value_t = 0.5)]
     pub scanline_intensity: f32,
 
-    /// Disable NTSC chroma blur
+    // Disable NTSC chroma blur
     #[arg(long)]
     pub no_chroma_blur: bool,
 
-    /// Disable 2-line YIQ comb filter
+    // Disable 2-line YIQ comb filter
     #[arg(long)]
     pub no_comb_filter: bool,
 
-    /// Disable horizontal phosphor spread
+    // Disable horizontal phosphor spread
     #[arg(long)]
     pub no_phosphor_spread: bool,
 
-    /// NTSC pass strength, 0.0..=1.0
+    // NTSC pass strength, 0.0..=1.0
     #[arg(long, default_value_t = 1.0)]
     pub ntsc_strength: f32,
 
-    /// Show performance metrics
+    // Show performance metrics
     #[arg(long)]
     pub perf: bool,
 
-    /// Boot into self-test mode (hold Open+Closed Apple)
+    // Boot into self-test mode (hold Open+Closed Apple)
     #[arg(long)]
     pub self_test: bool,
 
-    /// Run at fast speed until PC reaches this address (hex)
+    // Run at fast speed until PC reaches this address (hex)
     #[arg(long)]
     pub fast_until: Option<String>,
 
-    /// Enable logging until PC reaches this address, then exit (hex)
+    // Enable logging until PC reaches this address, then exit (hex)
     #[arg(long)]
     pub log_until: Option<String>,
 
-    /// Speed multiplier for fast mode
+    // Speed multiplier for fast mode
     #[arg(long, default_value_t = 10.0)]
     pub fast_speed: f32,
 
-    /// Path to disk image for drive 1
+    // Path to disk image for drive 1
     #[arg(index = 1)]
     pub disk: Option<String>,
 
-    /// Path to disk image for drive 2
+    // Path to disk image for drive 2
     #[arg(long)]
     pub disk2: Option<String>,
 
-    /// Path to 3.5" disk image (.po/.2mg) for drive 3 (external 3.5"/SmartPort)
+    // Path to 3.5" disk image (.po/.2mg) for drive 3 (external 3.5"/SmartPort)
     #[arg(long)]
     pub disk35: Option<String>,
 
-    /// Path to second 3.5" disk image for drive 4
+    // Path to second 3.5" disk image for drive 4
     #[arg(long)]
     pub disk35_2: Option<String>,
 
-    /// Enable fast disk mode (skip rotational latency)
+    // Enable fast disk mode (skip rotational latency)
     #[arg(long)]
     pub fast_disk: bool,
 
-    /// Display shader: none, crt, lcd
+    // Display shader: none, crt, lcd
     #[arg(long, value_enum, default_value_t = ShaderType::Crt)]
     pub shader: ShaderType,
 
-    /// Connect modem port (SCC Ch A) to a TCP host, e.g. --serial bbs.example.com:23
+    // Connect modem port (SCC Ch A) to a TCP host, e.g. --serial bbs.example.com:23
     #[arg(long)]
     pub serial: Option<String>,
 
-    /// Enable virtual Hayes modem on slot 1 (use ATDT from terminal software to connect)
+    // Enable virtual Hayes modem on slot 1 (use ATDT from terminal software to connect)
     #[arg(long)]
     pub modem: bool,
 
-    /// Enable Apple //c mouse emulation
+    // Enable Apple //c mouse emulation
     #[arg(long)]
     pub mouse: bool,
 
-    /// Enable serial loopback mode (for diagnostic testing with loopback cable)
+    // Enable serial loopback mode (for diagnostic testing with loopback cable)
     #[arg(long, conflicts_with = "modem")]
     pub serial_loopback: bool,
 
-    /// Enable ZIP CHIP II-8 accelerator (8MHz, toggle with Ctrl+Z)
+    // Enable ZIP CHIP II-8 accelerator (8MHz, toggle with Ctrl+Z)
     #[arg(long)]
     pub zip: bool,
 
-    /// Enable Mockingboard sound card in slot 5
+    // Enable Mockingboard sound card in slot 5
     #[arg(long)]
     pub mockingboard: bool,
 
-    /// Enable second Mockingboard in slot 4 (disables memory expansion, for Ultima V etc.)
+    // Enable second Mockingboard in slot 4 (disables memory expansion, for Ultima V etc.)
     #[arg(long)]
     pub mockingboard2: bool,
 
-    /// Path to HDV hard drive image (SmartPort device)
+    // Path to HDV hard drive image (SmartPort device)
     #[arg(long)]
     pub hdv: Option<String>,
 
-    /// Path to second HDV hard drive image
+    // Path to second HDV hard drive image
     #[arg(long)]
     pub hdv2: Option<String>,
 
-    /// Start in fullscreen mode (same as Cmd+Enter on macOS)
+    // Start in fullscreen mode (same as Cmd+Enter on macOS)
     #[arg(long)]
     pub fullscreen: bool,
 
-    /// Enable paddle input via host gamepad
+    // Enable paddle input via host gamepad
     #[arg(long)]
     pub paddle: bool,
 }

@@ -8,18 +8,16 @@ use crate::timing;
 
 const CYCLES_PER_SECOND: f64 = timing::CYCLES_PER_SECOND;
 
-// Runtime-adjustable drive audio synthesis parameters
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct DriveAudioParams {
-    // Overall
     pub master_volume: f32,
     pub enabled: bool,
     
-    // Click (stepper) parameters
     pub click_volume: f32,
     pub click_noise_decay_ms: f32,      // Noise burst decay time in ms
     pub click_filter_freq: f32,          // Noise lowpass cutoff Hz
-    // Body clack (multi-stage impact synthesizer)
+
     pub click_body_freq: f32,            // Base body frequency (~650 Hz)
     pub click_body_decay_ms: f32,        // Body tone decay
     pub click_body_mix: f32,             // Overall body level
@@ -28,25 +26,22 @@ pub struct DriveAudioParams {
     pub click_pitch_sweep: f32,          // Pitch sweep start (1.0 = no sweep, 1.3 = minor 3rd up)
     pub click_pitch_sweep_ms: f32,       // Time for pitch to settle
     pub click_harmonic_mix: f32,         // 2nd harmonic level (0-1)
-    // Metallic tick
+
     pub click_tick_freq: f32,            // High metallic tick (~1500 Hz)
     pub click_tick_decay_ms: f32,
     pub click_tick_mix: f32,
-    // Click crunch layer (high-freq grit)
+
     pub click_crunch_decay_ms: f32,
     pub click_crunch_freq: f32,
     pub click_crunch_mix: f32,
     
-    // Motor relay click (fires once on motor start)
     pub relay_volume: f32,
     pub relay_freq: f32,                 // ~700 Hz
     pub relay_decay_ms: f32,             // 5-8ms
     
-    // Channel static (TV channel change effect)
     pub channel_static_volume: f32,
     pub channel_static_decay_ms: f32,
     
-    // Motor parameters (5.25")
     pub motor_volume: f32,
     pub motor_filter_freq: f32,
     pub motor_cog_freq: f32,
@@ -54,25 +49,23 @@ pub struct DriveAudioParams {
     pub motor_spinup_ms: f32,
     pub motor_spindown_ms: f32,
 
-    // 3.5" drive parameters
-    // Seek: voice-coil actuator produces a soft buzz, not discrete stepper clicks
     pub seek35_volume: f32,
     pub seek35_buzz_freq: f32,          // Voice-coil resonance (~400 Hz)
     pub seek35_buzz_decay_ms: f32,
     pub seek35_noise_decay_ms: f32,
     pub seek35_noise_filter_freq: f32,
-    // Motor: constant 300 RPM, smoother than 5.25"
+
     pub motor35_volume: f32,
     pub motor35_filter_freq: f32,       // Higher cutoff (smoother turbulence)
     pub motor35_hum_freq: f32,          // 300 RPM = 5 Hz fundamental, but audible ~60 Hz
     pub motor35_hum_mix: f32,
     pub motor35_spinup_ms: f32,
     pub motor35_spindown_ms: f32,
-    // Relay: softer engagement than 5.25"
+
     pub relay35_volume: f32,
     pub relay35_freq: f32,
     pub relay35_decay_ms: f32,
-    // Eject: spring mechanism clunk
+
     pub eject35_volume: f32,
     pub eject35_freq: f32,
     pub eject35_decay_ms: f32,
@@ -84,7 +77,6 @@ impl Default for DriveAudioParams {
             master_volume: 0.80,
             enabled: true,
             
-            // Click - multi-stage body clack + metallic tick
             click_volume: 0.15,
             click_noise_decay_ms: 12.2,
             click_filter_freq: 3600.0,
@@ -145,7 +137,6 @@ impl Default for DriveAudioParams {
     }
 }
 
-// Simple linear congruential RNG for noise generation
 struct NoiseGen {
     state: u32,
 }
@@ -179,7 +170,7 @@ impl DampedOscillator {
     }
 
     fn trigger(&mut self, amp: f32) {
-        // Accumulate amplitude on retrigger (max 1.5× base) to avoid pops
+        // accumulate amplitude on retrigger (max 1.5× base) to avoid pops
         self.amplitude = (self.amplitude + amp).min(amp * 1.5);
         self.phase = 0.0;
     }
@@ -358,7 +349,6 @@ pub enum DriveEvent {
     Step { quarter_track: u8 },
     MotorOn,
     MotorOff,
-    // 3.5" drive events (voice-coil actuator, constant 300 RPM motor)
     Step35,
     MotorOn35,
     MotorOff35,

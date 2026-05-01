@@ -1,7 +1,3 @@
-//! Apple IIc Emulator
-//!
-//! A cycle-accurate Apple IIc emulator written in Rust.
-
 #[macro_use]
 mod macros;
 
@@ -9,6 +5,7 @@ mod app;
 mod audio_mixer;
 mod bus;
 mod cli;
+mod config;
 mod cpu;
 mod cpu_monitor;
 mod cpu_monitor_window;
@@ -22,6 +19,7 @@ mod mmu;
 mod monitor;
 mod render;
 mod rom;
+mod settings_window;
 mod timing;
 mod util;
 mod video;
@@ -62,12 +60,14 @@ fn main() -> Result<(), Error> {
 
     let args = Args::parse();
 
-    // centralized audio mixer
-    let (sample_rate, audio_producers, _audio_mixer, _dummy_mixer);
+    let config = config::Config::load();
+
+    let (sample_rate, audio_producers, audio_controls, _audio_mixer, _dummy_mixer);
     if args.no_audio {
         let (dm, ap) = audio_mixer::DummyAudioMixer::new();
         sample_rate = dm.sample_rate();
         audio_producers = ap;
+        audio_controls = Some(dm.controls());
         _dummy_mixer = Some(dm);
         _audio_mixer = None;
         println!("audio {:>12} {:>8}", "MIXER", "OFFLINE");
@@ -75,6 +75,7 @@ fn main() -> Result<(), Error> {
         let (am, ap) = AudioMixer::new();
         sample_rate = am.sample_rate();
         audio_producers = ap;
+        audio_controls = Some(am.controls());
         _audio_mixer = Some(am);
         _dummy_mixer = None;
         println!("audio {:>12} {:>8}    {} Hz", "MIXER", "ONLINE", sample_rate);
@@ -246,7 +247,7 @@ fn main() -> Result<(), Error> {
     }
 
     // GUI mode
-    run_gui(cpu, &args)
+    run_gui(cpu, &args, config, audio_controls)
 }
 
 /// Run emulator in headless (no video) mode.
@@ -260,13 +261,28 @@ fn run_headless(mut cpu: CPU) {
     }
 }
 
-fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
+fn run_gui(
+    cpu: CPU,
+    args: &Args,
+    config: config::Config,
+    audio_controls: Option<audio_mixer::AudioControls>,
+) -> Result<(), Error> {
     let mut event_loop = EventLoop::new().unwrap();
-    let mut app = App::new(cpu, args.shader, args.fullscreen, args.mouse);
-    app.shader_params.chroma_blur = !args.no_chroma_blur;
-    app.shader_params.comb_filter = !args.no_comb_filter;
-    app.shader_params.phosphor_spread = !args.no_phosphor_spread;
+
+    let start_fullscreen = args.fullscreen || config.display.fullscreen;
+    let mouse_enabled = args.mouse || config.machine.mouse;
+    let mut app = App::new_with_config(cpu, args.shader, start_fullscreen, mouse_enabled, config);
+
+    if args.no_chroma_blur { app.shader_params.chroma_blur = false; }
+    if args.no_comb_filter { app.shader_params.comb_filter = false; }
+    if args.no_phosphor_spread { app.shader_params.phosphor_spread = false; }
     app.shader_params.ntsc_strength = args.ntsc_strength.clamp(0.0, 1.0);
+
+    app.cpu.bus.iou.iwm.drive_audio.params = app.drive_audio_params.clone();
+    app.cpu.bus.iou.iwm.drive_audio.apply_params();
+
+    app.audio_controls = audio_controls;
+    app.apply_audio_config();
 
     let timeout = Some(Duration::ZERO);
     let target_frame_time = Duration::from_micros(timing::FRAME_DURATION_MICROS);
@@ -294,11 +310,9 @@ fn run_gui(cpu: CPU, args: &Args) -> Result<(), Error> {
     let mut perf_start = Instant::now();
     let mut perf_frames = 0u64;
     let mut monitor_frame_ctr: u32 = 0;
-    // Smoothed CPU time per frame; controls whether the monitor window
-    // gets a redraw this frame. Heavy frames (DHIRES + audio) skip the
-    // egui rebuild so the emulator never falls behind because of the UI.
+
     let mut cpu_time_ema_us: f64 = 0.0;
-    // Diagnostics for `--perf`: accumulated time per phase per second.
+
     let mut diag_pump_us: u64 = 0;
     let mut diag_audio_us: u64 = 0;
     let mut diag_monitor_redraws: u64 = 0;

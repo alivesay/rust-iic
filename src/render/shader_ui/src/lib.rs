@@ -1,4 +1,5 @@
 use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
 
 // CRT-Geom-Deluxe shader parameters.
 // GPU layout: 8 × vec4<f32> = 32 floats.
@@ -10,7 +11,8 @@ use bytemuck::{Pod, Zeroable};
 //   group5: glow, glow_width, vignette_opacity, flicker
 //   group6: chromatic_aberration, unused, unused, v_roll
 //   group7: chroma_blur_on, comb_filter_on, phosphor_spread_on, ntsc_strength
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ShaderParams {
     // group0
     pub crt_gamma: f32,
@@ -126,8 +128,9 @@ impl ShaderParams {
     }
 }
 
-pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &mut bool) -> bool {
+pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &mut bool) -> ShaderUiResult {
     let mut changed = false;
+    let mut save_clicked = false;
 
     egui::Window::new("CRT-Geom-Deluxe Settings")
         .open(open)
@@ -226,9 +229,18 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
                         println!("chrom_aberration   = {:.2}", params.chromatic_aberration);
                         println!("------------------------------");
                     }
+                    if ui.button("Save to config").clicked() {
+                        save_clicked = true;
+                    }
                 });
             });
         });
 
-    changed
+    ShaderUiResult { changed, save_clicked }
+}
+
+]#[derive(Default, Clone, Copy)]
+pub struct ShaderUiResult {
+    pub changed: bool,
+    pub save_clicked: bool,
 }

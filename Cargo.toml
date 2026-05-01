@@ -34,6 +34,8 @@ regex = "1.11.1"
 rfd = "0.15"
 ringbuf = "0.4.8"
 shader_ui = { path = "src/render/shader_ui" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 wgpu = "27.0.1"
 wide = "0.7"
 winit = "0.30.13"

@@ -16,6 +16,8 @@ use winit::{
 use winit::platform::macos::WindowExtMacOS;
 
 use crate::cli::ShaderType;
+use crate::config::Config;
+use crate::audio_mixer::AudioControls;
 use crate::cpu::CPU;
 use crate::cpu_monitor::{CpuMonitor, CpuState};
 use crate::cpu_monitor_window::CpuMonitorWindow;
@@ -25,6 +27,7 @@ use crate::render::{
     blit_direct, blit_nearest, CrtRenderer,
     DriveIcons, DriveStatusInfo, LcdRenderer, PostProcessor, ToolbarAction, ToolbarLabels, render_toolbar_ui,
 };
+use crate::settings_window::{render_settings_window, SettingsState};
 
 pub struct App {
     pub pixels: Option<Pixels<'static>>,
@@ -54,6 +57,12 @@ pub struct App {
     pub show_shader_ui: bool,
     pub show_drive_audio_ui: bool,
     pub drive_audio_params: DriveAudioParams,
+
+    pub config: Config,
+    pub show_settings_window: bool,
+    pub settings_state: SettingsState,
+
+    pub audio_controls: Option<AudioControls>,
     pub cpu_monitor: CpuMonitor,
     pub monitor_window: Option<CpuMonitorWindow>,
     pub drive_icons: Option<DriveIcons>,
@@ -73,8 +82,21 @@ pub struct FrameProgress {
 }
 
 impl App {
+    #[allow(dead_code)]
     pub fn new(cpu: CPU, shader_type: ShaderType, start_fullscreen: bool, mouse_enabled: bool) -> Self {
+        Self::new_with_config(cpu, shader_type, start_fullscreen, mouse_enabled, Config::default())
+    }
+
+    pub fn new_with_config(
+        cpu: CPU,
+        shader_type: ShaderType,
+        start_fullscreen: bool,
+        mouse_enabled: bool,
+        config: Config,
+    ) -> Self {
         let (width, height) = cpu.bus.video.get_active_dimensions();
+        let shader_params = config.shader.clone();
+        let drive_audio_params = config.drive_audio.clone();
         Self {
             pixels: None,
             window: None,
@@ -98,10 +120,14 @@ impl App {
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,
-            shader_params: ShaderParams::default(),
+            shader_params,
             show_shader_ui: false,
             show_drive_audio_ui: false,
-            drive_audio_params: DriveAudioParams::default(),
+            drive_audio_params,
+            config,
+            show_settings_window: false,
+            settings_state: SettingsState::default(),
+            audio_controls: None,
             cpu_monitor: CpuMonitor::new(),
             monitor_window: None,
             drive_icons: None,
@@ -150,7 +176,18 @@ impl App {
         self.cpu.bus.iou.iwm.smartport.flush_all();
     }
 
-    /// Snap window to correct aspect ratio after user finishes resizing
+    pub fn apply_audio_config(&self) {
+        if let Some(c) = self.audio_controls.as_ref() {
+            let a = &self.config.audio;
+            c.set_muted(a.muted);
+            c.set_master(a.master);
+            c.set_speaker(a.speaker);
+            c.set_mockingboard1(a.mockingboard1);
+            c.set_mockingboard2(a.mockingboard2);
+            c.set_drive(a.drive);
+        }
+    }
+
     pub fn snap_aspect_ratio(&mut self) {
         if let Some(last_resize) = self.last_resize_time {
             if last_resize.elapsed() >= Duration::from_millis(150) {
@@ -180,8 +217,9 @@ impl App {
     }
 }
 
-fn render_drive_audio_ui(ctx: &egui::Context, params: &mut DriveAudioParams, open: &mut bool) -> bool {
+fn render_drive_audio_ui(ctx: &egui::Context, params: &mut DriveAudioParams, open: &mut bool) -> DriveAudioUiResult {
     let mut changed = false;
+    let mut save_clicked = false;
     let p = params;
     
     egui::Window::new("Drive Audio Settings")
@@ -269,11 +307,20 @@ fn render_drive_audio_ui(ctx: &egui::Context, params: &mut DriveAudioParams, ope
                         println!("motor_spindown_ms: {:.0}", p.motor_spindown_ms);
                         println!("------------------------------");
                     }
+                    if ui.button("Save to config").clicked() {
+                        save_clicked = true;
+                    }
                 });
             });
         });
 
-    changed
+    DriveAudioUiResult { changed, save_clicked }
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct DriveAudioUiResult {
+    pub changed: bool,
+    pub save_clicked: bool,
 }
 
 impl winit::application::ApplicationHandler for App {
@@ -442,7 +489,7 @@ impl winit::application::ApplicationHandler for App {
             }
         }
 
-        let egui_consumed = if self.show_shader_ui || self.show_drive_audio_ui || self.show_toolbar {
+        let egui_consumed = if self.show_shader_ui || self.show_drive_audio_ui || self.show_toolbar || self.show_settings_window {
             if let Some(egui_state) = self.egui_state.as_mut() {
                 if let Some(window) = self.window.as_ref() {
                     let response = egui_state.on_window_event(window.as_ref(), &event);
@@ -1070,7 +1117,7 @@ impl App {
             let render_result = if let Some(crt) = &self.post_processor {
                 crt.update_shader_params(pixels.queue(), &self.shader_params);
 
-                let egui_output = if self.show_shader_ui || self.show_drive_audio_ui || self.show_toolbar {
+                let egui_output = if self.show_shader_ui || self.show_drive_audio_ui || self.show_toolbar || self.show_settings_window {
                     if let Some(egui_state) = self.egui_state.as_mut() {
                         let window = self.window.as_ref().unwrap();
                         let raw_input = egui_state.take_egui_input(window.as_ref());
@@ -1100,13 +1147,36 @@ impl App {
                         ];
 
                         let mut drive_audio_changed = false;
+                        let mut shader_save_clicked = false;
+                        let mut drive_audio_save_clicked = false;
+                        let mut settings_save_clicked = false;
+                        let mut settings_reload_clicked = false;
+                        let mut settings_changed = false;
+                        let mut open_shader_panel = false;
+                        let mut open_drive_audio_panel = false;
                         let mut toolbar_action = ToolbarAction::default();
                         let output = self.egui_ctx.run(raw_input, |ctx| {
                             if self.show_shader_ui {
-                                shader_ui::render_shader_ui(ctx, &mut self.shader_params, &mut self.show_shader_ui);
+                                let r = shader_ui::render_shader_ui(ctx, &mut self.shader_params, &mut self.show_shader_ui);
+                                shader_save_clicked = r.save_clicked;
                             }
                             if self.show_drive_audio_ui {
-                                drive_audio_changed = render_drive_audio_ui(ctx, &mut self.drive_audio_params, &mut self.show_drive_audio_ui);
+                                let r = render_drive_audio_ui(ctx, &mut self.drive_audio_params, &mut self.show_drive_audio_ui);
+                                drive_audio_changed = r.changed;
+                                drive_audio_save_clicked = r.save_clicked;
+                            }
+                            if self.show_settings_window {
+                                let r = render_settings_window(
+                                    ctx,
+                                    &mut self.config,
+                                    &mut self.settings_state,
+                                    &mut self.show_settings_window,
+                                );
+                                settings_changed = r.changed;
+                                settings_save_clicked = r.save_requested;
+                                settings_reload_clicked = r.reload_requested;
+                                open_shader_panel = r.open_shader_panel;
+                                open_drive_audio_panel = r.open_drive_audio_panel;
                             }
                             if self.show_toolbar {
                                 if self.drive_icons.is_none() {
@@ -1119,10 +1189,83 @@ impl App {
                             }
                         });
                         egui_state.handle_platform_output(window.as_ref(), output.platform_output.clone());
-                        
+
                         if drive_audio_changed {
                             self.cpu.bus.iou.iwm.drive_audio.params = self.drive_audio_params.clone();
                             self.cpu.bus.iou.iwm.drive_audio.apply_params();
+                        }
+
+                        if shader_save_clicked {
+                            let mut cfg = Config::load();
+                            cfg.shader = self.shader_params.clone();
+                            match cfg.save() {
+                                Ok(p) => log::info!("config: shader saved to {}", p.display()),
+                                Err(e) => log::warn!("config: save failed: {}", e),
+                            }
+                            self.config.shader = self.shader_params.clone();
+                        }
+                        if drive_audio_save_clicked {
+                            let mut cfg = Config::load();
+                            cfg.drive_audio = self.drive_audio_params.clone();
+                            match cfg.save() {
+                                Ok(p) => log::info!("config: drive_audio saved to {}", p.display()),
+                                Err(e) => log::warn!("config: save failed: {}", e),
+                            }
+                            self.config.drive_audio = self.drive_audio_params.clone();
+                        }
+    
+                        if settings_changed {
+                            self.cpu.bus.video.set_monochrome(self.config.display.monochrome);
+                            self.cpu.bus.video.scanline_intensity = self.config.display.scanline_intensity;
+                            if let Some(c) = self.audio_controls.as_ref() {
+                                let a = &self.config.audio;
+                                c.set_muted(a.muted);
+                                c.set_master(a.master);
+                                c.set_speaker(a.speaker);
+                                c.set_mockingboard1(a.mockingboard1);
+                                c.set_mockingboard2(a.mockingboard2);
+                                c.set_drive(a.drive);
+                            }
+                        }
+                        if settings_save_clicked {
+
+                            self.config.shader = self.shader_params.clone();
+                            self.config.drive_audio = self.drive_audio_params.clone();
+                            match self.config.save() {
+                                Ok(p) => {
+                                    log::info!("config: saved to {}", p.display());
+                                    self.settings_state.status = Some(format!("Saved → {}", p.display()));
+                                }
+                                Err(e) => {
+                                    log::warn!("config: save failed: {}", e);
+                                    self.settings_state.status = Some(format!("Save failed: {e}"));
+                                }
+                            }
+                        }
+                        if settings_reload_clicked {
+                            self.config = Config::load();
+                            self.shader_params = self.config.shader.clone();
+                            self.drive_audio_params = self.config.drive_audio.clone();
+                            self.cpu.bus.iou.iwm.drive_audio.params = self.drive_audio_params.clone();
+                            self.cpu.bus.iou.iwm.drive_audio.apply_params();
+                            self.cpu.bus.video.set_monochrome(self.config.display.monochrome);
+                            self.cpu.bus.video.scanline_intensity = self.config.display.scanline_intensity;
+                            if let Some(c) = self.audio_controls.as_ref() {
+                                let a = &self.config.audio;
+                                c.set_muted(a.muted);
+                                c.set_master(a.master);
+                                c.set_speaker(a.speaker);
+                                c.set_mockingboard1(a.mockingboard1);
+                                c.set_mockingboard2(a.mockingboard2);
+                                c.set_drive(a.drive);
+                            }
+                            self.settings_state.status = Some("Reloaded from disk".to_string());
+                        }
+                        if open_shader_panel {
+                            self.show_shader_ui = true;
+                        }
+                        if open_drive_audio_panel {
+                            self.show_drive_audio_ui = true;
                         }
                         
                         if toolbar_action.toggle_pause {
@@ -1298,6 +1441,15 @@ impl App {
         event: &winit::event::KeyEvent,
         egui_consumed: bool,
     ) {
+        if event.logical_key == Key::Named(NamedKey::F2) && event.state.is_pressed() {
+            self.show_settings_window = !self.show_settings_window;
+            if self.show_settings_window {
+                self.settings_state.just_opened = true;
+                self.release_mouse();
+            }
+            return;
+        }
+
         if event.logical_key == Key::Named(NamedKey::F7) && event.state.is_pressed() {
             if self.shader_type != ShaderType::None {
                 self.show_shader_ui = !self.show_shader_ui;
