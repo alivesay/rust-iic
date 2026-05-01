@@ -239,7 +239,7 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
     ShaderUiResult { changed, save_clicked }
 }
 
-]#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub struct ShaderUiResult {
     pub changed: bool,
     pub save_clicked: bool,
