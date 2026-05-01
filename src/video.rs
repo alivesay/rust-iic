@@ -4,9 +4,8 @@ use wide::{CmpGt, CmpLt};
 
 const CHAR_ROM: &[u8; 1024] = include_bytes!("../assets/font.bin");
 
-const MONO_GREEN: (u8, u8, u8) = (118, 255, 211);
-const MONO_GREEN_RGBA: [u8; 4] = [MONO_GREEN.0, MONO_GREEN.1, MONO_GREEN.2, 255];
-const MONO_BLACK_RGBA: [u8; 4] = [15, 23, 23, 255];
+pub const DEFAULT_MONO_FG: [u8; 4] = [118, 255, 211, 255];
+pub const DEFAULT_MONO_BG: [u8; 4] = [15, 23, 23, 255];
 
 // NTSC 16-color palette (standard LoRes/HiRes ordering)
 // Derived from Apple IIc video ROM (video.bin 0x800-0xFFF) via NTSC demodulation
@@ -32,8 +31,6 @@ const NTSC_PALETTE: [[u8; 4]; 16] = [
     [255, 255, 255, 255], // 0xF: White
 ];
 
-// Derived from IIc video ROM (0x800-0xFFF) via NTSC demodulation
-// of the hardware dot patterns at 49° colorburst phase.
 #[rustfmt::skip]
 const DHIRES_PALETTE: [[u8; 4]; 16] = [
     [  0,   0,   0, 255], // 0x0: Black
@@ -101,6 +98,9 @@ pub struct Video {
     active_height: usize,
     frame_count: usize,
     pub monochrome: bool,
+    pub mono_fg: [u8; 4],
+    pub mono_bg: [u8; 4],
+    pub force_neutral_mono: bool,
     pub shader_enabled: bool,
     pub scanline_intensity: f32,
     pub border_size: usize,
@@ -162,6 +162,9 @@ impl Video {
             active_height,
             frame_count: 0,
             monochrome: false,
+            mono_fg: DEFAULT_MONO_FG,
+            mono_bg: DEFAULT_MONO_BG,
+            force_neutral_mono: false,
             shader_enabled: false,
             scanline_intensity: 0.15,
             border_size: border,
@@ -192,6 +195,11 @@ impl Video {
 
     pub fn set_monochrome(&mut self, enabled: bool) {
         self.monochrome = enabled;
+    }
+
+    pub fn set_mono_colors(&mut self, fg: [u8; 3], bg: [u8; 3]) {
+        self.mono_fg = [fg[0], fg[1], fg[2], 255];
+        self.mono_bg = [bg[0], bg[1], bg[2], 255];
     }
 
     pub fn update(&mut self, iou: &IOU, mmu: &MMU) -> bool {
@@ -798,13 +806,13 @@ impl Video {
             let pixel_on = (font_byte >> bit) & 1 != 0;
             let (r, g, b) = if pixel_on {
                 if self.monochrome {
-                    (MONO_GREEN.0, MONO_GREEN.1, MONO_GREEN.2)
+                    (self.mono_fg[0], self.mono_fg[1], self.mono_fg[2])
                 } else {
                     (255, 255, 255)
                 }
             } else {
                 if self.monochrome {
-                    (MONO_BLACK_RGBA[0], MONO_BLACK_RGBA[1], MONO_BLACK_RGBA[2])
+                    (self.mono_bg[0], self.mono_bg[1], self.mono_bg[2])
                 } else {
                     (0, 0, 0)
                 }
@@ -1080,7 +1088,7 @@ impl Video {
                 let byte = self.read_hires_memory(iou, mmu, addr);
                 for bit in 0..7_usize {
                     let pixel_on = (byte >> bit) & 1 != 0;
-                    let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
+                    let color = if pixel_on { self.mono_fg } else { self.mono_bg };
                     let x = col as usize * 14 + bit * 2;
                     for dy in 0..2_usize {
                         for dx in 0..2_usize {
@@ -1430,7 +1438,7 @@ impl Video {
 
                 for bit in 0..7_u16 {
                     let pixel_on = (aux_byte >> bit) & 1 != 0;
-                    let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
+                    let color = if pixel_on { self.mono_fg } else { self.mono_bg };
                     let x = col as usize * 14 + bit as usize;
                     for dy in 0..2 {
                         let index = self.fb_index(x, y + dy);
@@ -1441,7 +1449,7 @@ impl Video {
                 }
                 for bit in 0..7_u16 {
                     let pixel_on = (main_byte >> bit) & 1 != 0;
-                    let color = if pixel_on { MONO_GREEN_RGBA } else { MONO_BLACK_RGBA };
+                    let color = if pixel_on { self.mono_fg } else { self.mono_bg };
                     let x = col as usize * 14 + 7 + bit as usize;
                     for dy in 0..2 {
                         let index = self.fb_index(x, y + dy);
@@ -1513,10 +1521,21 @@ impl Video {
 
         if self.monochrome {
             let y = (0.299 * rgba[0] as f32 + 0.587 * rgba[1] as f32 + 0.114 * rgba[2] as f32) as u8;
+            // When a downstream shader provides its own coloring (LCD),
+            // emit a neutral grayscale image so the shader sees true
+            // source luminance instead of the user's tint.
+            if self.force_neutral_mono {
+                return [y, y, y, 255];
+            }
             if y < 24 {
-                MONO_BLACK_RGBA
+                self.mono_bg
             } else {
-                [MONO_GREEN.0.min(20), y, MONO_GREEN.2.min(20), 255]
+
+                let fg = self.mono_fg;
+                let r = ((y as u32 * fg[0] as u32) / 255) as u8;
+                let g = ((y as u32 * fg[1] as u32) / 255) as u8;
+                let b = ((y as u32 * fg[2] as u32) / 255) as u8;
+                [r, g, b, 255]
             }
         } else {
             rgba

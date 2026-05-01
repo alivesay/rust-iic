@@ -60,7 +60,7 @@ pub fn render_settings_window(
 ) -> SettingsResult {
     let mut result = SettingsResult::default();
 
-    let win_size = egui::vec2(460.0, 360.0);
+    let win_size = egui::vec2(480.0, 560.0);
 
     state.just_opened = false;
 
@@ -73,8 +73,10 @@ pub fn render_settings_window(
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .fixed_size(win_size)
         .show(ctx, |ui| {
+            ui.add_space(4.0);
             // --- tab strip -----------------------------------------------------
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
                 for tab in [
                     SettingsTab::Video,
                     SettingsTab::Audio,
@@ -91,34 +93,61 @@ pub fn render_settings_window(
                     }
                 }
             });
+            ui.add_space(4.0);
             ui.separator();
+            ui.add_space(4.0);
 
+            // --- tab body (scrollable, padded) --------------------------------
             egui::ScrollArea::vertical()
-                .max_height(240.0)
+                .max_height(440.0)
                 .auto_shrink([false, true])
-                .show(ui, |ui| match state.active_tab {
-                    SettingsTab::Video => render_video_tab(ui, config, &mut result),
-                    SettingsTab::Audio => render_audio_tab(ui, config, &mut result),
-                    SettingsTab::Disk => render_disk_tab(ui, config, &mut result),
-                    SettingsTab::Machine => render_machine_tab(ui, config, &mut result),
-                    SettingsTab::Serial => render_serial_tab(ui, config, &mut result),
-                    SettingsTab::Debug => render_debug_tab(ui, config, &mut result),
+                .show(ui, |ui| {
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                            match state.active_tab {
+                                SettingsTab::Video => render_video_tab(ui, config, &mut result),
+                                SettingsTab::Audio => render_audio_tab(ui, config, &mut result),
+                                SettingsTab::Disk => render_disk_tab(ui, config, &mut result),
+                                SettingsTab::Machine => render_machine_tab(ui, config, &mut result),
+                                SettingsTab::Serial => render_serial_tab(ui, config, &mut result),
+                                SettingsTab::Debug => render_debug_tab(ui, config, &mut result),
+                            }
+                        });
                 });
 
+            ui.add_space(4.0);
             ui.separator();
+            ui.add_space(4.0);
 
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    result.save_requested = true;
-                }
-                if ui.button("Reload from disk").clicked() {
-                    result.reload_requested = true;
-                }
-                if let Some(msg) = state.status.as_deref() {
-                    ui.label(msg);
-                }
-            });
-            ui.label(format!("Config file: {}", crate::config::config_path().display()));
+            // --- footer --------------------------------------------------------
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(10, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if ui.button("  Save  ").clicked() {
+                            result.save_requested = true;
+                        }
+                        if ui.button("  Reload from disk  ").clicked() {
+                            result.reload_requested = true;
+                        }
+                        if let Some(msg) = state.status.as_deref() {
+                            ui.label(msg);
+                        }
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Config file: {}",
+                            crate::config::config_path().display()
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                });
+            ui.add_space(4.0);
         });
 
     result
@@ -128,7 +157,7 @@ fn render_video_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
     let d = &mut cfg.display;
     ui.heading("Display");
     result.changed |= ui.checkbox(&mut d.fullscreen, "Start fullscreen").changed();
-    result.changed |= ui.checkbox(&mut d.monochrome, "Monochrome (green phosphor)").changed();
+    result.changed |= ui.checkbox(&mut d.monochrome, "Monochrome").changed();
 
     ui.horizontal(|ui| {
         ui.label("Shader:");
@@ -143,9 +172,50 @@ fn render_video_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
             }
         }
     });
-    result.changed |= ui
-        .add(egui::Slider::new(&mut d.scanline_intensity, 0.0..=1.0).text("Scanline intensity"))
-        .changed();
+    // CPU-side scanline darken pass only runs when no GPU shader is
+    // active; the CRT shader has its own `scanline_weight` (F7).
+    let cpu_scanlines_active = d.shader_type == ShaderType::None;
+    ui.add_enabled_ui(cpu_scanlines_active, |ui| {
+        let resp = ui.add(
+            egui::Slider::new(&mut d.scanline_intensity, 0.0..=1.0)
+                .text("Scanline intensity"),
+        );
+        result.changed |= resp.changed();
+        if !cpu_scanlines_active {
+            resp.on_disabled_hover_text(
+                "Only active when Shader = None.\nUse F7 → Scanline Weight for the CRT shader.",
+            );
+        }
+    });
+
+    // The LCD shader does its own monochrome coloring; the user's
+    // mono FG/BG palette is ignored when LCD is active.
+    let mono_colors_active = d.monochrome && d.shader_type != ShaderType::Lcd;
+    ui.add_enabled_ui(mono_colors_active, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Mono FG:");
+            let mut fg = d.mono_fg;
+            if ui.color_edit_button_srgb(&mut fg).changed() {
+                d.mono_fg = fg;
+                result.changed = true;
+            }
+            ui.label("Mono BG:");
+            let mut bg = d.mono_bg;
+            if ui.color_edit_button_srgb(&mut bg).changed() {
+                d.mono_bg = bg;
+                result.changed = true;
+            }
+            if ui.button("Reset").clicked() {
+                d.mono_fg = [118, 255, 211];
+                d.mono_bg = [15, 23, 23];
+                result.changed = true;
+            }
+        })
+        .response
+        .on_disabled_hover_text(
+            "The LCD shader uses its own internal colors; mono FG/BG only apply with the CRT or None shader.",
+        );
+    });
 
     ui.separator();
     ui.heading("Detailed CRT / NTSC parameters");
@@ -176,7 +246,7 @@ fn render_audio_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
         .changed();
 
     ui.separator();
-    ui.heading("Drive audio (high-level)");
+    ui.heading("Drive Synth");
     let d = &mut cfg.drive_audio;
     result.changed |= ui.checkbox(&mut d.enabled, "Drive sound effects enabled").changed();
     result.changed |= ui
@@ -192,10 +262,11 @@ fn render_audio_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
 
 fn render_disk_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsResult) {
     ui.label(
-        egui::RichText::new("Changes here apply at next boot.")
+        egui::RichText::new("Disk image paths apply at next boot.")
             .italics()
             .weak(),
     );
+    ui.add_space(2.0);
     let b = &mut cfg.boot;
 
     disk_path_row(ui, "5.25\" S6 D1", &mut b.disk1, result);
@@ -205,9 +276,12 @@ fn render_disk_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRes
     disk_path_row(ui, "HDV    1", &mut b.hdv1, result);
     disk_path_row(ui, "HDV    2", &mut b.hdv2, result);
 
+    ui.add_space(4.0);
     ui.separator();
+    ui.add_space(4.0);
+    let m = &mut cfg.machine;
     result.changed |= ui
-        .checkbox(&mut b.self_test, "Boot into self-test (Open+Closed Apple)")
+        .checkbox(&mut m.fast_disk, "Fast disk (skip rotational latency)")
         .changed();
 }
 
@@ -268,16 +342,16 @@ fn render_machine_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut Settings
         .checkbox(&mut m.paddle, "Paddles via host gamepad")
         .changed();
 
+    ui.add_space(4.0);
     ui.separator();
+    ui.add_space(4.0);
     ui.heading("CPU");
     result.changed |= ui
-        .add(egui::Slider::new(&mut m.speed, 0.5..=4.0).text("Speed multiplier"))
-        .changed();
-    result.changed |= ui
-        .add(egui::Slider::new(&mut m.fast_speed, 1.0..=50.0).text("Fast-mode multiplier"))
-        .changed();
-    result.changed |= ui
-        .checkbox(&mut m.fast_disk, "Fast disk (skip rotational latency)")
+        .add(
+            egui::Slider::new(&mut m.speed, 0.5..=50.0)
+                .logarithmic(true)
+                .text("Speed multiplier (1.0 = 1.023 MHz)"),
+        )
         .changed();
 }
 
@@ -303,7 +377,7 @@ fn render_serial_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsR
         .checkbox(&mut s.modem, "Virtual Hayes modem (SCC Ch A)")
         .changed();
     result.changed |= ui
-        .checkbox(&mut s.loopback, "Diagnostic loopback")
+        .checkbox(&mut s.loopback, "Serial loopback cable")
         .changed();
 
     if s.modem && !s.host.is_empty() {
@@ -318,4 +392,13 @@ fn render_debug_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
     let d = &mut cfg.debug;
     result.changed |= ui.checkbox(&mut d.debug, "Verbose debug logging").changed();
     result.changed |= ui.checkbox(&mut d.perf, "Show perf overlay").changed();
+
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.heading("Boot");
+    let b = &mut cfg.boot;
+    result.changed |= ui
+        .checkbox(&mut b.self_test, "Boot into self-test (Open+Closed Apple held)")
+        .changed();
 }

@@ -63,6 +63,8 @@ pub struct App {
     pub settings_state: SettingsState,
 
     pub audio_controls: Option<AudioControls>,
+
+    pub pending_shader_change: Option<ShaderType>,
     pub cpu_monitor: CpuMonitor,
     pub monitor_window: Option<CpuMonitorWindow>,
     pub drive_icons: Option<DriveIcons>,
@@ -128,6 +130,7 @@ impl App {
             show_settings_window: false,
             settings_state: SettingsState::default(),
             audio_controls: None,
+            pending_shader_change: None,
             cpu_monitor: CpuMonitor::new(),
             monitor_window: None,
             drive_icons: None,
@@ -186,6 +189,111 @@ impl App {
             c.set_mockingboard2(a.mockingboard2);
             c.set_drive(a.drive);
         }
+    }
+
+    pub fn rebuild_render_pipeline(&mut self) {
+        let Some(window) = self.window.clone() else { return; };
+
+        self.cpu.bus.video.shader_enabled = self.shader_type != ShaderType::None;
+        self.cpu.bus.video.force_neutral_mono = self.shader_type == ShaderType::Lcd;
+
+        self.post_processor = None;
+        self.egui_renderer = None;
+        self.egui_state = None;
+        self.pixels = None;
+
+        let surface_w = self.surface_width.max(1);
+        let surface_h = self.surface_height.max(1);
+        let (src_w, src_h) = self.cpu.bus.video.get_dimensions();
+        let (active_w, active_h) = self.cpu.bus.video.get_active_dimensions();
+
+        let (buf_w, buf_h) = match self.shader_type {
+            ShaderType::Crt | ShaderType::None => (src_w, src_h),
+            ShaderType::Lcd => (surface_w, surface_h),
+        };
+        self.buffer_width = buf_w;
+        self.buffer_height = buf_h;
+
+        let surface_texture = SurfaceTexture::new(surface_w, surface_h, window.clone());
+        let mut pixels = match PixelsBuilder::new(buf_w, buf_h, surface_texture)
+            .texture_format(wgpu::TextureFormat::Rgba8UnormSrgb)
+            .render_texture_format(wgpu::TextureFormat::Bgra8UnormSrgb)
+            .build()
+        {
+            Ok(p) => p,
+            Err(err) => {
+                error!("rebuild_render_pipeline: pixels::new failed: {}", err);
+                return;
+            }
+        };
+        if self.is_fullscreen {
+            pixels.set_scaling_mode(ScalingMode::PixelPerfect);
+        } else {
+            pixels.set_scaling_mode(ScalingMode::Fill);
+        }
+        pixels.clear_color(wgpu::Color::BLACK);
+        let surface_format = pixels.render_texture_format();
+
+        self.post_processor = match self.shader_type {
+            ShaderType::Crt => Some(Box::new(CrtRenderer::new(
+                pixels.device(),
+                surface_w,
+                surface_h,
+                buf_w,
+                buf_h,
+                0,
+                active_w as f32,
+                active_h as f32,
+                surface_format,
+            )) as Box<dyn PostProcessor>),
+            ShaderType::Lcd => Some(Box::new(LcdRenderer::new(
+                pixels.device(),
+                surface_w,
+                surface_h,
+                buf_w,
+                buf_h,
+                0,
+                active_w as f32,
+                active_h as f32,
+                surface_format,
+            )) as Box<dyn PostProcessor>),
+            ShaderType::None => None,
+        };
+        if let Some(pp) = &mut self.post_processor {
+            pp.resize(pixels.device(), pixels.queue(), surface_w, surface_h);
+        }
+
+        // Recreate the egui Context too. Sharing the old Context with a
+        // freshly-built winit State causes emath::History to panic with
+        // "Time shouldn't move backwards" because the context retains
+        // frame-time history from the previous pipeline while the new
+        // State starts a fresh time origin.
+        self.egui_ctx = egui::Context::default();
+        // Texture handles below are owned by the old context; they
+        // would be invalid against the new one. They get re-loaded
+        // lazily on the next toolbar render.
+        self.drive_icons = None;
+        self.toolbar_labels = None;
+
+        let egui_state = egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            window.as_ref(),
+            Some(window.scale_factor() as f32),
+            None,
+            Some(pixels.device().limits().max_texture_dimension_2d as usize),
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(
+            pixels.device(),
+            surface_format,
+            Default::default(),
+        );
+        self.egui_state = Some(egui_state);
+        self.egui_renderer = Some(egui_renderer);
+        self.pixels = Some(pixels);
+        self.shader_start_time = Instant::now();
+        window.request_redraw();
+        log::info!("rebuild_render_pipeline: shader = {:?}", self.shader_type);
     }
 
     pub fn snap_aspect_ratio(&mut self) {
@@ -400,8 +508,8 @@ impl winit::application::ApplicationHandler for App {
         let (active_w, active_h) = self.cpu.bus.video.get_active_dimensions();
         
         let (buf_w, buf_h) = match self.shader_type {
-            ShaderType::Crt => (src_w, src_h),
-            _ => (surface_w, surface_h),
+            ShaderType::Crt | ShaderType::None => (src_w, src_h),
+            ShaderType::Lcd => (surface_w, surface_h),
         };
         self.buffer_width = buf_w;
         self.buffer_height = buf_h;
@@ -877,18 +985,8 @@ impl App {
             }
         };
 
-        // Take the window out so we can mutably borrow self.cpu_monitor inside the closure.
         let mut mw = self.monitor_window.take();
-        // Snapshot framebuffer pixels for the monitor's Video pane preview.
-        // Cheap clone (~860 KB at 560x384x4) and avoids borrowing self twice.
-        //
-        // When the monitor has halted execution mid-frame (BP hit, single
-        // step), compose a "beam frontier" view: scanlines 0..N are
-        // re-rendered fresh from the captured per-scanline modes (so any
-        // in-flight mid-frame mode flips are visible), and scanlines
-        // N..192 are dimmed copies of the last completed frame to mark
-        // them as stale. The main window keeps showing the last
-        // completed frame untouched.
+
         let (fb_w, fb_h) = self.cpu.bus.video.get_dimensions();
         let fb_pixels: Vec<u8> = if self.frame_progress.active && self.frame_progress.scanline > 0 {
             let scanline = self.frame_progress.scanline;
@@ -933,6 +1031,11 @@ impl App {
     }
 
     fn handle_redraw(&mut self) {
+        if let Some(new_ty) = self.pending_shader_change.take() {
+            self.shader_type = new_ty;
+            self.rebuild_render_pipeline();
+        }
+
         if let Some((drive, click_time)) = self.last_drive_click {
             if click_time.elapsed() >= Duration::from_millis(400) {
                 self.last_drive_click = None;
@@ -999,7 +1102,7 @@ impl App {
             
             let frame = pixels.frame_mut();
 
-            if self.shader_type == ShaderType::Crt {
+            if self.shader_type == ShaderType::Crt || self.shader_type == ShaderType::None {
                 blit_direct(frame, video_pixels);
                 
                 if let Some(crt) = &self.post_processor {
@@ -1114,8 +1217,10 @@ impl App {
                 }
             }
 
-            let render_result = if let Some(crt) = &self.post_processor {
-                crt.update_shader_params(pixels.queue(), &self.shader_params);
+            let render_result = {
+                if let Some(crt) = self.post_processor.as_ref() {
+                    crt.update_shader_params(pixels.queue(), &self.shader_params);
+                }
 
                 let egui_output = if self.show_shader_ui || self.show_drive_audio_ui || self.show_toolbar || self.show_settings_window {
                     if let Some(egui_state) = self.egui_state.as_mut() {
@@ -1217,6 +1322,16 @@ impl App {
                         if settings_changed {
                             self.cpu.bus.video.set_monochrome(self.config.display.monochrome);
                             self.cpu.bus.video.scanline_intensity = self.config.display.scanline_intensity;
+                            self.cpu.bus.video.set_mono_colors(
+                                self.config.display.mono_fg,
+                                self.config.display.mono_bg,
+                            );
+                            // Shader type changes need a pipeline rebuild;
+                            // defer to the next redraw because pixels is
+                            // currently borrowed by this closure.
+                            if self.config.display.shader_type != self.shader_type {
+                                self.pending_shader_change = Some(self.config.display.shader_type);
+                            }
                             if let Some(c) = self.audio_controls.as_ref() {
                                 let a = &self.config.audio;
                                 c.set_muted(a.muted);
@@ -1250,6 +1365,13 @@ impl App {
                             self.cpu.bus.iou.iwm.drive_audio.apply_params();
                             self.cpu.bus.video.set_monochrome(self.config.display.monochrome);
                             self.cpu.bus.video.scanline_intensity = self.config.display.scanline_intensity;
+                            self.cpu.bus.video.set_mono_colors(
+                                self.config.display.mono_fg,
+                                self.config.display.mono_bg,
+                            );
+                            if self.config.display.shader_type != self.shader_type {
+                                self.pending_shader_change = Some(self.config.display.shader_type);
+                            }
                             if let Some(c) = self.audio_controls.as_ref() {
                                 let a = &self.config.audio;
                                 c.set_muted(a.muted);
@@ -1327,10 +1449,16 @@ impl App {
                 let sh = self.surface_height;
                 let mut egui_renderer = self.egui_renderer.take();
 
+                let post_proc = self.post_processor.take();
+
                 let render_res = pixels.render_with(|encoder, render_target, context| {
-                    crt.clear_intermediate(encoder);
-                    context.scaling_renderer.render(encoder, crt.intermediate_view());
-                    crt.render(encoder, render_target, device);
+                    if let Some(ref crt) = post_proc {
+                        crt.clear_intermediate(encoder);
+                        context.scaling_renderer.render(encoder, crt.intermediate_view());
+                        crt.render(encoder, render_target, device);
+                    } else {
+                        context.scaling_renderer.render(encoder, render_target);
+                    }
 
                     if let (Some(ref mut egui_rend), Some((_, ref jobs, ppp))) = (&mut egui_renderer, &egui_output) {
                         if !jobs.is_empty() {
@@ -1365,6 +1493,7 @@ impl App {
                 });
 
                 self.egui_renderer = egui_renderer;
+                self.post_processor = post_proc;
 
                 // Free old egui textures
                 if let Some((ref output, _, _)) = egui_output {
@@ -1376,8 +1505,6 @@ impl App {
                 }
 
                 render_res
-            } else {
-                pixels.render()
             };
 
             if let Err(err) = render_result {

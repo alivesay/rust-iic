@@ -103,7 +103,8 @@ fn main() -> Result<(), Error> {
     cpu.bus.iou.debug = args.debug;
     cpu.bus.iou.iwm.debug = args.debug;
     cpu.bus.iou.iwm.fast_disk = args.fast_disk;
-    cpu.bus.video.set_monochrome(args.monochrome);
+    cpu.bus.video.set_monochrome(args.monochrome || config.display.monochrome);
+    cpu.bus.video.set_mono_colors(config.display.mono_fg, config.display.mono_bg);
     cpu.bus.video.shader_enabled = args.shader != ShaderType::None;
     cpu.bus.video.scanline_intensity = args.scanline_intensity;
     cpu.bus.video.effects.chroma_blur = !args.no_chroma_blur;
@@ -262,7 +263,7 @@ fn run_headless(mut cpu: CPU) {
 }
 
 fn run_gui(
-    cpu: CPU,
+    mut cpu: CPU,
     args: &Args,
     config: config::Config,
     audio_controls: Option<audio_mixer::AudioControls>,
@@ -271,7 +272,15 @@ fn run_gui(
 
     let start_fullscreen = args.fullscreen || config.display.fullscreen;
     let mouse_enabled = args.mouse || config.machine.mouse;
-    let mut app = App::new_with_config(cpu, args.shader, start_fullscreen, mouse_enabled, config);
+
+    let shader = if args.shader == ShaderType::Crt {
+        config.display.shader_type
+    } else {
+        args.shader
+    };
+
+    cpu.bus.video.force_neutral_mono = shader == ShaderType::Lcd;
+    let mut app = App::new_with_config(cpu, shader, start_fullscreen, mouse_enabled, config);
 
     if args.no_chroma_blur { app.shader_params.chroma_blur = false; }
     if args.no_comb_filter { app.shader_params.comb_filter = false; }

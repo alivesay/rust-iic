@@ -69,6 +69,8 @@ pub struct DisplayConfig {
     pub monochrome: bool,
     pub shader_type: ShaderType,
     pub scanline_intensity: f32,
+    pub mono_fg: [u8; 3],
+    pub mono_bg: [u8; 3],
 }
 
 impl Default for DisplayConfig {
@@ -78,6 +80,8 @@ impl Default for DisplayConfig {
             monochrome: false,
             shader_type: ShaderType::Crt,
             scanline_intensity: 0.5,
+            mono_fg: [118, 255, 211],
+            mono_bg: [15, 23, 23],
         }
     }
 }
