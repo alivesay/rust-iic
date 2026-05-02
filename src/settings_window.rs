@@ -178,7 +178,7 @@ fn render_video_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
     ui.add_enabled_ui(cpu_scanlines_active, |ui| {
         let resp = ui.add(
             egui::Slider::new(&mut d.scanline_intensity, 0.0..=1.0)
-                .text("Scanline intensity"),
+                .text("Scanline transparency"),
         );
         result.changed |= resp.changed();
         if !cpu_scanlines_active {

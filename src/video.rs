@@ -113,6 +113,8 @@ pub struct Video {
 
     monitor_partial_fb: Vec<u8>,
 
+    raw_framebuffer: Vec<u8>,
+
     // sRGB u8 to linear f32
     srgb_to_linear_lut: [f32; 256],
     // linear f32 in [0, 1] to sRGB u8, sampled at 4096 steps
@@ -173,6 +175,7 @@ impl Video {
             scanline_80store: [false; 192],
             scanline_count: 0,
             monitor_partial_fb: Vec::new(),
+            raw_framebuffer: Vec::new(),
             srgb_to_linear_lut,
             linear_to_srgb_lut_u8,
             yiq_buf: Vec::with_capacity(active_width * 192 * 3),
@@ -269,6 +272,12 @@ impl Video {
         };
         let final_mixed = (final_mode & VideoModeMask::MIXED) != 0;
         let final_text_only = (final_mode & VideoModeMask::TEXT) != 0;
+
+        if self.raw_framebuffer.len() != self.framebuffer.len() {
+            self.raw_framebuffer.resize(self.framebuffer.len(), 0);
+        }
+        self.raw_framebuffer.copy_from_slice(&self.framebuffer);
+
         if final_mixed && !final_text_only && any_graphics && !self.monochrome {
             self.apply_mixed_mode_text_fringing(20);
         }
@@ -298,12 +307,9 @@ impl Video {
         true
     }
 
-    /// Dispatch a single Apple scanline (0..192) to the appropriate
-    /// per-mode renderer using the captured `scanline_modes` /
-    /// `scanline_80store` snapshot. The rendering target is whatever
-    /// `self.framebuffer` currently points at — callers can swap a
-    /// different buffer in beforehand to redirect output (e.g. the
-    /// monitor's partial-frame buffer).
+    // Dispatch a single Apple scanline (0..192) to the appropriate
+    // per-mode renderer using the captured `scanline_modes` /
+    // `scanline_80store` snapshot.
     fn dispatch_scanline(&mut self, iou: &IOU, mmu: &MMU, scanline: usize) {
         let mode = self.scanline_modes[scanline];
         let is_80store = self.scanline_80store[scanline];
@@ -344,8 +350,7 @@ impl Video {
 
         // Seed the partial buffer with the last completed framebuffer so
         // unrendered scanlines (and the border) carry over from the
-        // previous frame — matches what the user would expect to see on
-        // a real CRT mid-redraw.
+        // previous frame.
         self.monitor_partial_fb.copy_from_slice(&self.framebuffer);
 
         // Clamp + dim the un-executed region so the beam frontier is
@@ -365,10 +370,6 @@ impl Video {
             }
         }
 
-        // Re-render the executed scanlines into the partial buffer.
-        // Trick: swap framebuffers so the existing per-scanline renderers
-        // (which write to `self.framebuffer`) paint into the partial
-        // buffer instead, then swap back.
         std::mem::swap(&mut self.framebuffer, &mut self.monitor_partial_fb);
         for scanline in 0..up_to {
             self.dispatch_scanline(iou, mmu, scanline);
@@ -385,9 +386,9 @@ impl Video {
         for i in (3..self.framebuffer.len()).step_by(4) {
             self.framebuffer[i] = 255;
         }
-        // Drop any stale partial-frame buffer; it'll be re-allocated on
-        // demand at the new size next time the monitor needs it.
+
         self.monitor_partial_fb.clear();
+        self.raw_framebuffer.clear();
     }
 
     #[inline(always)]
@@ -1514,6 +1515,18 @@ impl Video {
 
     pub fn get_pixels(&self) -> &[u8] {
         &self.framebuffer
+    }
+
+    // Pre-effects framebuffer snapshot. Captured immediately after
+    // per-scanline rendering and before NTSC chroma blur / comb
+    // filter / phosphor spread / CPU scanlines are applied. Empty
+    // until the first frame has been composed.
+    pub fn get_raw_pixels(&self) -> &[u8] {
+        if self.raw_framebuffer.is_empty() {
+            &self.framebuffer
+        } else {
+            &self.raw_framebuffer
+        }
     }
 
     fn lores_color_lookup(&self, color: u8) -> [u8; 4] {

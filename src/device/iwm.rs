@@ -9,6 +9,115 @@ use super::smartport::SmartPort;
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum WozFormat { Woz1, Woz2, Unknown }
 
+fn convert_to_woz2_bytes(raw: &[u8], path: &str) -> anyhow::Result<Vec<u8>> {
+    use a2kit::img::{names, Track, Sector};
+    use a2kit::bios::Block;
+
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+
+    enum Src {
+        DO,
+        PO,
+        D13,
+        Nib,
+        TwoMg,
+    }
+    let src_kind = match ext.as_str() {
+        "do" => Src::DO,
+        "po" => Src::PO,
+        "d13" => Src::D13,
+        "nib" | "nb2" => Src::Nib,
+        "2mg" => Src::TwoMg,
+        "dsk" | "" => {
+            // 280 * 512 = 143360 bytes is also the size of a 16-sector
+            // DOS 3.3 disk, so size alone won't distinguish. Default to
+            // DO and let the sector copy path catch parse errors.
+            Src::DO
+        }
+        _ => anyhow::bail!("unrecognized 5.25\" image extension '.{}'", ext),
+    };
+
+    let raw_vec = raw.to_vec();
+    let mut src: Box<dyn DiskImage> = match src_kind {
+        Src::DO => match a2kit::img::dsk_do::DO::from_bytes(&raw_vec) {
+            Ok(img) => Box::new(img),
+            Err(_) => {
+                // likely a ProDOS-ordered file with a .dsk extension.
+                Box::new(
+                    a2kit::img::dsk_po::PO::from_bytes(&raw_vec)
+                        .map_err(|e| anyhow::anyhow!(format!("{:?}", e)))?,
+                )
+            }
+        },
+        Src::PO => Box::new(
+            a2kit::img::dsk_po::PO::from_bytes(&raw_vec)
+                .map_err(|e| anyhow::anyhow!(format!("{:?}", e)))?,
+        ),
+        Src::D13 => Box::new(
+            a2kit::img::dsk_d13::D13::from_bytes(&raw_vec)
+                .map_err(|e| anyhow::anyhow!(format!("{:?}", e)))?,
+        ),
+        Src::Nib => Box::new(
+            a2kit::img::nib::Nib::from_bytes(&raw_vec)
+                .map_err(|e| anyhow::anyhow!(format!("{:?}", e)))?,
+        ),
+        Src::TwoMg => Box::new(
+            a2kit::img::dot2mg::Dot2mg::from_bytes(&raw_vec)
+                .map_err(|e| anyhow::anyhow!(format!("{:?}", e)))?,
+        ),
+    };
+
+    let kind = src.kind();
+    let (sectors_per_track, is_dos32) = if kind == names::A2_DOS33_KIND {
+        (16usize, false)
+    } else if kind == names::A2_DOS32_KIND {
+        (13usize, true)
+    } else {
+        anyhow::bail!("unsupported 5.25\" disk kind for WOZ conversion: {}", kind);
+    };
+
+    let mut dst = a2kit::img::woz2::Woz2::create(254, kind, None, vec![])
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let mut sector_ok = true;
+    'outer: for t in 0..35usize {
+        for s in 0..sectors_per_track {
+            match src.read_sector(Track::Num(t), Sector::Num(s)) {
+                Ok(data) => {
+                    dst.write_sector(Track::Num(t), Sector::Num(s), &data)
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                }
+                Err(_) => {
+                    sector_ok = false;
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    if !sector_ok {
+        if is_dos32 {
+            anyhow::bail!("DOS 3.2 (.d13) image cannot be read sector-by-sector");
+        }
+        // Re-create dst so any partial writes from the failed sector
+        // pass don't linger.
+        dst = a2kit::img::woz2::Woz2::create(254, kind, None, vec![])
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        for b in 0..280usize {
+            let data = src.read_block(Block::PO(b))
+                .map_err(|e| anyhow::anyhow!(format!("read_block({}): {}", b, e)))?;
+            dst.write_block(Block::PO(b), &data)
+                .map_err(|e| anyhow::anyhow!(format!("write_block({}): {}", b, e)))?;
+        }
+    }
+
+    Ok(dst.to_bytes())
+}
+
 // Per-drive state
 struct DriveState {
     disk: Option<Box<dyn DiskImage>>,
@@ -23,7 +132,7 @@ struct DriveState {
     head_pos: u16, // Quarter tracks (track = head_pos / 4)
 
     track_data: Vec<u8>,
-    track_bit_count: usize, // Actual valid bits in track_data (may be less than track_data.len()*8 due to block-alignment padding)
+    track_bit_count: usize, // Actual valid bits in track_data
     loaded_track: Option<u8>,
 
     bit_index: usize,
@@ -463,9 +572,7 @@ impl Iwm {
             let f = &self.smartport.floppies[drive];
             let has_disk = f.has_disk();
             // The firmware toggles the IWM motor on/off during SmartPort bus
-            // exchanges (drive_select=1 selects the SmartPort port).  Use that
-            // hardware signal combined with recent-access tracking so the icon
-            // blinks naturally like 5.25" drives.
+            // exchanges (drive_select=1 selects the SmartPort port).
             let is_active = has_disk
                 && f.active_frames > 0
                 && self.motor_on
@@ -496,72 +603,121 @@ impl Iwm {
         if self.drives[drive].has_disk() {
             self.eject_disk(drive);
         }
-        let path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?;
+        let orig_path_str = path.as_ref().to_str().ok_or(anyhow::anyhow!("Invalid path"))?.to_string();
+
+        // Auto-load a sibling `.woz` sidecar if it exists
+        let sidecar_path = format!("{}.woz", orig_path_str);
+        let (effective_path, raw_bytes) = if std::path::Path::new(&sidecar_path).exists() {
+            let bytes = std::fs::read(&sidecar_path).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            log::info!("IWM: Loading WOZ sidecar '{}' for original '{}'", sidecar_path, orig_path_str);
+            (sidecar_path.clone(), bytes)
+        } else {
+            let bytes = std::fs::read(&orig_path_str).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            (orig_path_str.clone(), bytes)
+        };
 
         // Parse WOZ bit_counts from raw file before a2kit takes ownership
         self.drives[drive].woz_bit_counts = [0; 35];
         self.drives[drive].woz_tmap = [0xFF; 160];
         self.drives[drive].woz_format = WozFormat::Unknown;
         self.drives[drive].woz_raw.clear();
-        if let Ok(raw) = std::fs::read(path_str) {
-            if raw.len() > 256 && &raw[0..4] == b"WOZ1" {
-                self.drives[drive].woz_format = WozFormat::Woz1;
-                // WOZ1: TMAP at offset 88 (80+8), TRKS at offset 256 (248+8)
-                // Each Trk is 6656 bytes: 6646 bits + bytes_used(2) + bit_count(2) + 6 more
-                let tmap_offset = 88;
-                let trks_offset = 256;
-                let trk_size: usize = 6656;
-                if tmap_offset + 160 <= raw.len() {
-                    self.drives[drive].woz_tmap.copy_from_slice(&raw[tmap_offset..tmap_offset + 160]);
+
+        let raw: Vec<u8>;
+        let final_path_for_disk: String;
+        let mut converted = false;
+        if raw_bytes.len() > 256 && &raw_bytes[0..4] == b"WOZ1" {
+            raw = raw_bytes;
+            final_path_for_disk = effective_path;
+        } else if raw_bytes.len() > 1536 && &raw_bytes[0..4] == b"WOZ2" {
+            raw = raw_bytes;
+            final_path_for_disk = effective_path;
+        } else {
+            // non-WOZ: try in-memory conversion to WOZ2.
+            match convert_to_woz2_bytes(&raw_bytes, &orig_path_str) {
+                Ok(woz_bytes) => {
+                    log::info!(
+                        "IWM: Converted non-WOZ image '{}' to WOZ2 in memory ({} → {} bytes); writes will be saved to sidecar '{}'",
+                        orig_path_str, raw_bytes.len(), woz_bytes.len(), sidecar_path
+                    );
+                    raw = woz_bytes;
+                    final_path_for_disk = sidecar_path.clone();
+                    converted = true;
                 }
-                for track in 0..35u8 {
-                    let qt = (track * 4) as usize;
-                    if qt < 160 {
-                        let tmap_idx = raw[tmap_offset + qt] as usize;
-                        if tmap_idx != 0xFF {
-                            let bc_offset = trks_offset + tmap_idx * trk_size + 6648; // bit_count at +6648
-                            if bc_offset + 2 <= raw.len() {
-                                let bit_count = u16::from_le_bytes([raw[bc_offset], raw[bc_offset + 1]]) as u32;
-                                self.drives[drive].woz_bit_counts[track as usize] = bit_count;
-                            }
-                        }
-                    }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Unsupported 5.25\" disk image '{}': {}",
+                        orig_path_str, e
+                    ));
                 }
-                self.drives[drive].woz_raw = raw;
-            } else if raw.len() > 1536 && &raw[0..4] == b"WOZ2" {
-                self.drives[drive].woz_format = WozFormat::Woz2;
-                // WOZ2: TMAP at offset 96 (88+8), TRKS records at offset 264 (256+8)
-                // Each Trk record is 8 bytes: starting_block(2) + block_count(2) + bit_count(4)
-                let tmap_offset = 96;
-                let trks_offset = 264;
-                if tmap_offset + 160 <= raw.len() {
-                    self.drives[drive].woz_tmap.copy_from_slice(&raw[tmap_offset..tmap_offset + 160]);
-                }
-                for track in 0..35u8 {
-                    let qt = (track * 4) as usize;
-                    if qt < 160 {
-                        let tmap_idx = raw[tmap_offset + qt] as usize;
-                        if tmap_idx != 0xFF {
-                            let bc_offset = trks_offset + tmap_idx * 8 + 4;
-                            if bc_offset + 4 <= raw.len() {
-                                let bit_count = u32::from_le_bytes([
-                                    raw[bc_offset], raw[bc_offset + 1],
-                                    raw[bc_offset + 2], raw[bc_offset + 3],
-                                ]);
-                                self.drives[drive].woz_bit_counts[track as usize] = bit_count;
-                            }
-                        }
-                    }
-                }
-                self.drives[drive].woz_raw = raw;
             }
         }
 
-        log::debug!("IWM: Loaded drive {} disk '{}' woz_format={:?} woz_raw_len={}", 
-            drive + 1, path_str, self.drives[drive].woz_format, self.drives[drive].woz_raw.len());
+        if raw.len() > 256 && &raw[0..4] == b"WOZ1" {
+            self.drives[drive].woz_format = WozFormat::Woz1;
+            // WOZ1: TMAP at offset 88 (80+8), TRKS at offset 256 (248+8)
+            // Each Trk is 6656 bytes: 6646 bits + bytes_used(2) + bit_count(2) + 6 more
+            let tmap_offset = 88;
+            let trks_offset = 256;
+            let trk_size: usize = 6656;
+            if tmap_offset + 160 <= raw.len() {
+                self.drives[drive].woz_tmap.copy_from_slice(&raw[tmap_offset..tmap_offset + 160]);
+            }
+            for track in 0..35u8 {
+                let qt = (track * 4) as usize;
+                if qt < 160 {
+                    let tmap_idx = raw[tmap_offset + qt] as usize;
+                    if tmap_idx != 0xFF {
+                        let bc_offset = trks_offset + tmap_idx * trk_size + 6648; // bit_count at +6648
+                        if bc_offset + 2 <= raw.len() {
+                            let bit_count = u16::from_le_bytes([raw[bc_offset], raw[bc_offset + 1]]) as u32;
+                            self.drives[drive].woz_bit_counts[track as usize] = bit_count;
+                        }
+                    }
+                }
+            }
+            self.drives[drive].woz_raw = raw;
+        } else if raw.len() > 1536 && &raw[0..4] == b"WOZ2" {
+            self.drives[drive].woz_format = WozFormat::Woz2;
+            // WOZ2 uses the same chunk framing as WOZ1: 12-byte file
+            // header, then "TMAP" chunk header (8 bytes) at offset 80
+            // → payload at 88, then "TRKS" chunk header (8 bytes) at
+            // offset 248 → records start at 256. Each WOZ2 Trk record
+            // is 8 bytes: starting_block(2) + block_count(2) + bit_count(4).
+            let tmap_offset = 88;
+            let trks_offset = 256;
+            if tmap_offset + 160 <= raw.len() {
+                self.drives[drive].woz_tmap.copy_from_slice(&raw[tmap_offset..tmap_offset + 160]);
+            }
+            for track in 0..35u8 {
+                let qt = (track * 4) as usize;
+                if qt < 160 {
+                    let tmap_idx = raw[tmap_offset + qt] as usize;
+                    if tmap_idx != 0xFF {
+                        let bc_offset = trks_offset + tmap_idx * 8 + 4;
+                        if bc_offset + 4 <= raw.len() {
+                            let bit_count = u32::from_le_bytes([
+                                raw[bc_offset], raw[bc_offset + 1],
+                                raw[bc_offset + 2], raw[bc_offset + 3],
+                            ]);
+                            self.drives[drive].woz_bit_counts[track as usize] = bit_count;
+                        }
+                    }
+                }
+            }
+            self.drives[drive].woz_raw = raw;
+        }
 
-        self.drives[drive].disk = Some(a2kit::create_img_from_file(path_str).map_err(|e| anyhow::anyhow!(e.to_string()))?);
-        self.drives[drive].disk_path = Some(path_str.to_string());
+        log::debug!("IWM: Loaded drive {} disk '{}' woz_format={:?} woz_raw_len={} converted={}",
+            drive + 1, orig_path_str, self.drives[drive].woz_format,
+            self.drives[drive].woz_raw.len(), converted);
+
+        self.drives[drive].disk = Some(if converted {
+            a2kit::create_img_from_bytestream(&self.drives[drive].woz_raw, Some("woz"))
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?
+        } else {
+            a2kit::create_img_from_file(&final_path_for_disk).map_err(|e| anyhow::anyhow!(e.to_string()))?
+        });
+        self.drives[drive].disk_path = Some(final_path_for_disk);
         self.drives[drive].dirty = false;
         
         // Clear stale track data so new disk is read fresh
@@ -922,7 +1078,7 @@ impl Iwm {
                 }
             },
             WozFormat::Woz2 => {
-                let rec_offset = 264 + tmap_idx * 8;
+                let rec_offset = 256 + tmap_idx * 8;
                 if rec_offset + 8 > self.drives[d].woz_raw.len() { return None; }
                 let start_block = u16::from_le_bytes([
                     self.drives[d].woz_raw[rec_offset],
@@ -1100,8 +1256,10 @@ impl Iwm {
                     }
                 },
                 WozFormat::Woz2 => {
-                    // WOZ2: TRKS records at offset 264, each 8 bytes: starting_block(2) + block_count(2) + bit_count(4)
-                    let rec_offset = 264 + tmap_idx * 8;
+                    // WOZ2: TRKS records start at offset 256 (TRKS magic
+                    // at 248 + 8-byte chunk header). Each record is 8
+                    // bytes: starting_block(2) + block_count(2) + bit_count(4).
+                    let rec_offset = 256 + tmap_idx * 8;
                     if rec_offset + 4 <= self.drives[d].woz_raw.len() {
                         let start_block = u16::from_le_bytes([
                             self.drives[d].woz_raw[rec_offset],
@@ -1199,11 +1357,17 @@ impl Iwm {
         
         let d = self.di();
         if !self.drives[d].has_disk() {
-            // No disk: return floating bus value (video RAM data at current scan position).
-            // Real hardware: read head picks up noise; floating bus is a reasonable approximation.
-            // Bit 7 will randomly be set, allowing BPL loops to eventually exit.
-            if self.debug { println!("IWM: read_data() NO DISK on drive {} -> floating_bus {:02X}", d + 1, floating_bus); }
-            return floating_bus;
+            // No disk: real hardware sees head-amplifier self-oscillation noise
+            // on the read line, so the IWM's MSB-set detector trips roughly half
+            // the time. Floating bus alone is not a good proxy because text-mode
+            // video RAM bytes (e.g. the "Loading..." screen) all have MSB=0,
+            // which causes BPL polling loops to spin forever waiting for a
+            // valid nibble. Fold a "noise" bit into MSB so polls can fall
+            // through and the routine takes its "no sector found" error path.
+            let nibble_noise = (self.audio_cycle as u8) ^ floating_bus;
+            let value = (nibble_noise & 0x7F) | 0x80;
+            if self.debug { println!("IWM: read_data() NO DISK on drive {} -> noise {:02X} (fb {:02X})", d + 1, value, floating_bus); }
+            return value;
         }
 
         if self.motor_on {

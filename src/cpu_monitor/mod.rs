@@ -11,69 +11,73 @@ use panels::watches::WatchesPanelState;
 use panels::breakpoints::BreakpointSet;
 use panels::disassembly::DisassemblyPanelState;
 
-/// Borrowed view of the live emulator framebuffer for display in the Video
-/// pane. Pixels are tightly packed RGBA8 (4 bytes per pixel, row-major).
+// Borrowed view of the live emulator framebuffer for display in the Video
+// pane. Pixels are tightly packed RGBA8 (4 bytes per pixel, row-major).
 pub struct FramebufferView<'a> {
     pub pixels: &'a [u8],
     pub width: u32,
     pub height: u32,
 }
 
-/// Default height (px) of the bottom-pinned Trace and Video panes. They share
-/// this so their tops align across the Code and Memory columns.
+// Default height (px) of the bottom-pinned Trace and Video panes. They share
+// this so their tops align across the Code and Memory columns.
 const BOTTOM_PANE_HEIGHT: f32 = 280.0;
 
 pub struct CpuMonitor {
-    /// Whether the monitor is actively capturing traces.
+    // Whether the monitor is actively capturing traces.
     pub enabled: bool,
-    /// Whether the monitor window should be visible.
+    // Whether the monitor window should be visible.
     pub visible: bool,
 
-    /// Ring buffer of recent trace entries. Still recorded for stats and
-    /// future trace exports; the in-window trace panel was removed in favor
-    /// of the main-view trace overlay.
+    // Ring buffer of recent trace entries. Still recorded for stats and
+    // future trace exports; the in-window trace panel was removed in favor
+    // of the main-view trace overlay.
     pub trace_buffer: VecDeque<CpuTraceEntry>,
 
-    /// Auto-scroll trace view to bottom (kept for compatibility with the
-    /// main-view trace overlay).
+    // Auto-scroll trace view to bottom (kept for compatibility with the
+    // main-view trace overlay).
     pub auto_scroll: bool,
 
-    /// Pause emulation (drained by main loop).
+    // Pause emulation (drained by main loop).
     pub paused: bool,
 
-    /// When `true`, the breakpoint check in the main loop will skip the
-    /// *next* instruction even if its PC matches a breakpoint, then
-    /// re-arm. Set when resuming from a halt-on-breakpoint or stepping
-    /// over the BP'd instruction so Run/Step actually makes forward
-    /// progress instead of re-tripping the same BP immediately.
+    // When `true`, the breakpoint check in the main loop will skip the
+    // *next* instruction even if its PC matches a breakpoint, then
+    // re-arm. Set when resuming from a halt-on-breakpoint or stepping
+    // over the BP'd instruction so Run/Step actually makes forward
+    // progress instead of re-tripping the same BP immediately.
     pub skip_next_breakpoint: bool,
 
-    /// Number of `cpu.tick()`s to execute while paused (drained by main loop).
+    // Number of `cpu.tick()`s to execute while paused (drained by main loop).
     pub pending_steps: u32,
 
-    /// Sticky flag: `true` while the current paused snapshot of
-    /// `scan_cycle` reflects an actual single-instruction sample (i.e.
-    /// the user just stepped, or the CPU halted on a breakpoint mid-
-    /// frame). Cleared the moment the user resumes execution. The IOU
-    /// scan-position bar consults this to decide whether to show its
-    /// L<line>.<cyc> readout: while free-running every snapshot lands
-    /// on a frame boundary so the value is misleading drift, but step
-    /// samples are accurate to the cycle.
+    // Sticky flag: `true` while the current paused snapshot of
+    // `scan_cycle` reflects an actual single-instruction sample (i.e.
+    // the user just stepped, or the CPU halted on a breakpoint mid-
+    // frame). Cleared the moment the user resumes execution. The IOU
+    // scan-position bar consults this to decide whether to show its
+    // L<line>.<cyc> readout: while free-running every snapshot lands
+    // on a frame boundary so the value is misleading drift, but step
+    // samples are accurate to the cycle.
     pub fresh_step_sample: bool,
 
-    /// Right-pane collapsing-section state.
+    // Right-pane collapsing-section state.
     pub watches_open: bool,
     pub breakpoints_open: bool,
 
-    /// Per-panel state.
+    // Per-panel state.
     pub memory: MemoryPanelState,
     pub watches: WatchesPanelState,
     pub disasm: DisassemblyPanelState,
     pub breakpoints: BreakpointSet,
 
-    /// Cached egui texture mirroring the emulator framebuffer for the Video
-    /// pane preview. Lazily created; reuploaded each frame.
+    // Cached egui texture mirroring the emulator framebuffer for the Video
+    // pane preview. Lazily created; reuploaded each frame.
     fb_texture: Option<egui::TextureHandle>,
+
+    // `true` → Video pane shows the raw pre-effects framebuffer;
+    // `false` (default) → final processed framebuffer.
+    fb_show_raw: bool,
 }
 
 impl Default for CpuMonitor {
@@ -94,6 +98,7 @@ impl Default for CpuMonitor {
             disasm: DisassemblyPanelState::default(),
             breakpoints: BreakpointSet::default(),
             fb_texture: None,
+            fb_show_raw: false,
         }
     }
 }
@@ -109,17 +114,17 @@ impl CpuMonitor {
         self.enabled = self.visible;
     }
 
-    /// Drop GPU/egui resources tied to a specific egui context. Call when
-    /// the monitor's OS window is closed so a stale `TextureHandle` from
-    /// the old context isn't reused after the window reopens with a new
-    /// context.
+    // Drop GPU/egui resources tied to a specific egui context. Call when
+    // the monitor's OS window is closed so a stale `TextureHandle` from
+    // the old context isn't reused after the window reopens with a new
+    // context.
     pub fn on_window_closed(&mut self) {
         self.fb_texture = None;
     }
 
-    /// Record a trace entry. Called both during free-running execution
-    /// (once per frame from `cpu.last_trace`) and per-instruction during
-    /// paused single-stepping.
+    // Record a trace entry. Called both during free-running execution
+    // (once per frame from `cpu.last_trace`) and per-instruction during
+    // paused single-stepping.
     #[inline]
     pub fn record(&mut self, entry: CpuTraceEntry) {
         if !self.enabled {
@@ -135,7 +140,7 @@ impl CpuMonitor {
         self.trace_buffer.clear();
     }
 
-    /// Read & reset the disasm cache hit/miss counters (for `--perf`).
+    // Read & reset the disasm cache hit/miss counters (for `--perf`).
     pub fn take_disasm_cache_stats(&mut self) -> (u64, u64) {
         let stats = (self.disasm.cache_hits, self.disasm.cache_misses);
         self.disasm.cache_hits = 0;
@@ -153,7 +158,7 @@ impl CpuMonitor {
         std::mem::take(&mut self.pending_steps)
     }
 
-    /// Render the monitor window. Returns whether the window is still open.
+    // Render the monitor window. Returns whether the window is still open.
     #[allow(dead_code)]
     pub fn render(
         &mut self,
@@ -184,7 +189,7 @@ impl CpuMonitor {
             .hscroll(false)
             .show(ctx, |ui| {
                 let devs = DevicesSnapshot::default();
-                self.render_body(ui, cpu_state, iou, &devs, memory_reader, None);
+                self.render_body(ui, cpu_state, iou, &devs, memory_reader, None, None);
             });
 
         self.visible = open;
@@ -196,9 +201,9 @@ impl CpuMonitor {
         open
     }
 
-    /// Render the monitor contents directly into a Ui, without an
-    /// egui::Window wrapper. Used when the monitor lives in its own
-    /// OS-level window.
+    // Render the monitor contents directly into a Ui, without an
+    // egui::Window wrapper. Used when the monitor lives in its own
+    // OS-level window.
     pub fn render_inline(
         &mut self,
         ui: &mut egui::Ui,
@@ -207,8 +212,9 @@ impl CpuMonitor {
         devices: &DevicesSnapshot,
         memory_reader: &dyn Fn(u16) -> u8,
         framebuffer: Option<FramebufferView<'_>>,
+        framebuffer_raw: Option<FramebufferView<'_>>,
     ) {
-        self.render_body(ui, cpu_state, iou, devices, memory_reader, framebuffer);
+        self.render_body(ui, cpu_state, iou, devices, memory_reader, framebuffer, framebuffer_raw);
     }
 
     fn render_body(
@@ -219,6 +225,7 @@ impl CpuMonitor {
         devices: &DevicesSnapshot,
         memory_reader: &dyn Fn(u16) -> u8,
         framebuffer: Option<FramebufferView<'_>>,
+        framebuffer_raw: Option<FramebufferView<'_>>,
     ) {
         // The monitor displays many fields that change every CPU tick
         // (scan_cycle, cycle counter, $C0xx access log, audio scopes…).
@@ -330,17 +337,43 @@ impl CpuMonitor {
                         panels::memory::render(ui, &mut self.memory, memory_reader);
                     });
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 0)))
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 0 }))
                     .show_inside(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Video").strong());
                             ui.add_space(8.0);
                             panels::iou::scan_position_bar(ui, iou, self.fresh_step_sample);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.selectable_value(
+                                        &mut self.fb_show_raw,
+                                        true,
+                                        "Raw",
+                                    )
+                                    .on_hover_text(
+                                        "Pre-effects framebuffer (no NTSC blur, comb filter, phosphor spread, or scanlines).",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.fb_show_raw,
+                                        false,
+                                        "Processed",
+                                    )
+                                    .on_hover_text(
+                                        "Final CPU-side framebuffer fed to the GPU shader.",
+                                    );
+                                },
+                            );
                         });
                         ui.separator();
                         panels::iou::render_video_pane(ui, iou);
                         ui.add_space(4.0);
-                        self.render_framebuffer(ui, framebuffer.as_ref());
+                        let fb_to_show = if self.fb_show_raw {
+                            framebuffer_raw.as_ref().or(framebuffer.as_ref())
+                        } else {
+                            framebuffer.as_ref()
+                        };
+                        self.render_framebuffer(ui, fb_to_show);
                     });
             });
     }
@@ -527,10 +560,10 @@ impl CpuMonitor {
             ui.ctx().load_texture(
                 "cpu_monitor_framebuffer",
                 image.clone(),
-                egui::TextureOptions::NEAREST,
+                egui::TextureOptions::LINEAR,
             )
         });
-        tex.set(image, egui::TextureOptions::NEAREST);
+        tex.set(image, egui::TextureOptions::LINEAR);
 
         // Fit into available space preserving aspect ratio.
         let avail = ui.available_size();

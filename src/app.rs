@@ -994,6 +994,7 @@ impl App {
         } else {
             self.cpu.bus.video.get_pixels().to_vec()
         };
+        let fb_raw_pixels: Vec<u8> = self.cpu.bus.video.get_raw_pixels().to_vec();
         if let Some(ref mut mw) = mw {
             let cpu_monitor = &mut self.cpu_monitor;
             mw.redraw(|ctx| {
@@ -1016,6 +1017,11 @@ impl App {
                             width: fb_w,
                             height: fb_h,
                         };
+                        let fb_raw_view = crate::cpu_monitor::FramebufferView {
+                            pixels: &fb_raw_pixels,
+                            width: fb_w,
+                            height: fb_h,
+                        };
                         cpu_monitor.render_inline(
                             ui,
                             &cpu_state,
@@ -1023,6 +1029,7 @@ impl App {
                             &devices_snapshot,
                             &memory_reader,
                             Some(fb_view),
+                            Some(fb_raw_view),
                         );
                     });
             });
@@ -1042,7 +1049,10 @@ impl App {
                 
                 let file = if drive < 2 {
                     rfd::FileDialog::new()
-                        .add_filter("WOZ Disk Image", &["woz"])
+                        .add_filter(
+                            "5.25\" Disk Image",
+                            &["woz", "dsk", "do", "po", "d13", "nib", "nb2", "2mg"],
+                        )
                         .pick_file()
                 } else {
                     rfd::FileDialog::new()
@@ -1568,7 +1578,10 @@ impl App {
         event: &winit::event::KeyEvent,
         egui_consumed: bool,
     ) {
-        if event.logical_key == Key::Named(NamedKey::F2) && event.state.is_pressed() {
+        if event.logical_key == Key::Named(NamedKey::F8)
+            && event.state.is_pressed()
+            && !self.modifiers.control_key()
+        {
             self.show_settings_window = !self.show_settings_window;
             if self.show_settings_window {
                 self.settings_state.just_opened = true;
@@ -1577,7 +1590,10 @@ impl App {
             return;
         }
 
-        if event.logical_key == Key::Named(NamedKey::F7) && event.state.is_pressed() {
+        if event.logical_key == Key::Named(NamedKey::F7)
+            && event.state.is_pressed()
+            && self.modifiers.control_key()
+        {
             if self.shader_type != ShaderType::None {
                 self.show_shader_ui = !self.show_shader_ui;
                 if self.show_shader_ui {
@@ -1591,7 +1607,10 @@ impl App {
             return;
         }
 
-        if event.logical_key == Key::Named(NamedKey::F8) && event.state.is_pressed() {
+        if event.logical_key == Key::Named(NamedKey::F8)
+            && event.state.is_pressed()
+            && self.modifiers.control_key()
+        {
             self.show_drive_audio_ui = !self.show_drive_audio_ui;
             if self.show_drive_audio_ui {
                 self.release_mouse();
@@ -1600,6 +1619,28 @@ impl App {
                 "Drive Audio UI: {}",
                 if self.show_drive_audio_ui { "ON" } else { "OFF" }
             );
+            return;
+        }
+
+        // F1–F4: open file dialog for drive 1, 2, 3.5" #1, 3.5" #2.
+        // We piggy-back on the existing toolbar double-click pipeline by
+        // back-dating the click so handle_redraw fires the dialog on the
+        // next pass.
+        let drive_key = match event.logical_key {
+            Key::Named(NamedKey::F1) => Some(0_usize),
+            Key::Named(NamedKey::F2) => Some(1),
+            Key::Named(NamedKey::F3) => Some(2),
+            Key::Named(NamedKey::F4) => Some(3),
+            _ => None,
+        };
+        if let Some(drive) = drive_key {
+            if event.state.is_pressed() {
+                self.last_drive_click = Some((
+                    drive,
+                    Instant::now() - Duration::from_millis(500),
+                ));
+                self.release_mouse();
+            }
             return;
         }
 
@@ -1814,11 +1855,7 @@ impl App {
 
         if event.state.is_pressed() {
             match event.logical_key {
-                Key::Named(NamedKey::F1) => {
-                    println!("F1 Pressed: Entering Monitor Mode");
-                    run_monitor_mode(&mut self.cpu);
-                }
-                Key::Named(NamedKey::F3) => {
+                Key::Named(NamedKey::F5) => {
                     let current = self.cpu.bus.video.monochrome;
                     self.cpu.bus.video.set_monochrome(!current);
                     self.power_on_time = Instant::now();
@@ -1834,7 +1871,7 @@ impl App {
                         window.request_redraw();
                     }
                 }
-                Key::Named(NamedKey::F10) => {
+                Key::Named(NamedKey::F10) if self.modifiers.control_key() => {
                     let new_debug_state = !self.cpu.debug;
                     self.cpu.debug = new_debug_state;
                     self.cpu.bus.debug = new_debug_state;
