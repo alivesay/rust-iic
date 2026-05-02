@@ -10,7 +10,7 @@ A cycle-accurate Apple //c emulator.
 | Memory | 128 KB RAM, 32 KB ROM, 1 MB expansion (slot 4) |
 | Text | 40 / 80 column, 24 lines |
 | Graphics | Lo-Res 40x48 (16 colors), Hi-Res 280x192 (6 colors), Double Hi-Res 560x192 (16 colors), Mixed mode, NTSC |
-| Display | CRT (monochrome/color), LCD|
+| Display | CRT (monochrome/color), LCD |
 | Sound | Speaker, up to 2x Mockingboard (4x AY-3-8910) |
 | Storage | 2x 5.25" floppy (WOZ / DOS / ProDOS / nibble / 2mg), 2x 3.5" SmartPort floppy, 2x SmartPort hard disk (HDV) |
 | Input | Keyboard, mouse, paddles |
