@@ -137,6 +137,9 @@ fn main() -> Result<(), Error> {
 
     if !args.mockingboard2 {
         println!("slot4 {:>12} {:>8}    1024 KB Slinky", "MEMEXP", "ONLINE");
+        // Battery-backed RAM
+        let path = crate::config::memexp_path();
+        cpu.bus.iou.memexp.load_from_file(&path);
     }
 
     // Mockingboard sound card in slot 5
@@ -466,6 +469,9 @@ fn run_gui(
                 diag_audio_us += audio_start.elapsed().as_micros() as u64;
 
                 app.cpu.bus.iou.paddle.poll();
+
+                // Battery-backed RAM expansion: opportunistic flush
+                app.maybe_flush_memexp();
             }
 
             if let Some(addr) = hit_breakpoint {

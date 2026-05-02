@@ -70,8 +70,6 @@ impl Mouse {
         self.y.set(0);
         self.button0.set(false);
         self.button1.set(false);
-        self.open_apple.set(false);
-        self.solid_apple.set(false);
         self.x_dir.set(false);
         self.y_dir.set(false);
         self.x0.set(false);

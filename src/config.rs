@@ -140,6 +140,13 @@ pub fn config_path() -> PathBuf {
     PathBuf::from("rust-iic.toml")
 }
 
+// `$HOME/.config/rust-iic/memexp.bin`: battery-backed RAM image
+pub fn memexp_path() -> PathBuf {
+    let mut p = config_path();
+    p.set_file_name("memexp.bin");
+    p
+}
+
 impl Config {
     pub fn load() -> Self {
         Self::load_from(&config_path())

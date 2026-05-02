@@ -73,6 +73,7 @@ pub struct App {
     pub window_aspect_ratio: f64,
     pub last_resize_time: Option<Instant>,
     pub frame_progress: FrameProgress,
+    pub last_memexp_flush: Instant,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -139,6 +140,7 @@ impl App {
             window_aspect_ratio: 1.0,
             last_resize_time: None,
             frame_progress: FrameProgress::default(),
+            last_memexp_flush: Instant::now(),
         }
     }
 
@@ -177,6 +179,25 @@ impl App {
         self.cpu.bus.iou.iwm.eject_disk(0);
         self.cpu.bus.iou.iwm.eject_disk(1);
         self.cpu.bus.iou.iwm.smartport.flush_all();
+        // Persist battery-backed RAM expansion image (RAM Express II+).
+        self.cpu.bus.iou.memexp.save_to_file(&crate::config::memexp_path());
+        self.last_memexp_flush = Instant::now();
+    }
+
+    // Periodically flush the memory-expansion image if it's been
+    // modified. Called from the frame loop. Real RAM Express II+ cards
+    // are battery-backed and survive instant power loss; we approximate
+    // that by writing dirty RAM to disk every few seconds.
+    pub fn maybe_flush_memexp(&mut self) {
+        const INTERVAL: Duration = Duration::from_secs(5);
+        if !self.cpu.bus.iou.memexp.is_dirty() {
+            return;
+        }
+        if self.last_memexp_flush.elapsed() < INTERVAL {
+            return;
+        }
+        self.cpu.bus.iou.memexp.flush_if_dirty(&crate::config::memexp_path());
+        self.last_memexp_flush = Instant::now();
     }
 
     pub fn apply_audio_config(&self) {
@@ -196,6 +217,30 @@ impl App {
 
         self.cpu.bus.video.shader_enabled = self.shader_type != ShaderType::None;
         self.cpu.bus.video.force_neutral_mono = self.shader_type == ShaderType::Lcd;
+
+        // Recompute the window aspect ratio so the next user resize
+        // snaps to the shader's native aspect (CRT 4:3-ish vs LCD's
+        // squashed flat-panel proportions).
+        let (src_w_native, _) = self.cpu.bus.video.get_dimensions();
+        let native_h = self.cpu.bus.video.get_dimensions().1 / 2;
+        let aspect_correction = match self.shader_type {
+            ShaderType::Lcd => LcdRenderer::LCD_ASPECT_CORRECTION as f64,
+            _ => CrtRenderer::CRT_ASPECT_CORRECTION as f64,
+        };
+        let base_w = src_w_native as f64;
+        let base_h = native_h as f64 * 2.0 * aspect_correction;
+        let new_aspect = base_w / base_h;
+        if (new_aspect - self.window_aspect_ratio).abs() > 0.001 && !self.is_fullscreen {
+            self.window_aspect_ratio = new_aspect;
+            // Resize the window to match the new aspect, keeping the
+            // current width and recomputing height from it.
+            let scale = window.scale_factor();
+            let cur_w_logical = self.surface_width as f64 / scale;
+            let new_h_logical = cur_w_logical / new_aspect;
+            let _ = window.request_inner_size(LogicalSize::new(cur_w_logical, new_h_logical));
+        } else {
+            self.window_aspect_ratio = new_aspect;
+        }
 
         self.post_processor = None;
         self.egui_renderer = None;
