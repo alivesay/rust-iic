@@ -55,21 +55,16 @@ impl Source for WelcomeSource {
                  archives, dialed from inside an emulated  \r\n\
                  Apple //c.  Type a hotkey at the main     \r\n\
                  menu to enter a section, B to back out.   \r\n\
-                                                           \r\n\
-                 Future doors:                             \r\n\
-                   F  asimov.net disk archive (binary)     \r\n\
-                   T  textfiles.com (text streaming)       \r\n\
-                   N  news    (coming soon)                \r\n\
-                   C  chat    (coming soon)                \r\n"
+                                                           \r\n"
                     .to_string(),
             )),
             "phrack" => Ok(Blob::Text(
                 "                                          \r\n\
-                 \"...there is a place where the dialup    \r\n\
-                  never dies, and the carrier never        \r\n\
-                  drops.  i was there.\"                   \r\n\
-                                                           \r\n\
-                              -- the mentor (probably)     \r\n"
+                    My name is Ozymandias, king of kings: \r\n\
+                    Look on my works, ye mighty, and despair! \r\n\
+                    Nothing beside remains. Round the decay \r\n\
+                    Of that colossal wreck, boundless and bare \r\n\
+                    The lone and level sands stretch far away.\r\n"
                     .to_string(),
             )),
             other => anyhow::bail!("no such file: {}", other),
