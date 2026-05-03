@@ -2,7 +2,7 @@
 
 A cycle-accurate Apple //c emulator.
 
-## Specifications
+## Specs
 
 | | |
 |---|---|
@@ -40,6 +40,7 @@ Requires a Rust toolchain and a working GPU (Metal/Vulkan/DX12).
 | `--zip` | ZIP CHIP II-8 |
 | `--mouse`, `--paddle` | Input devices |
 | `--serial host:port`, `--modem` | Serial / modem |
+| `--bbs` | Boot to BBS |
 
 Run with `--help` for the full list.
 
@@ -63,6 +64,7 @@ Note: Non-WOZ 5.25" images are converted to WOZ and saved to working sidecar `<f
 | Ctrl+F7 | Shader settings |
 | Ctrl+F8 | Drive audio |
 | Ctrl+F10 | Debug logging |
+| Ctrl+F11 | Reboot to BBS |
 | F12 | CPU monitor |
 | Cmd+Enter | Fullscreen |
 | Ctrl+Backspace | Soft reset |
