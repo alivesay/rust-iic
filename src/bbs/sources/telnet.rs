@@ -9,10 +9,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 const PHONEBOOK: &[(&str, &str, u16)] = &[
     ("TELEHACK", "telehack.com", 23),
+    ("ISCABBS", "bbs.iscabbs.com", 23),
     ("FOZZTEXX", "bbs.fozztexx.com", 23),
     ("A-NET", "bbs.a-net.online", 1337),
+    ("DURA-BBS", "dura-bbs.net", 6359),
+    ("WACBBS", "wacbbs.ddns.net", 6502),
     ("HEATWAVE", "heatwave.ddns.net", 9640),
-    ("WUNDERNET", "towel.blinkenlights.nl", 23),
+    ("CAPTAINS", "cqbbs.ddns.net", 6800),
+    ("PRO-KEGS", "proline.ksherlock.com", 6523)
 ];
 
 pub struct TelnetSource;
