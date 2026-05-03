@@ -74,6 +74,7 @@ pub struct App {
     pub last_resize_time: Option<Instant>,
     pub frame_progress: FrameProgress,
     pub last_memexp_flush: Instant,
+    pub bbs_handle: Option<crate::bbs::BbsHandle>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -141,6 +142,7 @@ impl App {
             last_resize_time: None,
             frame_progress: FrameProgress::default(),
             last_memexp_flush: Instant::now(),
+            bbs_handle: None,
         }
     }
 
@@ -179,15 +181,11 @@ impl App {
         self.cpu.bus.iou.iwm.eject_disk(0);
         self.cpu.bus.iou.iwm.eject_disk(1);
         self.cpu.bus.iou.iwm.smartport.flush_all();
-        // Persist battery-backed RAM expansion image (RAM Express II+).
+        // persist battery-backed RAM expansion image (RAM Express II+)
         self.cpu.bus.iou.memexp.save_to_file(&crate::config::memexp_path());
         self.last_memexp_flush = Instant::now();
     }
 
-    // Periodically flush the memory-expansion image if it's been
-    // modified. Called from the frame loop. Real RAM Express II+ cards
-    // are battery-backed and survive instant power loss; we approximate
-    // that by writing dirty RAM to disk every few seconds.
     pub fn maybe_flush_memexp(&mut self) {
         const INTERVAL: Duration = Duration::from_secs(5);
         if !self.cpu.bus.iou.memexp.is_dirty() {
@@ -198,6 +196,74 @@ impl App {
         }
         self.cpu.bus.iou.memexp.flush_if_dirty(&crate::config::memexp_path());
         self.last_memexp_flush = Instant::now();
+    }
+
+    pub fn poll_bbs_events(&mut self) {
+        let Some(handle) = self.bbs_handle.as_ref() else { return };
+        loop {
+            match handle.events.try_recv() {
+                Ok(crate::bbs::BbsEvent::DownloadCompleted { name, path, .. }) => {
+                    log::info!("bbs: saved {} -> {}", name, path.display());
+                }
+                Ok(crate::bbs::BbsEvent::DownloadFailed { name, error }) => {
+                    log::warn!("bbs: download {} failed: {}", name, error);
+                }
+                Ok(crate::bbs::BbsEvent::Disconnected) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    pub fn boot_into_bbs(&mut self) {
+        if self.bbs_handle.is_none() {
+            match crate::bbs::start() {
+                Ok(handle) => {
+                    println!("bbs   {:>12} {:>8}    {}", "BBS", "ONLINE", handle.addr);
+                    self.bbs_handle = Some(handle);
+                }
+                Err(e) => {
+                    eprintln!("bbs   {:>12} {:>8}    {}", "BBS", "ERROR", e);
+                    return;
+                }
+            }
+        }
+
+        let port = match self.bbs_handle.as_ref() {
+            Some(h) => h.addr.port(),
+            None => return,
+        };
+
+        let term = std::path::Path::new("disks/rustiic_term.dsk");
+        if term.exists() {
+            match self.cpu.bus.iou.iwm.load_disk(term.to_string_lossy().to_string()) {
+                Ok(()) => println!(
+                    "disk  {:>12} {:>8}    {}",
+                    "5.25_D1", "LOADED", term.display()
+                ),
+                Err(e) => eprintln!(
+                    "disk  {:>12} {:>8}    {}: {}",
+                    "5.25_D1", "ERROR", term.display(), e
+                ),
+            }
+        } else {
+            eprintln!(
+                "bbs   {:>12} {:>8}    {} not found; run `make` in asm/ first",
+                "TERMDISK", "MISSING", term.display()
+            );
+        }
+
+        self.cpu.bus.iou.scc.ch_a.line_baud = 115200;
+        self.cpu.bus.iou.set_zip_enabled(true);
+        let addr = format!("127.0.0.1:{}", port);
+        if let Err(e) = self.cpu.bus.iou.scc.ch_a.dial_loopback(port) {
+            eprintln!("bbs   {:>12} {:>8}    dial: {}", "BBS", "ERROR", e);
+        } else {
+            println!("bbs   {:>12} {:>8}    {}", "BBS_DIAL", "CONNECT", addr);
+        }
+
+        println!("Ctrl+F11: rebooting into BBS");
+        self.cpu.bus.write_byte(0x03F4, 0x00);
+        self.cpu.reset();
     }
 
     pub fn apply_audio_config(&self) {
@@ -218,9 +284,7 @@ impl App {
         self.cpu.bus.video.shader_enabled = self.shader_type != ShaderType::None;
         self.cpu.bus.video.force_neutral_mono = self.shader_type == ShaderType::Lcd;
 
-        // Recompute the window aspect ratio so the next user resize
-        // snaps to the shader's native aspect (CRT 4:3-ish vs LCD's
-        // squashed flat-panel proportions).
+        // recompute window aspect ratio
         let (src_w_native, _) = self.cpu.bus.video.get_dimensions();
         let native_h = self.cpu.bus.video.get_dimensions().1 / 2;
         let aspect_correction = match self.shader_type {
@@ -232,8 +296,7 @@ impl App {
         let new_aspect = base_w / base_h;
         if (new_aspect - self.window_aspect_ratio).abs() > 0.001 && !self.is_fullscreen {
             self.window_aspect_ratio = new_aspect;
-            // Resize the window to match the new aspect, keeping the
-            // current width and recomputing height from it.
+
             let scale = window.scale_factor();
             let cur_w_logical = self.surface_width as f64 / scale;
             let new_h_logical = cur_w_logical / new_aspect;
@@ -308,15 +371,9 @@ impl App {
             pp.resize(pixels.device(), pixels.queue(), surface_w, surface_h);
         }
 
-        // Recreate the egui Context too. Sharing the old Context with a
-        // freshly-built winit State causes emath::History to panic with
-        // "Time shouldn't move backwards" because the context retains
-        // frame-time history from the previous pipeline while the new
-        // State starts a fresh time origin.
+
         self.egui_ctx = egui::Context::default();
-        // Texture handles below are owned by the old context; they
-        // would be invalid against the new one. They get re-loaded
-        // lazily on the next toolbar render.
+
         self.drive_icons = None;
         self.toolbar_labels = None;
 
@@ -680,8 +737,8 @@ impl winit::application::ApplicationHandler for App {
             }
 
             WindowEvent::Resized(size) => {
-                if size.width > 0 && size.height > 0 {
-                    if size.width != self.surface_width || size.height != self.surface_height {
+                if size.width > 0 && size.height > 0
+                    && (size.width != self.surface_width || size.height != self.surface_height) {
                         self.surface_width = size.width;
                         self.surface_height = size.height;
 
@@ -708,7 +765,6 @@ impl winit::application::ApplicationHandler for App {
                             window.request_redraw();
                         }
                     }
-                }
             }
 
             WindowEvent::ScaleFactorChanged { .. } => {
@@ -1047,7 +1103,7 @@ impl App {
                     .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
                     .show(ctx, |ui| {
                         let memory_reader = |addr: u16| -> u8 {
-                            if addr >= 0x0100 && addr < 0x0200 {
+                            if (0x0100..0x0200).contains(&addr) {
                                 memory_snapshot[(addr - 0x0100) as usize]
                             } else if addr >= page_base && addr < page_base + 256 {
                                 memory_snapshot[256 + (addr - page_base) as usize]
@@ -1667,10 +1723,7 @@ impl App {
             return;
         }
 
-        // F1–F4: open file dialog for drive 1, 2, 3.5" #1, 3.5" #2.
-        // We piggy-back on the existing toolbar double-click pipeline by
-        // back-dating the click so handle_redraw fires the dialog on the
-        // next pass.
+        // F1–F4: open file dialog for drive 1, 2, 3.5" #1, 3.5" #2
         let drive_key = match event.logical_key {
             Key::Named(NamedKey::F1) => Some(0_usize),
             Key::Named(NamedKey::F2) => Some(1),
@@ -1824,6 +1877,15 @@ impl App {
                             KeyCode::KeyX => Some(0x18),
                             KeyCode::KeyY => Some(0x19),
                             KeyCode::KeyZ => Some(0x1A),
+                            KeyCode::BracketLeft => Some(0x1B),
+                            KeyCode::Backslash => Some(0x1C),
+                            KeyCode::BracketRight => Some(0x1D),
+                            // Ctrl-6 = RS ($1E), Ctrl-- = US ($1F)
+                            // Ctrl-Space / Ctrl-2 = NUL ($00)
+                            KeyCode::Digit6 => Some(0x1E),
+                            KeyCode::Minus => Some(0x1F),
+                            KeyCode::Digit2 => Some(0x00),
+                            KeyCode::Space => Some(0x00),
                             _ => None,
                         };
                         if ctrl_code.is_some() {
@@ -1837,6 +1899,7 @@ impl App {
                 } else {
                     if let Some(virtual_key) = event.logical_key.to_text() {
                         let key_char = virtual_key.chars().next().unwrap_or('\0');
+ 
                         Some(key_char.to_ascii_uppercase() as u8)
                     } else {
                         None
@@ -1926,6 +1989,9 @@ impl App {
                         "Debug Logging: {}",
                         if new_debug_state { "ON" } else { "OFF" }
                     );
+                }
+                Key::Named(NamedKey::F11) if self.modifiers.control_key() => {
+                    self.boot_into_bbs();
                 }
                 _ => {}
             }

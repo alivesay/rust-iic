@@ -3,6 +3,7 @@ mod macros;
 
 mod app;
 mod audio_mixer;
+mod bbs;
 mod bus;
 mod cli;
 mod config;
@@ -239,6 +240,55 @@ fn main() -> Result<(), Error> {
         }
     }
 
+    // --bbs: spin up the loopback BBS
+    let mut bbs_handle: Option<bbs::BbsHandle> = None;
+    if args.bbs {
+        match bbs::start() {
+            Ok(handle) => {
+                let port = handle.addr.port();
+                println!("bbs   {:>12} {:>8}    {}", "BBS", "ONLINE", handle.addr);
+
+                // auto-mount the terminal boot disk
+                if args.disk.is_none() {
+                    let term = std::path::Path::new("disks/rustiic_term.dsk");
+                    if term.exists() {
+                        match cpu.bus.iou.iwm.load_disk(term.to_string_lossy().to_string()) {
+                            Ok(()) => println!(
+                                "disk  {:>12} {:>8}    {}",
+                                "5.25_D1", "LOADED", term.display()
+                            ),
+                            Err(e) => eprintln!(
+                                "disk  {:>12} {:>8}    {}: {}",
+                                "5.25_D1", "ERROR", term.display(), e
+                            ),
+                        }
+                    } else {
+                        eprintln!(
+                            "bbs   {:>12} {:>8}    {} not found; run `make` in asm/ first",
+                            "TERMDISK", "MISSING", term.display()
+                        );
+                    }
+                }
+
+                cpu.bus.iou.scc.ch_a.debug = args.debug;
+                cpu.bus.iou.scc.ch_a.line_baud = 115200;
+                cpu.bus.iou.set_zip_enabled(true);
+                println!("accel {:>12} {:>8}    8 MHz (BBS auto-enabled)", "ZIP_II-8", "ONLINE");
+                let addr = format!("127.0.0.1:{}", port);
+                if let Err(e) = cpu.bus.iou.scc.ch_a.dial_loopback(port) {
+                    eprintln!("bbs   {:>12} {:>8}    dial: {}", "BBS", "ERROR", e);
+                } else {
+                    println!("bbs   {:>12} {:>8}    {}", "BBS_DIAL", "CONNECT", addr);
+                }
+
+                bbs_handle = Some(handle);
+            }
+            Err(e) => {
+                eprintln!("bbs   {:>12} {:>8}    {}", "BBS", "ERROR", e);
+            }
+        }
+    }
+
     // Monitor mode
     if args.monitor {
         run_monitor_mode(&mut cpu);
@@ -251,7 +301,7 @@ fn main() -> Result<(), Error> {
     }
 
     // GUI mode
-    run_gui(cpu, &args, config, audio_controls)
+    run_gui(cpu, &args, config, audio_controls, bbs_handle)
 }
 
 /// Run emulator in headless (no video) mode.
@@ -270,6 +320,7 @@ fn run_gui(
     args: &Args,
     config: config::Config,
     audio_controls: Option<audio_mixer::AudioControls>,
+    bbs_handle: Option<bbs::BbsHandle>,
 ) -> Result<(), Error> {
     let mut event_loop = EventLoop::new().unwrap();
 
@@ -284,6 +335,7 @@ fn run_gui(
 
     cpu.bus.video.force_neutral_mono = shader == ShaderType::Lcd;
     let mut app = App::new_with_config(cpu, shader, start_fullscreen, mouse_enabled, config);
+    app.bbs_handle = bbs_handle;
 
     if args.no_chroma_blur { app.shader_params.chroma_blur = false; }
     if args.no_comb_filter { app.shader_params.comb_filter = false; }
@@ -472,6 +524,7 @@ fn run_gui(
 
                 // Battery-backed RAM expansion: opportunistic flush
                 app.maybe_flush_memexp();
+                app.poll_bbs_events();
             }
 
             if let Some(addr) = hit_breakpoint {

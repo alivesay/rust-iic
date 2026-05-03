@@ -38,6 +38,15 @@ pub struct SccChannel {
     // Receive FIFO (3-deep on real hardware, we use a VecDeque)
     rx_buffer: VecDeque<u8>,
     rx_overrun: bool,
+    // Bytes that have arrived from the host (socket / modem / loopback)
+    // but haven't yet been "clocked in" to the SCC FIFO at the
+    // configured baud rate.  We meter from this queue into
+    // `rx_buffer` in `tick`, which makes a 2400-baud BBS feel like a
+    // 2400-baud BBS.
+    rx_pending: VecDeque<u8>,
+    // Cycles remaining until the next pending byte may be released
+    // into the SCC FIFO.
+    rx_release_countdown: u64,
 
     // Transmit
     tx_empty: bool,
@@ -68,6 +77,9 @@ pub struct SccChannel {
 
     // Virtual Hayes modem
     pub modem: HayesModem,
+    // Effective line speed used by the rx pacer when the modem is
+    // engaged.  Defaults to 2400 (//c stock); BBS paths bump to 9600
+    pub line_baud: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -79,10 +91,10 @@ pub struct SccChannelSnap {
     pub tx_empty: bool,
     pub irq_pending: bool,
     pub loopback: bool,
-    /// 0 = command, 1 = online, 2 = escape.
+    // 0 = command, 1 = online, 2 = escape.
     pub modem_state: u8,
     pub rx_depth: u16,
-    /// Baud rate decoded from WR12/WR13 (0 if BR generator disabled).
+    // Baud rate decoded from WR12/WR13 (0 if BR generator disabled).
     pub baud: u32,
 }
 
@@ -95,6 +107,8 @@ impl SccChannel {
             reg_ptr: 0,
             rx_buffer: VecDeque::new(),
             rx_overrun: false,
+            rx_pending: VecDeque::new(),
+            rx_release_countdown: 0,
             tx_empty: true,
             dcd: false,
             cts: true,
@@ -109,6 +123,7 @@ impl SccChannel {
             poll_countdown: 0,
             poll_interval: (timing::CYCLES_PER_SECOND / 1000.0) as u64, // ~1ms
             modem: HayesModem::new(),
+            line_baud: 2400,
         }
     }
 
@@ -116,6 +131,8 @@ impl SccChannel {
         self.wr = [0u8; 16];
         self.reg_ptr = 0;
         self.rx_buffer.clear();
+        self.rx_pending.clear();
+        self.rx_release_countdown = 0;
         self.rx_overrun = false;
         self.tx_empty = true;
         self.rx_ip = false;
@@ -425,7 +442,7 @@ impl SccChannel {
             let _ = stream.write_all(&[value]);
             false
         } else {
-            // No active destination - data available for cross-loopback
+            // No active destination: data available for cross-loopback
             true
         };
 
@@ -449,6 +466,16 @@ impl SccChannel {
         Ok(())
     }
 
+    // Dial a loopback BBS
+    pub fn dial_loopback(&mut self, port: u16) -> Result<(), std::io::Error> {
+        self.modem.enabled = true;
+        let addr = format!("127.0.0.1:{}", port);
+        self.tcp_connect(&addr)?;
+        self.modem.state = ModemState::Online;
+        self.modem.plus_count = 0;
+        Ok(())
+    }
+
     fn tcp_disconnect(&mut self) {
         if let Some(stream) = self.stream.take() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -465,7 +492,6 @@ impl SccChannel {
         println!("SCC[{}]: disconnected", self.id);
     }
 
-    // Tick — polls TCP socket for incoming data
     fn tick(&mut self, cycles: u64) {
         // Check +++ escape sequence
         if self.modem.check_escape() {
@@ -473,6 +499,10 @@ impl SccChannel {
             println!("SCC[{}]: +++ escape to command mode", self.id);
             return;
         }
+
+        // Meter pending bytes into the SCC FIFO at baud rate regardless
+        // of whether a socket is currently attached
+        self.release_pending_bytes(cycles);
 
         if self.stream.is_none() {
             return;
@@ -520,27 +550,71 @@ impl SccChannel {
         }
     }
 
-    // Push a byte into the receive buffer
-    pub fn receive_byte(&mut self, byte: u8) {
-        if self.rx_buffer.len() >= 3 {
-            // Real SCC has 3-byte FIFO
-            self.rx_overrun = true;
-        }
-        self.rx_buffer.push_back(byte);
 
-        // Generate Rx interrupt if enabled (WR1 bits 3-4)
-        let rx_int_mode = (self.wr[1] >> 3) & 0x03;
-        if rx_int_mode != 0 {
-            self.rx_ip = true;
+    fn rx_byte_cycles(&self) -> u64 {
+        let baud = if self.line_baud == 0 { 2400 } else { self.line_baud };
+        const BITS_PER_CHAR: f64 = 10.0;
+        (timing::CYCLES_PER_SECOND / (baud as f64 / BITS_PER_CHAR)) as u64
+    }
+
+    fn release_pending_bytes(&mut self, cycles: u64) {
+        if self.rx_pending.is_empty() && self.rx_release_countdown == 0 {
+            return;
+        }
+        if !self.modem.enabled {
+            // Drain instantly.
+            while let Some(byte) = self.rx_pending.pop_front() {
+                if self.rx_buffer.len() >= 3 {
+                    self.rx_overrun = true;
+                }
+                self.rx_buffer.push_back(byte);
+                let rx_int_mode = (self.wr[1] >> 3) & 0x03;
+                if rx_int_mode != 0 {
+                    self.rx_ip = true;
+                }
+            }
+            self.rx_release_countdown = 0;
+            return;
+        }
+        if self.rx_release_countdown > cycles {
+            self.rx_release_countdown -= cycles;
+            return;
+        }
+        let mut budget_remaining = cycles - self.rx_release_countdown;
+        self.rx_release_countdown = 0;
+        let period = self.rx_byte_cycles().max(1);
+        loop {
+            if self.rx_pending.is_empty() {
+                return;
+            }
+            if self.rx_buffer.len() >= 3 {
+                self.rx_release_countdown = period;
+                return;
+            }
+            let byte = self.rx_pending.pop_front().unwrap();
+            self.rx_buffer.push_back(byte);
+    
+            let rx_int_mode = (self.wr[1] >> 3) & 0x03;
+            if rx_int_mode != 0 {
+                self.rx_ip = true;
+            }
+            if budget_remaining >= period {
+                budget_remaining -= period;
+                continue;
+            }
+            self.rx_release_countdown = period - budget_remaining;
+            return;
         }
     }
 
-    // Check if any interrupt is pending for this channel
+    pub fn receive_byte(&mut self, byte: u8) {
+        self.rx_pending.push_back(byte);
+    }
+
     fn irq_pending(&self) -> bool {
         self.rx_ip || self.tx_ip || self.ext_ip
     }
 
-    // Drain any bytes the modem queued for the receive buffer.
     fn drain_modem_rx(&mut self) {
         let bytes: Vec<u8> = self.modem.rx_out.drain(..).collect();
         for byte in bytes {
@@ -548,7 +622,6 @@ impl SccChannel {
         }
     }
 
-    // Act on a ModemAction returned by the modem.
     fn handle_modem_action(&mut self, action: ModemAction) {
         match action {
             ModemAction::None => {}
@@ -559,8 +632,9 @@ impl SccChannel {
                 } else {
                     format!("{}:23", addr.to_lowercase())
                 };
+                let baud = self.line_baud;
                 match self.tcp_connect(&addr) {
-                    Ok(()) => self.modem.on_connected(),
+                    Ok(()) => self.modem.on_connected(baud),
                     Err(_) => self.modem.on_connect_failed(),
                 }
                 self.drain_modem_rx();
@@ -583,8 +657,8 @@ impl SccChannel {
         }
     }
 
-    /// CPU-monitor observability: cheap, side-effect-free snapshot of
-    /// channel state. See [`SccChannelSnap`] for field meanings.
+    // CPU-monitor observability: cheap, side-effect-free snapshot of
+    // channel state. See [`SccChannelSnap`] for field meanings.
     pub fn debug_state(&self) -> SccChannelSnap {
         // Decode baud from WR12 (low) + WR13 (high) using the standard
         // formula `clock / (2 * (TC + 2) * clk_mode)`. 3.6864 MHz crystal
@@ -644,7 +718,7 @@ impl Scc {
     pub fn read(&mut self, addr: u16) -> u8 {
         match addr & 0x03 {
             0x00 => self.ch_b.read_command(), // $C038: Ch B Command/Status
-            0x01 => {                          // $C039: Ch A Command/Status
+            0x01 => {                         // $C039: Ch A Command/Status
                 // RR3 (Interrupt Pending) is only available on Channel A
                 // and includes both channels' status
                 if self.ch_a.reg_ptr == 3 {

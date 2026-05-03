@@ -153,4 +153,8 @@ pub struct Args {
     // Enable paddle input via host gamepad
     #[arg(long)]
     pub paddle: bool,
+
+    // Boot the built-in virtual BBS
+    #[arg(long)]
+    pub bbs: bool,
 }

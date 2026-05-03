@@ -207,10 +207,15 @@ impl HayesModem {
     }
 
     // Called by SCC after a successful TCP connect (ATDT).
-    pub fn on_connected(&mut self) {
+
+    pub fn on_connected(&mut self, baud: u32) {
         self.state = ModemState::Online;
         self.plus_count = 0;
-        self.send_response("CONNECT 2400");
+        let label = match baud {
+            0 => "CONNECT".to_string(),
+            n => format!("CONNECT {}", n),
+        };
+        self.send_response(&label);
     }
 
     // Called by SCC when a dial attempt fails.

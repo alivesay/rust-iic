@@ -147,6 +147,11 @@ pub fn memexp_path() -> PathBuf {
     p
 }
 
+// Directory holding all rust-iic state (`$HOME/.config/rust-iic/`).
+pub fn config_dir() -> Option<PathBuf> {
+    config_path().parent().map(|p| p.to_path_buf())
+}
+
 impl Config {
     pub fn load() -> Self {
         Self::load_from(&config_path())

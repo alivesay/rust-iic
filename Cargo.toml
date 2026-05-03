@@ -40,8 +40,14 @@ wgpu = "27.0.1"
 wide = "0.7"
 winit = "0.30.13"
 json = "0.12.4"
+ureq = "2.10"
+zip = { version = "2", default-features = false, features = ["deflate", "deflate64"] }
+vt100 = "0.15"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSData"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
+
+[build-dependencies]
+a2kit = "4.0.1"
