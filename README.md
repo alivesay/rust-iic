@@ -32,7 +32,7 @@ Requires a Rust toolchain and a working GPU (Metal/Vulkan/DX12).
 | `[disk]` | Disk for drive 1 |
 | `--disk2`, `--disk35`, `--disk35-2`, `--hdv`, `--hdv2` | More drives |
 | `--shader none\|crt\|lcd` | Display shader (default `crt`) |
-| `--monochrome` | Green phosphor |
+| `--monochrome` | Color off |
 | `--fast-disk` | Skip rotational latency |
 | `--speed <n>` | CPU speed multiplier |
 | `--fullscreen` | Start fullscreen |
