@@ -547,6 +547,15 @@ impl CPU {
             log::debug!("Mockingboard slot 5 activated");
         }
 
+        // bbs jumpstart hook
+        if let Some((addr, bytes)) = self.hooks.pending_jumpstart_payload.take() {
+            self.bus.write_bytes(addr, bytes);
+        }
+        if let Some(target) = self.hooks.pending_jumpstart_pc.take() {
+            log::info!("BBS jumpstart: redirecting PC to ${:04X}", target);
+            self.pc = target;
+        }
+
         let pc = self.pc;
 
         if self.capture_trace {

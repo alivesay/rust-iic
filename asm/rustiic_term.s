@@ -9,6 +9,18 @@
 ;     * forwards modem rx -> screen, keyboard -> modem tx
 ;     * exits to BASIC on closed-Apple ($C062 / SOLID-APPLE)
 ;
+;   Wire protocol (server -> //c):
+;     printable ASCII                  - normal text via COUT (bit 7 set)
+;     ESC '=' (32+row) (32+col)        - VT52 cursor address
+;     ESC 'L' len_lo len_hi <bytes>    - load `len` bytes to $0A00 then
+;                                        JMP $0A00 (DHGR module upload)
+;     ESC 'M' <byte>                   - print one raw byte at the
+;                                        current cursor (bypasses COUT
+;                                        so MouseText codes $40-$5F
+;                                        render correctly under the
+;                                        alt charset enabled at boot)
+;     ESC 'X'                          - bail to Applesoft cold start
+;
 ;   Build:  ca65 rustiic_term.s -o rustiic_term.o
 ;           ld65 -C rustiic_term.cfg rustiic_term.o -o rustiic_term.bin
 ; ============================================================================
@@ -19,6 +31,9 @@
 KBD		=	$C000		; keyboard data + strobe (bit7)
 KBDSTRB		=	$C010		; clear keyboard strobe
 SOLID_APL	=	$C062		; closed-apple button (bit7 = pressed)
+SETALTCHAR	=	$C00F		; write enables alt char set (MouseText $40-$5F)
+CLR80VID	=	$C054		; PAGE2 off  (writes $0400-$07FF -> main bank)
+SET80VID	=	$C055		; PAGE2 on   (writes $0400-$07FF -> aux bank)
 
 ; SCC Channel A on the //c is the modem port (slot 2 ACIA aliases).
 ; $C0A8 = data    $C0A9 = status (bit3=RDRF, bit4=TDRE, bit5=DCD-low)
@@ -49,6 +64,14 @@ start:
 ;   (sets CSWL/H), enables 80STORE, and clears the screen.  Equivalent
 ;   to typing PR#3 at the BASIC prompt.
 		JSR	$C300
+
+		; Enable the alternate character set so VRAM bytes $40-$5F
+		; render as MouseText glyphs (corners, lines, mouse, apples).
+		; The plain rx path still goes through COUT which forces bit 7
+		; on, so normal ASCII output is unaffected; MouseText reaches
+		; the screen only via the ESC 'M' opcode below, which writes
+		; raw bytes directly to text-page memory.
+		STA	SETALTCHAR
 
 		JSR	HOME		; clear screen (now in 80-col)
 
@@ -91,8 +114,9 @@ bail:
 ; ----------------------------------------------------------------------------
 OURCH		=	$057B
 CV		=	$0025
+BASL		=	$0028		; current row text-page base (set by VTAB)
 VTAB		=	$FC22
-LOAD_DEST	=	$0900
+LOAD_DEST	=	$0A00		; ESC L destination (DHGR module entry)
 
 rx_byte:
 		LDX	rx_state
@@ -113,7 +137,7 @@ dispatch:
 		CMP	#$3D		; '='
 		BNE	:+
 		LDA	#$02
-		BRA	set_state
+		JMP	set_state
 :		CMP	#$4C		; 'L'
 		BNE	:+
 		; init load destination + clear length high
@@ -122,8 +146,14 @@ dispatch:
 		LDA	#>LOAD_DEST
 		STA	load_tgt+2
 		LDA	#$04
-		BRA	set_state
-:		STZ	rx_state
+		JMP	set_state
+:		CMP	#$4D		; 'M' -- raw byte to screen at cursor
+		BNE	:+
+		LDA	#$07
+		JMP	set_state
+:		CMP	#$58		; 'X' -- server-initiated bail to BASIC
+		BEQ	bail
+		STZ	rx_state
 		RTS
 st2:		CPX	#$02		; ESC = row
 		BNE	st3
@@ -131,7 +161,7 @@ st2:		CPX	#$02		; ESC = row
 		SBC	#$20
 		STA	rx_row
 		LDA	#$03
-		BRA	set_state
+		JMP	set_state
 st3:		CPX	#$03		; ESC = row col
 		BNE	st4
 		SEC
@@ -148,12 +178,14 @@ st4:		CPX	#$04		; ESC L len_lo
 		BNE	st5
 		STA	load_len
 		LDA	#$05
-		BRA	set_state
+		JMP	set_state
 st5:		CPX	#$05		; ESC L len_hi
-		BNE	st6
+		BNE	st6_or_st7
 		STA	load_len+1
 		LDA	#$06
-		BRA	set_state
+		JMP	set_state
+st6_or_st7:	CPX	#$06
+		BNE	st7
 st6:		; payload byte
 load_tgt:	STA	$FFFF		; self-modified
 		INC	load_tgt+1
@@ -172,6 +204,38 @@ load_tgt:	STA	$FFFF		; self-modified
 rx_done:	RTS
 
 set_state:	STA	rx_state
+		RTS
+
+; ----------------------------------------------------------------------------
+; ESC M <byte>: write `byte` straight into 80-col text-page memory at
+; the current firmware cursor (CV/OURCH).  The 80-col text page is
+; interleaved -- even columns live in aux bank, odd columns in main
+; -- so we toggle PAGE2 ($C054/$C055) around the store for even cols.
+; The byte is taken at face value (no bit-7 OR), letting the server
+; place MouseText codes ($40-$5F under alt charset) directly.
+;
+; Only the cursor's *column* advances; vertical motion remains the
+; server's job (via ESC '=' / explicit CR).
+; ----------------------------------------------------------------------------
+st7:
+		PHA			; save the raw byte
+		JSR	VTAB		; refresh BASL/BASH for current row (CV)
+		LDA	OURCH
+		LSR			; carry = original bit 0 (1 = odd col)
+		TAY			; Y = col / 2 (byte offset into row)
+		BCS	@odd
+		; even col -> aux bank: enable PAGE2, store, restore PAGE2 off
+		STA	SET80VID
+		PLA
+		STA	(BASL),Y
+		STA	CLR80VID
+		BRA	@done
+@odd:
+		PLA
+		STA	(BASL),Y
+@done:
+		INC	OURCH
+		STZ	rx_state
 		RTS
 
 ; ----------------------------------------------------------------------------

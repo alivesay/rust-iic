@@ -1042,4 +1042,14 @@ impl SmartPort {
             }
         }
     }
+
+    pub fn eject_all(&mut self) {
+        self.flush_all();
+        for floppy in self.floppies.iter_mut() {
+            floppy.eject();
+        }
+        for device in self.hdv_devices.iter_mut() {
+            *device = SmartPortDevice::new();
+        }
+    }
 }

@@ -44,6 +44,10 @@ pub fn run(
             }
             b'G' | 0x03 /* ctrl-c */ => {
                 tx.writeln("")?;
+                tx.writeln("GOODBYE")?;
+
+                // drop rustiic_term to BASIC
+                tx.write_str("\x1bX")?;
                 tx.flush()?;
                 break;
             }
@@ -60,6 +64,8 @@ pub fn run(
                         tx.writeln(&format!("? error: {:#}", e))?;
                         log::warn!("bbs: browse error: {:?}", e);
                     }
+
+                    drain_input(&mut stream);
                     main_menu(&mut tx, &sources)?;
                 } else {
                     tx.writeln("")?;
@@ -92,18 +98,32 @@ fn dialup_prelude<W: Write>(tx: &mut AsciiWriter<W>) -> io::Result<()> {
     Ok(())
 }
 
-fn banner<W: Write>(tx: &mut AsciiWriter<W>) -> io::Result<()> {    let lines = [
-        "",
-        "+--------------------------------------+",
-        "|       R U S T - I I C   B B S        |",
-        "|       =======================        |",
-        "|          the back door v0.1          |",
-        "+--------------------------------------+",
-        "",
-    ];
-    for line in lines {
-        tx.writeln(line)?;
+fn banner<W: Write>(tx: &mut AsciiWriter<W>) -> io::Result<()> {
+    const W: usize = 38;
+
+    fn rule<W: Write>(tx: &mut AsciiWriter<W>) -> io::Result<()> {
+        tx.write_str("+")?;
+        tx.write_str(&"-".repeat(W))?;
+        tx.writeln("+")
     }
+
+    fn row<W: Write>(tx: &mut AsciiWriter<W>, text: &str) -> io::Result<()> {
+        let pad = W.saturating_sub(text.len()) / 2;
+        let trail = W.saturating_sub(pad + text.len());
+        tx.write_str("|")?;
+        tx.write_str(&" ".repeat(pad))?;
+        tx.write_str(text)?;
+        tx.write_str(&" ".repeat(trail))?;
+        tx.writeln("|")
+    }
+
+    tx.writeln("")?;
+    rule(tx)?;
+    row(tx, "R U S T - I I C   B B S")?;
+    rule(tx)?;
+    row(tx, "the back door v0.1")?;
+    rule(tx)?;
+    tx.writeln("")?;
     Ok(())
 }
 

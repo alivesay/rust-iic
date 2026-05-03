@@ -181,63 +181,70 @@ fn main() -> Result<(), Error> {
     cpu.load_rom(iic_rom);
     cpu.init();
 
-    // Load disks
-    if let Some(path) = &args.disk {
-        cpu.bus.iou.iwm.load_disk(path.clone()).unwrap();
-        println!("disk  {:>12} {:>8}    {}", "5.25_D1", "LOADED", path);
-    }
 
-    if let Some(path) = &args.disk2 {
-        cpu.bus.iou.iwm.load_disk2(path).unwrap();
-        println!("disk  {:>12} {:>8}    {}", "5.25_D2", "LOADED", path);
-    }
+    if !args.bbs {
+        if let Some(path) = &args.disk {
+            cpu.bus.iou.iwm.load_disk(path.clone()).unwrap();
+            println!("disk  {:>12} {:>8}    {}", "5.25_D1", "LOADED", path);
+        }
 
-    // Load 3.5" disk images (ProDOS order / 2IMG)
-    if let Some(path) = &args.disk35 {
-        match cpu.bus.iou.iwm.load_disk35(path) {
-            Ok(()) => {
-                println!("disk  {:>12} {:>8}    {}", "3.5_D1", "LOADED", path);
-            }
-            Err(e) => {
-                eprintln!("disk  {:>12} {:>8}    {}: {}", "3.5_D1", "ERROR", path, e);
+        if let Some(path) = &args.disk2 {
+            cpu.bus.iou.iwm.load_disk2(path).unwrap();
+            println!("disk  {:>12} {:>8}    {}", "5.25_D2", "LOADED", path);
+        }
+
+        // Load 3.5" disk images (ProDOS order / 2IMG)
+        if let Some(path) = &args.disk35 {
+            match cpu.bus.iou.iwm.load_disk35(path) {
+                Ok(()) => {
+                    println!("disk  {:>12} {:>8}    {}", "3.5_D1", "LOADED", path);
+                }
+                Err(e) => {
+                    eprintln!("disk  {:>12} {:>8}    {}: {}", "3.5_D1", "ERROR", path, e);
+                }
             }
         }
-    }
 
-    if let Some(path) = &args.disk35_2 {
-        match cpu.bus.iou.iwm.load_disk35_drive(1, path) {
-            Ok(()) => {
-                println!("disk  {:>12} {:>8}    {}", "3.5_D2", "LOADED", path);
-            }
-            Err(e) => {
-                eprintln!("disk  {:>12} {:>8}    {}: {}", "3.5_D2", "ERROR", path, e);
+        if let Some(path) = &args.disk35_2 {
+            match cpu.bus.iou.iwm.load_disk35_drive(1, path) {
+                Ok(()) => {
+                    println!("disk  {:>12} {:>8}    {}", "3.5_D2", "LOADED", path);
+                }
+                Err(e) => {
+                    eprintln!("disk  {:>12} {:>8}    {}: {}", "3.5_D2", "ERROR", path, e);
+                }
             }
         }
-    }
 
-    // Load hard drive images (HDV) into SmartPort device chain
-    if let Some(path) = &args.hdv {
-        match cpu.bus.iou.iwm.smartport.load_hdv(path) {
-            Ok(()) => {
-                let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[0];
-                println!("disk  {:>12} {:>8}    {} ({} blocks)", "HDV_1", "LOADED", path, dev.block_count);
-            }
-            Err(e) => {
-                eprintln!("disk  {:>12} {:>8}    {}: {}", "HDV_1", "ERROR", path, e);
+        // Load hard drive images (HDV) into SmartPort device chain
+        if let Some(path) = &args.hdv {
+            match cpu.bus.iou.iwm.smartport.load_hdv(path) {
+                Ok(()) => {
+                    let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[0];
+                    println!("disk  {:>12} {:>8}    {} ({} blocks)", "HDV_1", "LOADED", path, dev.block_count);
+                }
+                Err(e) => {
+                    eprintln!("disk  {:>12} {:>8}    {}: {}", "HDV_1", "ERROR", path, e);
+                }
             }
         }
-    }
 
-    if let Some(path) = &args.hdv2 {
-        match cpu.bus.iou.iwm.smartport.load_hdv(path) {
-            Ok(()) => {
-                let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[1];
-                println!("disk  {:>12} {:>8}    {} ({} blocks)", "HDV_2", "LOADED", path, dev.block_count);
-            }
-            Err(e) => {
-                eprintln!("disk  {:>12} {:>8}    {}: {}", "HDV_2", "ERROR", path, e);
+        if let Some(path) = &args.hdv2 {
+            match cpu.bus.iou.iwm.smartport.load_hdv(path) {
+                Ok(()) => {
+                    let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[1];
+                    println!("disk  {:>12} {:>8}    {} ({} blocks)", "HDV_2", "LOADED", path, dev.block_count);
+                }
+                Err(e) => {
+                    eprintln!("disk  {:>12} {:>8}    {}: {}", "HDV_2", "ERROR", path, e);
+                }
             }
         }
+    } else if args.disk.is_some() || args.disk2.is_some()
+        || args.disk35.is_some() || args.disk35_2.is_some()
+        || args.hdv.is_some() || args.hdv2.is_some()
+    {
+        eprintln!("bbs   {:>12} {:>8}    --bbs ignores --disk*/--hdv* (drives stay empty)", "MOUNT", "SKIP");
     }
 
     // --bbs: spin up the loopback BBS
@@ -248,27 +255,10 @@ fn main() -> Result<(), Error> {
                 let port = handle.addr.port();
                 println!("bbs   {:>12} {:>8}    {}", "BBS", "ONLINE", handle.addr);
 
-                // auto-mount the terminal boot disk
-                if args.disk.is_none() {
-                    let term = std::path::Path::new("disks/rustiic_term.dsk");
-                    if term.exists() {
-                        match cpu.bus.iou.iwm.load_disk(term.to_string_lossy().to_string()) {
-                            Ok(()) => println!(
-                                "disk  {:>12} {:>8}    {}",
-                                "5.25_D1", "LOADED", term.display()
-                            ),
-                            Err(e) => eprintln!(
-                                "disk  {:>12} {:>8}    {}: {}",
-                                "5.25_D1", "ERROR", term.display(), e
-                            ),
-                        }
-                    } else {
-                        eprintln!(
-                            "bbs   {:>12} {:>8}    {} not found; run `make` in asm/ first",
-                            "TERMDISK", "MISSING", term.display()
-                        );
-                    }
-                }
+                // Boot the terminal app straight from RAM so the floppy
+                // drives stay free for whatever else the user mounted.
+                bbs::jumpstart_term(&mut cpu);
+                println!("bbs   {:>12} {:>8}    rustiic_term @ $0801", "TERM", "RAMBOOT");
 
                 cpu.bus.iou.scc.ch_a.debug = args.debug;
                 cpu.bus.iou.scc.ch_a.line_baud = 115200;

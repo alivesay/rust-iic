@@ -233,24 +233,13 @@ impl App {
             None => return,
         };
 
-        let term = std::path::Path::new("disks/rustiic_term.dsk");
-        if term.exists() {
-            match self.cpu.bus.iou.iwm.load_disk(term.to_string_lossy().to_string()) {
-                Ok(()) => println!(
-                    "disk  {:>12} {:>8}    {}",
-                    "5.25_D1", "LOADED", term.display()
-                ),
-                Err(e) => eprintln!(
-                    "disk  {:>12} {:>8}    {}: {}",
-                    "5.25_D1", "ERROR", term.display(), e
-                ),
-            }
-        } else {
-            eprintln!(
-                "bbs   {:>12} {:>8}    {} not found; run `make` in asm/ first",
-                "TERMDISK", "MISSING", term.display()
-            );
-        }
+
+        self.cpu.bus.iou.iwm.eject_disk(0);
+        self.cpu.bus.iou.iwm.eject_disk(1);
+        self.cpu.bus.iou.iwm.smartport.eject_all();
+
+        crate::bbs::jumpstart_term(&mut self.cpu);
+        println!("bbs   {:>12} {:>8}    rustiic_term @ $0801", "TERM", "RAMBOOT");
 
         self.cpu.bus.iou.scc.ch_a.line_baud = 115200;
         self.cpu.bus.iou.set_zip_enabled(true);
@@ -260,6 +249,7 @@ impl App {
         } else {
             println!("bbs   {:>12} {:>8}    {}", "BBS_DIAL", "CONNECT", addr);
         }
+
 
         println!("Ctrl+F11: rebooting into BBS");
         self.cpu.bus.write_byte(0x03F4, 0x00);

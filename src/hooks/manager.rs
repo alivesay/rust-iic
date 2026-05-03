@@ -139,6 +139,16 @@ pub struct HookManager {
     pub pending_mockingboard2_activate: bool,
     // Pending action: check for custom commands (set by GETLN hook)
     pub pending_custom_command_check: bool,
+    // Pending action: redirect PC to this address before executing the
+    // next instruction.  Used by the BBS jumpstart path to wait for
+    // the //c reset routine to finish initializing soft switches and
+    // zero-page before entering the in-RAM terminal app at $0801.
+    pub pending_jumpstart_pc: Option<u16>,
+    // Payload to splice into RAM right before honouring
+    // `pending_jumpstart_pc`.  The //c reset routine zeros
+    // $0800-$BFFF as part of cold init, so the BBS terminal image
+    // has to be re-staged after init finishes.
+    pub pending_jumpstart_payload: Option<(u16, &'static [u8])>,
 }
 
 impl Default for HookManager {
@@ -156,6 +166,8 @@ impl HookManager {
             pending_mockingboard_activate: false,
             pending_mockingboard2_activate: false,
             pending_custom_command_check: false,
+            pending_jumpstart_pc: None,
+            pending_jumpstart_payload: None,
         }
     }
 
@@ -378,6 +390,17 @@ impl HookManager {
             // GETLN fires this hook for every keystroke; we only want to check after Enter
             if hook.name == "custom_command_check" && ctx.a == 0x8D {
                 self.pending_custom_command_check = true;
+            }
+            // BBS jumpstart: redirect PC to the in-RAM terminal entry
+            // ($0801) once the //c reset routine has reached the
+            // Disk II boot ROM ($C600), at which point soft switches
+            // and zero-page are fully initialized.  The terminal
+            // payload is re-staged at $0800 by the CPU loop right
+            // before the redirect (the //c reset zeros $0800-$BFFF).
+            if hook.name == "bbs_jumpstart_term" {
+                self.pending_jumpstart_pc = Some(0x0801);
+                self.pending_jumpstart_payload =
+                    Some((0x0800, crate::bbs::TERM_BIN));
             }
 
             let result = (hook.callback)(ctx);
