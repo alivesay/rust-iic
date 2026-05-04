@@ -2,6 +2,17 @@
 
 A cycle-accurate Apple //c emulator.
 
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/pop.png" alt="Prince of Persia" /></td>
+<td width="50%"><img src="docs/screenshots/wizardy5.png" alt="Wizardry V" /></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/wastland.png" alt="Wasteland" /></td>
+<td width="50%"><img src="docs/screenshots/dazzledraw.png" alt="Dazzle Draw" /></td>
+</tr>
+</table>
+
 ## Specs
 
 | | |
@@ -74,3 +85,21 @@ Note: Non-WOZ 5.25" images are converted to WOZ and saved to working sidecar `<f
 | Cmd+V | Paste text to keyboard input |
 
 Note: When //c mouse is enabled, click the window to grab the mouse then Cmd+Tab to release.
+
+## BBS / Filez
+
+Launch with `--bbs` or hit Ctrl+F11 at any time to reboot the //c
+directly into the in-emulator BBS terminal (`rustiic_term`).  The
+term is loaded into RAM and connected to a loopback BBS.
+
+![BBS](docs/screenshots/bbs.png)
+
+The Asimov **FILEZ** sections for example:
+
+![Filez](docs/screenshots/filez.png)
+
+## CPU Monitor
+
+F12 opens the CPU monitor:
+
+![CPU Monitor](docs/screenshots/monitor.png)
