@@ -65,7 +65,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // sub-cell fragment position. Result: smooth, screen-pixel-
     // resolution falloff with no grid/staircase.
     //
-    // sigma_x / sigma_y / intensity come from ShaderParams (F7 panel).
+    // sigma_x / sigma_y / intensity come from ShaderParams (F8 panel).
     let sigma_x = max(uniforms.spread.x, 0.001);
     let sigma_y = max(uniforms.spread.y, 0.0);
     let intensity = clamp(uniforms.spread.z, 0.0, 1.0);

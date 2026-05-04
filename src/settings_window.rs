@@ -172,8 +172,7 @@ fn render_video_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
             }
         }
     });
-    // CPU-side scanline darken pass only runs when no GPU shader is
-    // active; the CRT shader has its own `scanline_weight` (F7).
+
     let cpu_scanlines_active = d.shader_type == ShaderType::None;
     ui.add_enabled_ui(cpu_scanlines_active, |ui| {
         let resp = ui.add(
@@ -183,7 +182,7 @@ fn render_video_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
         result.changed |= resp.changed();
         if !cpu_scanlines_active {
             resp.on_disabled_hover_text(
-                "Only active when Shader = None.\nUse F7 → Scanline Weight for the CRT shader.",
+                "Only active when Shader = None.\nUse F8 → Scanline Weight for the CRT shader.",
             );
         }
     });

@@ -132,7 +132,7 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
     let mut changed = false;
     let mut save_clicked = false;
 
-    egui::Window::new("CRT-Geom-Deluxe Settings")
+    egui::Window::new("Shader Settings")
         .open(open)
         .resizable(true)
         .default_width(320.0)

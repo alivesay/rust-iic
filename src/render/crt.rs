@@ -1383,7 +1383,6 @@ impl CrtRenderer {
             curvature: self.curvature_cache.get(),
         };
         queue.write_buffer(&self.chroma_uniform_buffer, 0, bytemuck::bytes_of(&chroma_uniforms));
-        // NTSC + spread uniforms. Strength and per-stage toggles come from the F7 panel.
         self.ntsc_strength.set(params.ntsc_strength);
         self.phosphor_spread_on.set(params.phosphor_spread);
         let content_rect = self.content_rect_cache.get();

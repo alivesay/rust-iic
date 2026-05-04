@@ -1669,7 +1669,7 @@ impl App {
         event: &winit::event::KeyEvent,
         egui_consumed: bool,
     ) {
-        if event.logical_key == Key::Named(NamedKey::F8)
+        if event.logical_key == Key::Named(NamedKey::F7)
             && event.state.is_pressed()
             && !self.modifiers.control_key()
         {
@@ -1681,7 +1681,7 @@ impl App {
             return;
         }
 
-        if event.logical_key == Key::Named(NamedKey::F7)
+        if event.logical_key == Key::Named(NamedKey::F8)
             && event.state.is_pressed()
             && !self.modifiers.control_key()
             && !self.modifiers.shift_key()
