@@ -1,6 +1,6 @@
 use std::fs;
-use std::io::{Cursor, Read};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -9,9 +9,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::config;
 
 const ROM_FILENAME: &str = "iic.bin";
+
 const ROM_URL: &str =
-    "https://www.apple.asimov.net/emulators/rom_images/apple_iic_rom.zip";
-const ROM_MEMBER: &str = "APPLE2C 3.ROM";
+    "https://downloads.reactivemicro.com/Apple%20II%20Items/ROM_and_JEDEC/IIc/IIc%20-%20ROM4x%20-%20v2018-10-01%20-%2027256.bin";
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_ATTEMPTS: usize = 3;
@@ -31,7 +31,7 @@ pub fn load_or_fetch() -> Result<Vec<u8>> {
     }
 
     println!(
-        "rom   {:>12} {:>8}    not found, fetching from Asimov",
+        "rom   {:>12} {:>8}    not found, fetching from ReactiveMicro",
         "FIRMWARE", "MISSING"
     );
 
@@ -40,8 +40,13 @@ pub fn load_or_fetch() -> Result<Vec<u8>> {
             .with_context(|| format!("creating {}", parent.display()))?;
     }
 
-    let bytes = download_with_retry(ROM_URL, RETRY_ATTEMPTS)?;
-    let rom = extract_member(&bytes, ROM_MEMBER)?;
+    let rom = download_with_retry(ROM_URL, RETRY_ATTEMPTS)?;
+    if rom.len() != 16_384 && rom.len() != 32_768 {
+        bail!(
+            "unexpected rom size {} bytes (expected 16384 or 32768)",
+            rom.len()
+        );
+    }
 
     fs::write(&path, &rom)
         .with_context(|| format!("writing {}", path.display()))?;
@@ -89,43 +94,4 @@ fn download_once(url: &str) -> Result<Vec<u8>> {
         bail!("empty response from {}", url);
     }
     Ok(buf)
-}
-
-fn extract_member(zip_bytes: &[u8], member: &str) -> Result<Vec<u8>> {
-    let reader = Cursor::new(zip_bytes);
-    let mut archive = zip::ZipArchive::new(reader).context("open zip")?;
-
-    if let Ok(mut f) = archive.by_name(member) {
-        let mut out = Vec::with_capacity(f.size() as usize);
-        f.read_to_end(&mut out).context("reading rom member")?;
-        return Ok(out);
-    }
-
-    let want = Path::new(member)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(member);
-    let names: Vec<String> = (0..archive.len())
-        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
-        .collect();
-    for name in &names {
-        let base = Path::new(name)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        if base.eq_ignore_ascii_case(want) {
-            let mut f = archive
-                .by_name(name)
-                .with_context(|| format!("opening {}", name))?;
-            let mut out = Vec::with_capacity(f.size() as usize);
-            f.read_to_end(&mut out).context("reading rom member")?;
-            return Ok(out);
-        }
-    }
-
-    bail!(
-        "{} not found in zip (members: {})",
-        member,
-        names.join(", ")
-    )
 }
