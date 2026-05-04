@@ -30,6 +30,8 @@ SCC_DATA	=	$C0A8
 SCC_STAT	=	$C0A9
 
 SS_80STORE_ON	=	$C001
+SS_80COL_OFF	=	$C00C
+SS_80COL_ON	=	$C00D
 SS_GRAPHICS	=	$C050
 SS_TEXT		=	$C051
 SS_FULLSCREEN	=	$C052
@@ -89,9 +91,11 @@ wait_vbl:
 		CMP	#DUTY_TEXT
 		BCS	show_color
 		BIT	SS_TEXT
+		STA	SS_80COL_OFF
 		BRA	tick
 show_color:
 		BIT	SS_GRAPHICS
+		STA	SS_80COL_ON
 tick:
 		INC	frame_ctr
 		LDA	frame_ctr
@@ -273,7 +277,8 @@ advance_row:
 ; Soft-switches.
 ; ============================================================================
 dhgr_init:
-		BIT	SS_80STORE_ON
+		STA	SS_80STORE_ON
+		STA	SS_80COL_ON
 		BIT	SS_FULLSCREEN
 		BIT	SS_HIRES_ON
 		BIT	SS_DHIRES_ON
@@ -284,6 +289,7 @@ dhgr_to_text:
 		BIT	SS_PAGE1
 		BIT	SS_DHIRES_OFF
 		BIT	SS_HIRES_OFF
+		STA	SS_80COL_OFF
 		BIT	SS_TEXT
 		RTS
 
