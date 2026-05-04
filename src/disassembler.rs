@@ -9,7 +9,7 @@ static SYS_SYMBOLS: OnceLock<HashMap<u16, String>> = OnceLock::new();
 fn sys_symbols() -> &'static HashMap<u16, String> {
     SYS_SYMBOLS.get_or_init(|| {
         let mut map = HashMap::new();
-        let data = include_str!("../APPLE2E.SYM").replace("\r", "");
+        let data = include_str!("../assets/APPLE2C.SYM").replace("\r", "");
         for line in data.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
@@ -59,7 +59,7 @@ impl SymbolTable {
     }
 
     pub fn load_symbols(&mut self) {
-        let data = include_str!("../APPLE2E.SYM").replace("\r", "");
+        let data = include_str!("../assets/APPLE2C.SYM").replace("\r", "");
 
         for line in data.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
