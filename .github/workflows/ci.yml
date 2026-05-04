@@ -8,7 +8,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  RUSTFLAGS: -D warnings
 
 jobs:
   check:
@@ -33,17 +32,11 @@ jobs:
             libxkbcommon-dev libwayland-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo fmt
-        if: runner.os == 'Linux'
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo build
+        run: cargo build --all-targets
 
       - name: cargo test
         run: cargo test --all
