@@ -13,7 +13,7 @@ use crate::config;
 const BASE_URL: &str = "http://textfiles.com/";
 const ZIP_BASE_URL: &str = "http://archives.textfiles.com/";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
-const ZIP_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const ZIP_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
 const SECTIONS: &[(&str, &str)] = &[
