@@ -135,9 +135,9 @@ Note: Non-WOZ 5.25" images are converted to WOZ and saved to working sidecar `<f
 | F4 | Load disk into drive 4 (3.5") |
 | F5 | Mono / color |
 | F6 | Toolbar |
-| F8 | Settings |
-| F7 | Shader settings |
-| F9 | Drive audio |
+| F7 | Settings |
+| F8 | Shader settings |
+| F9 | Drive synth settings |
 | Ctrl+F10 | Debug logging |
 | Ctrl+F11 | Reboot to BBS |
 | F12 | CPU monitor |
