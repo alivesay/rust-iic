@@ -1,0 +1,178 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  BIN_NAME: rust-iic
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - label: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - label: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - label: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "stem=${BIN_NAME}-${tag}-${{ matrix.label }}" >> "$GITHUB_OUTPUT"
+
+      - name: Package (macOS .app + tar.gz)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stem="${{ steps.ver.outputs.stem }}"
+          stage="dist/${stem}"
+          mkdir -p "${stage}"
+
+          APP_NAME="RustIIc"
+          APP_DIR="${stage}/${APP_NAME}.app"
+          mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "${APP_DIR}/Contents/MacOS/"
+          if [[ -f assets/icon.icns ]]; then
+            cp assets/icon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
+          fi
+          cat > "${APP_DIR}/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>${APP_NAME}</string>
+            <key>CFBundleDisplayName</key><string>Apple //c Emulator</string>
+            <key>CFBundleIdentifier</key><string>com.rustiic.emulator</string>
+            <key>CFBundleVersion</key><string>${{ steps.ver.outputs.tag }}</string>
+            <key>CFBundleShortVersionString</key><string>${{ steps.ver.outputs.tag }}</string>
+            <key>CFBundleExecutable</key><string>${BIN_NAME}</string>
+            <key>CFBundleIconFile</key><string>AppIcon</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+          </dict></plist>
+          EOF
+
+          cp README.md LICENSE "${stage}/"
+          tar -czf "dist/${stem}.tar.gz" -C dist "${stem}"
+
+      - name: Package (Linux tar.gz)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stem="${{ steps.ver.outputs.stem }}"
+          stage="dist/${stem}"
+          mkdir -p "${stage}"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "${stage}/"
+          cp README.md LICENSE "${stage}/"
+          tar -czf "dist/${stem}.tar.gz" -C dist "${stem}"
+
+      - name: Package (Windows zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stem = "${{ steps.ver.outputs.stem }}"
+          $stage = "dist/$stem"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" $stage
+          Copy-Item README.md $stage
+          Copy-Item LICENSE  $stage
+          Compress-Archive -Path $stage -DestinationPath "dist/$stem.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.stem }}
+          path: dist/${{ steps.ver.outputs.stem }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve tag
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true
