@@ -20,6 +20,7 @@ mod mmu;
 mod monitor;
 mod render;
 mod rom;
+mod rom_fetch;
 mod settings_window;
 mod timing;
 mod util;
@@ -175,9 +176,19 @@ fn main() -> Result<(), Error> {
         println!("input {:>12} {:>8}", "PADDLE", "ONLINE");
     }
 
-    // Load ROM
-    let iic_rom_file = include_bytes!("../assets/iic3.bin");
-    let iic_rom = rom::ROM::load_from_bytes(iic_rom_file, cpu.system_type).unwrap();
+    // Load ROM (cached at $HOME/.config/rust-iic/iic.bin)
+    let iic_rom_bytes = match rom_fetch::load_or_fetch() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("rom   {:>12} {:>8}    {}", "FIRMWARE", "ERROR", e);
+            eprintln!(
+                "      place a copy of the Apple //c ROM at {} and re-run",
+                rom_fetch::rom_path().display()
+            );
+            std::process::exit(2);
+        }
+    };
+    let iic_rom = rom::ROM::load_from_bytes(&iic_rom_bytes, cpu.system_type).unwrap();
     cpu.load_rom(iic_rom);
     cpu.init();
 
