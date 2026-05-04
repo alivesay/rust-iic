@@ -29,6 +29,10 @@ A cycle-accurate Apple //c emulator.
 
 ## Install
 
+You need a Rust toolchain.  If you don't have one, install [rustup](https://rustup.rs/)
+(`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` on Unix,
+or grab the installer from <https://rustup.rs/> on Windows).
+
 ### From source (recommended)
 
 ```
@@ -45,7 +49,7 @@ cd rust-iic
 cargo run --release -- [disk] [options]
 ```
 
-Requires a Rust toolchain and a working GPU (Metal / Vulkan / DX12).
+Requires a working GPU (Metal / Vulkan / DX12).
 
 #### Linux build deps
 
