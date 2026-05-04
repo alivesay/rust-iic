@@ -1683,7 +1683,8 @@ impl App {
 
         if event.logical_key == Key::Named(NamedKey::F7)
             && event.state.is_pressed()
-            && self.modifiers.control_key()
+            && !self.modifiers.control_key()
+            && !self.modifiers.shift_key()
         {
             if self.shader_type != ShaderType::None {
                 self.show_shader_ui = !self.show_shader_ui;
@@ -1698,9 +1699,9 @@ impl App {
             return;
         }
 
-        if event.logical_key == Key::Named(NamedKey::F8)
+        if event.logical_key == Key::Named(NamedKey::F9)
             && event.state.is_pressed()
-            && self.modifiers.control_key()
+            && !self.modifiers.control_key()
         {
             self.show_drive_audio_ui = !self.show_drive_audio_ui;
             if self.show_drive_audio_ui {

@@ -44,7 +44,7 @@ pub fn run(
             }
             b'G' | 0x03 /* ctrl-c */ => {
                 tx.writeln("")?;
-                tx.writeln("GOODBYE")?;
+                tx.writeln("NO CARRIER")?;
 
                 // drop rustiic_term to BASIC
                 tx.write_str("\x1bX")?;
@@ -318,7 +318,7 @@ fn view_text<W: Write>(
     drain_input(rx);
     let lines = wrap_text(body, SCREEN_COLS);
     let total = lines.len().max(1);
-    let pages = (total + VIEW_ROWS - 1) / VIEW_ROWS;
+    let pages = total.div_ceil(VIEW_ROWS);
     let mut page: usize = 0;
 
     loop {
@@ -422,7 +422,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn wrap_text(body: &str, cols: usize) -> Vec<String> {
     let mut out = Vec::new();
-    for raw_line in body.split(|c| c == '\r' || c == '\n') {
+    for raw_line in body.split(['\r', '\n']) {
         if raw_line.is_empty() {
             out.push(String::new());
             continue;
@@ -637,7 +637,7 @@ fn run_prepare<W: Write>(
             }
             let _ = tx.write_str(".");
             dot_count += 1;
-            if dot_count % 30 == 0 {
+            if dot_count.is_multiple_of(30) {
                 let _ = tx.write_str(&format!(" {} KB\r{}: ", bytes / 1024, &last_label));
             }
             let _ = tx.flush();

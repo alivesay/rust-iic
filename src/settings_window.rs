@@ -254,8 +254,8 @@ fn render_audio_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
         .changed();
 
     ui.separator();
-    ui.label("Open the F8 panel for per-component drive sound design.");
-    if ui.button("Open drive audio panel (F8)").clicked() {
+    ui.label("Open the F9 panel for per-component drive sound design.");
+    if ui.button("Open drive audio panel (F9)").clicked() {
         result.open_drive_audio_panel = true;
     }
 }

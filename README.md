@@ -61,8 +61,8 @@ Note: Non-WOZ 5.25" images are converted to WOZ and saved to working sidecar `<f
 | F5 | Mono / color |
 | F6 | Toolbar |
 | F8 | Settings |
-| Ctrl+F7 | Shader settings |
-| Ctrl+F8 | Drive audio |
+| F7 | Shader settings |
+| F9 | Drive audio |
 | Ctrl+F10 | Debug logging |
 | Ctrl+F11 | Reboot to BBS |
 | F12 | CPU monitor |
