@@ -311,6 +311,7 @@ impl LcdRenderer {
     }
 }
 
+#[allow(clippy::misnamed_getters)]
 impl PostProcessor for LcdRenderer {
     fn intermediate_view(&self) -> &wgpu::TextureView {
         &self.intermediate_render_view

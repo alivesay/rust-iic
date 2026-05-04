@@ -88,12 +88,11 @@ impl MemoryExpansion {
             0x03 => {
                 // Data port: write to RAM and auto-increment
                 let mem_addr = self.address();
-                if mem_addr < self.ram.len() {
-                    if self.ram[mem_addr] != value {
+                if mem_addr < self.ram.len()
+                    && self.ram[mem_addr] != value {
                         self.ram[mem_addr] = value;
                         self.dirty = true;
                     }
-                }
                 self.increment_address();
             }
             _ => {} // Unused registers

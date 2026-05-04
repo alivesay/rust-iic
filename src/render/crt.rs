@@ -2,12 +2,12 @@ use wgpu::util::DeviceExt;
 
 use super::screen::PostProcessor;
 
-/// Post-processing CRT shader renderer with multi-pass bloom.
-///
-/// CRT mode uses multi-pass bloom:
-///   Pass 1: scaling renderer → intermediate texture (full resolution)
-///   Pass 2: intermediate → bloom texture (1/4 resolution, blurred)
-///   Pass 3: CRT shader composites both → final surface
+// Post-processing CRT shader renderer with multi-pass bloom.
+//
+// CRT mode uses multi-pass bloom:
+//   Pass 1: scaling renderer → intermediate texture (full resolution)
+//   Pass 2: intermediate → bloom texture (1/4 resolution, blurred)
+//   Pass 3: CRT shader composites both → final surface
 pub struct CrtRenderer {
     // CRT composite pass
     pipeline: wgpu::RenderPipeline,
@@ -122,10 +122,10 @@ struct ChromaUniforms {
 }
 
 impl CrtRenderer {
-    /// CRT vertical aspect correction factor.
-    /// Apple II pixels were taller than wide on a 4:3 CRT.
-    /// With 560x192 framebuffer, 4:3 requires height = 560 * 0.75 = 420.
-    /// Scale factor: 420/192 = 2.1875, so correction = 2.1875/2.0 = 1.09375
+    // CRT vertical aspect correction factor.
+    // Apple II pixels were taller than wide on a 4:3 CRT.
+    // With 560x192 framebuffer, 4:3 requires height = 560 * 0.75 = 420.
+    // Scale factor: 420/192 = 2.1875, so correction = 2.1875/2.0 = 1.09375
     pub const CRT_ASPECT_CORRECTION: f32 = 1.09375;
 
     pub fn new(
@@ -1181,8 +1181,8 @@ impl CrtRenderer {
         })
     }
 
-    /// Call when the surface is resized to recreate the intermediate texture.
-    /// Uniforms (content_rect) are now updated per-frame via update_content_rect.
+    // Call when the surface is resized to recreate the intermediate texture.
+    // Uniforms (content_rect) are now updated per-frame via update_content_rect.
     pub fn resize(
         &mut self, device: &wgpu::Device, queue: &wgpu::Queue,
         width: u32, height: u32,
@@ -1343,13 +1343,13 @@ impl CrtRenderer {
         );
     }
 
-    /// Update the time uniform for flicker effects. Call once per frame.
+    // Update the time uniform for flicker effects. Call once per frame.
     pub fn update_time(&self, queue: &wgpu::Queue, time: f32) {
         // params.z is at byte offset 16 (content_rect) + 8 (params.x, params.y) = 24
         queue.write_buffer(&self.uniform_buffer, 24, bytemuck::bytes_of(&time));
     }
 
-    /// Update all tunable shader parameters. Call once per frame.
+    // Update all tunable shader parameters. Call once per frame.
     pub fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams) {
         let gpu = params.to_gpu();
         queue.write_buffer(&self.shader_params_buffer, 0, bytemuck::bytes_of(&gpu));
@@ -1399,8 +1399,8 @@ impl CrtRenderer {
         queue.write_buffer(&self.ntsc_uniform_buffer, 0, bytemuck::bytes_of(&ntsc_uniforms));
     }
 
-    /// Update the content rect and source dimensions based on actual blit geometry.
-    /// Call each frame with the real position/size of the emulator content in the surface.
+    // Update the content rect and source dimensions based on actual blit geometry.
+    // Call each frame with the real position/size of the emulator content in the surface.
     pub fn update_content_rect(
         &self, queue: &wgpu::Queue,
         surface_w: u32, surface_h: u32,
@@ -1441,7 +1441,7 @@ impl CrtRenderer {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
 
-    /// Update the monochrome flag. Call when mode changes or once per frame.
+    // Update the monochrome flag. Call when mode changes or once per frame.
     pub fn update_monochrome(&self, queue: &wgpu::Queue, monochrome: bool) {
         // extra.x is at byte offset 16 (content_rect) + 16 (params) = 32
         let val: f32 = if monochrome { 1.0 } else { 0.0 };
@@ -1459,8 +1459,8 @@ impl CrtRenderer {
         queue.write_buffer(&self.uniform_buffer, 36, bytemuck::bytes_of(&val));
     }
 
-    /// Update power-on elapsed time for CRT startup sync effect.
-    /// The effect runs for ~0.8 seconds then fades out.
+    // Update power-on elapsed time for CRT startup sync effect.
+    // The effect runs for ~0.8 seconds then fades out.
     pub fn update_power_on_time(&self, queue: &wgpu::Queue, elapsed_secs: f32) {
         // Write to extra.z (offset 32 + 8 = 40)
         queue.write_buffer(&self.uniform_buffer, 40, bytemuck::bytes_of(&elapsed_secs));
@@ -1468,9 +1468,9 @@ impl CrtRenderer {
         self.power_on_time_cache.set(elapsed_secs);
     }
 
-    /// Compute the content rect and bar boundary in intermediate texture UV space.
-    /// The scaling renderer maps the pixel buffer to the surface with aspect-ratio
-    /// preservation, creating pillarbox/letterbox bars.
+    // Compute the content rect and bar boundary in intermediate texture UV space.
+    // The scaling renderer maps the pixel buffer to the surface with aspect-ratio
+    // preservation, creating pillarbox/letterbox bars.
     fn compute_uniforms(
         surface_w: u32, surface_h: u32,
         buffer_w: u32, buffer_h: u32,
@@ -1505,14 +1505,15 @@ impl CrtRenderer {
         }
     }
 
-    /// Get a reference to the intermediate texture view.
-    /// The scaling renderer should render into this instead of the final surface.
+    // Get a reference to the intermediate texture view.
+    // The scaling renderer should render into this instead of the final surface.
+    #[allow(clippy::misnamed_getters)]
     pub fn intermediate_view(&self) -> &wgpu::TextureView {
         &self.intermediate_render_view
     }
 
-    /// Clear the intermediate texture to black.
-    /// Call this before the scaling renderer writes to prevent ghosting artifacts.
+    // Clear the intermediate texture to black.
+    // Call this before the scaling renderer writes to prevent ghosting artifacts.
     pub fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder) {
         let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("intermediate_clear_pass"),
@@ -1532,9 +1533,9 @@ impl CrtRenderer {
         // Pass drops immediately, executing the clear
     }
 
-    /// Render the CRT post-processing passes:
-    /// 1. Bloom: blur intermediate → bloom texture (1/4 res)
-    /// 2. Composite: CRT shader with intermediate + bloom → final surface
+    // Render the CRT post-processing passes:
+    // 1. Bloom: blur intermediate → bloom texture (1/4 res)
+    // 2. Composite: CRT shader with intermediate + bloom → final surface
     pub fn render(&self, encoder: &mut wgpu::CommandEncoder, render_target: &wgpu::TextureView, device: &wgpu::Device) {
         // Pipeline order (matches real CRT signal chain):
         //   Pass 0   NTSC decode      (intermediate raw   -> intermediate, copy back)

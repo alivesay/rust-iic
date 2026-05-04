@@ -1,4 +1,4 @@
-use crate::{iou::IOU, mmu::MMU, util::apple_iic_font_index};
+use crate::{iou::Iou, mmu::Mmu, util::apple_iic_font_index};
 use rayon::prelude::*;
 use wide::{CmpGt, CmpLt};
 
@@ -205,7 +205,7 @@ impl Video {
         self.mono_bg = [bg[0], bg[1], bg[2], 255];
     }
 
-    pub fn update(&mut self, iou: &IOU, mmu: &MMU) -> bool {
+    pub fn update(&mut self, iou: &Iou, mmu: &Mmu) -> bool {
         self.frame_count = self.frame_count.wrapping_add(1);
         
         self.framebuffer.fill(0);
@@ -310,7 +310,7 @@ impl Video {
     // Dispatch a single Apple scanline (0..192) to the appropriate
     // per-mode renderer using the captured `scanline_modes` /
     // `scanline_80store` snapshot.
-    fn dispatch_scanline(&mut self, iou: &IOU, mmu: &MMU, scanline: usize) {
+    fn dispatch_scanline(&mut self, iou: &Iou, mmu: &Mmu, scanline: usize) {
         let mode = self.scanline_modes[scanline];
         let is_80store = self.scanline_80store[scanline];
 
@@ -339,8 +339,8 @@ impl Video {
 
     pub fn compose_monitor_partial(
         &mut self,
-        iou: &IOU,
-        mmu: &MMU,
+        iou: &Iou,
+        mmu: &Mmu,
         up_to_scanline: usize,
     ) -> &[u8] {
         let len = self.framebuffer.len();
@@ -699,7 +699,7 @@ impl Video {
             });
     }
 
-    fn read_hires_memory(&self, iou: &IOU, mmu: &MMU, addr: u16) -> u8 {
+    fn read_hires_memory(&self, iou: &Iou, mmu: &Mmu, addr: u16) -> u8 {
         let video_mode = iou.video_mode.get();
         let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
         let is_80store = iou.is_80store.get();
@@ -723,8 +723,8 @@ impl Video {
 
     fn render_text_scanline(
         &mut self,
-        _iou: &IOU,
-        mmu: &MMU,
+        _iou: &Iou,
+        mmu: &Mmu,
         scanline: usize,
         mode: u8,
         is_80store: bool,
@@ -963,8 +963,8 @@ impl Video {
 
     fn render_lores_scanline(
         &mut self,
-        _iou: &IOU,
-        mmu: &MMU,
+        _iou: &Iou,
+        mmu: &Mmu,
         scanline: usize,
         mode: u8,
         is_80store: bool,
@@ -1069,7 +1069,7 @@ impl Video {
     // Render HiRes mode using direct NTSC artifact color palette lookup.
     // HiRes only has 4 possible artifact colors per palette: violet/green
     // (palette 0) and blue/orange (palette 1)
-    fn render_hires_scanline(&mut self, iou: &IOU, mmu: &MMU, scanline: usize) {
+    fn render_hires_scanline(&mut self, iou: &Iou, mmu: &Mmu, scanline: usize) {
         let base_vram: u16 = 0x0000;
 
         let group = scanline / 8;
@@ -1416,7 +1416,7 @@ impl Video {
             );
     }
 
-    fn render_double_hires_scanline(&mut self, _iou: &IOU, mmu: &MMU, scanline: usize) {
+    fn render_double_hires_scanline(&mut self, _iou: &Iou, mmu: &Mmu, scanline: usize) {
         let base_vram: u16 = 0x2000;
 
         let group = scanline / 8;

@@ -276,9 +276,9 @@ impl DummyAudioMixer {
 fn soft_clip(x: f32) -> f32 {
     // Fast soft clipper using polynomial approximation for small values
     // tanh for larger values
-    if x >= -0.5 && x <= 0.5 {
+    if (-0.5..=0.5).contains(&x) {
         x
-    } else if x >= -1.5 && x <= 1.5 {
+    } else if (-1.5..=1.5).contains(&x) {
         // Cubic approximation of tanh in the -1.5..1.5 range
         x - x * x * x / 3.0
     } else {

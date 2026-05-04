@@ -1,8 +1,8 @@
 pub trait PostProcessor {
-    /// Returns the intermediate texture view to render emulator output into.
+    // Returns the intermediate texture view to render emulator output into.
     fn intermediate_view(&self) -> &wgpu::TextureView;
 
-    /// Handle window/surface resize.
+    // Handle window/surface resize.
     fn resize(
         &mut self,
         device: &wgpu::Device,
@@ -11,7 +11,7 @@ pub trait PostProcessor {
         height: u32,
     );
 
-    /// Update the content rect and source dimensions based on actual blit geometry.
+    // Update the content rect and source dimensions based on actual blit geometry.
     fn update_content_rect(
         &self,
         queue: &wgpu::Queue,
@@ -26,25 +26,25 @@ pub trait PostProcessor {
         source_height: f32,
     );
 
-    /// Update the time uniform for animation effects.
+    // Update the time uniform for animation effects.
     fn update_time(&self, queue: &wgpu::Queue, time: f32);
 
-    /// Update the monochrome flag.
+    // Update the monochrome flag.
     fn update_monochrome(&self, queue: &wgpu::Queue, monochrome: bool);
 
-    /// Update text-only mode (disables NTSC color processing like real CRT auto-detect).
+    // Update text-only mode (disables NTSC color processing like real CRT auto-detect).
     fn update_text_mode(&self, queue: &wgpu::Queue, text_only: bool);
 
-    /// Update power-on elapsed time for CRT startup sync effect.
+    // Update power-on elapsed time for CRT startup sync effect.
     fn update_power_on_time(&self, queue: &wgpu::Queue, elapsed_secs: f32);
 
-    /// Update shader-specific parameters.
+    // Update shader-specific parameters.
     fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams);
 
-    /// Clear the intermediate texture to black before rendering.
+    // Clear the intermediate texture to black before rendering.
     fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder);
 
-    /// Execute the post-processing render passes.
+    // Execute the post-processing render passes.
     fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,

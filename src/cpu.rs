@@ -4,7 +4,7 @@ use crate::device::speaker::AudioProducer;
 use crate::disassembler::{Disassembler, SymbolTable};
 use crate::hooks::{HookContext, HookManager};
 use crate::interrupts::InterruptType;
-use crate::rom::ROM;
+use crate::rom::Rom;
 use bitflags::bitflags;
 use core::fmt;
 
@@ -68,8 +68,8 @@ fn format_flags(flags: u8) -> String {
         .collect()
 }
 
-/// Get instruction length in bytes based on opcode
-/// Returns 1, 2, or 3 based on addressing mode
+// Get instruction length in bytes based on opcode
+// Returns 1, 2, or 3 based on addressing mode
 fn instruction_length(opcode: u8) -> u8 {
     // 65C02 instruction lengths by addressing mode pattern
     match opcode {
@@ -124,7 +124,7 @@ const CYCLE_TABLE: [u64; 256] = [
 ];
 
 
-pub struct CPU {
+pub struct Cpu {
     pub system_type: SystemType,
     pub cpu_type: CpuType,
 
@@ -143,16 +143,16 @@ pub struct CPU {
     pub debug: bool,
     extra_cycles: u64,  // Extra cycles for taken branches / page crosses
     
-    /// Hook manager for ROM/execution hooks
+    // Hook manager for ROM/execution hooks
     pub hooks: HookManager,
     
-    /// Whether to capture trace entries for the CPU monitor
+    // Whether to capture trace entries for the CPU monitor
     pub capture_trace: bool,
-    /// Last captured trace entry (valid when capture_trace is true)
+    // Last captured trace entry (valid when capture_trace is true)
     pub last_trace: CpuTraceEntry,
 }
 
-impl CPU {
+impl Cpu {
     pub fn new(system_type: SystemType, cpu_type: CpuType, _target_hz: u32, self_test: bool, audio_producer: AudioProducer, sample_rate: u32) -> Self {
         Self {
             system_type,
@@ -197,7 +197,7 @@ impl CPU {
         default_entry
     }
 
-    pub fn load_rom(&mut self, rom: ROM) {
+    pub fn load_rom(&mut self, rom: Rom) {
         self.bus.load_rom(rom);
     }
 
@@ -338,18 +338,18 @@ impl CPU {
             .interrupts
             .handle_interrupt_with_vectors(nmi_vector, reset_vector, irq_vector)
         {
-            if self.p.contains(Flags::IRQ_DISABLE) && interrupt_type == InterruptType::IRQ {
+            if self.p.contains(Flags::IRQ_DISABLE) && interrupt_type == InterruptType::Irq {
                 return false;
             }
 
-            if interrupt_type == InterruptType::RST {
+            if interrupt_type == InterruptType::Rst {
                 println!("Handling CPU Reset...");
                 self.pc = target_pc;
                 return true;
             }
 
             let pushed_pc = match interrupt_type {
-                InterruptType::BRK => match self.cpu_type {
+                InterruptType::Brk => match self.cpu_type {
                     CpuType::NMOS6502 => self.pc.wrapping_add(1),
                     CpuType::CMOS65C02 | CpuType::WDC65C02S => self.pc.wrapping_add(1),
                 },
@@ -361,7 +361,7 @@ impl CPU {
 
             let mut pushed_p = self.p;
             pushed_p.insert(Flags::UNUSED);
-            pushed_p.set(Flags::BREAK, interrupt_type == InterruptType::BRK);
+            pushed_p.set(Flags::BREAK, interrupt_type == InterruptType::Brk);
 
             self.push_stack(pushed_p.bits());
 
@@ -374,13 +374,13 @@ impl CPU {
 
             self.pc = target_pc;
 
-            if interrupt_type == InterruptType::IRQ {
+            if interrupt_type == InterruptType::Irq {
                 self.bus.interrupts.irq = false;
                 self.bus.interrupts.leave_wait();
                 return false;
             }
 
-            if interrupt_type == InterruptType::NMI {
+            if interrupt_type == InterruptType::Nmi {
                 self.bus.interrupts.nmi = false;
                 self.bus.interrupts.leave_wait();
                 return false;
@@ -402,9 +402,8 @@ impl CPU {
     fn fetch_word(&mut self) -> u16 {
         let lo = self.fetch_byte() as u16;
         let hi = self.fetch_byte() as u16;
-        let word = (hi << 8) | lo;
-
-        word
+        
+        (hi << 8) | lo
     }
 
     fn fetch_indirect_x(&mut self) -> u16 {
@@ -440,7 +439,7 @@ impl CPU {
         self.bus.read_byte(0x0100 | self.regs.sp as u16)
     }
 
-    /// Take a relative branch: +1 cycle for taken, +1 more if page crossed
+    // Take a relative branch: +1 cycle for taken, +1 more if page crossed
     fn branch(&mut self, offset: i8) {
         let old_pc = self.pc;
         self.pc = self.pc.wrapping_add_signed(offset as i16);
@@ -570,7 +569,6 @@ impl CPU {
 
         let opcode = self.fetch_byte();
 
-        // Capture trace entry if monitoring is enabled (fast path - just struct copy)
         if self.capture_trace {
             // Peek at operand bytes without advancing PC
             let operand1 = self.bus.read_byte(self.pc);
@@ -593,7 +591,7 @@ impl CPU {
         }
 
         // tick base cycles *before* execution so that iou.cycles is accurate
-        let base_cycles = CYCLE_TABLE[opcode as usize] as u64;
+        let base_cycles = CYCLE_TABLE[opcode as usize];
         self.bus.tick(base_cycles);
 
         self.extra_cycles = 0;
@@ -1418,7 +1416,7 @@ impl CPU {
 
             0xB6 => {
                 let base_addr = self.fetch_byte() as u16;
-                let addr = (base_addr.wrapping_add(self.regs.y as u16) & 0x00FF) as u16;
+                let addr = base_addr.wrapping_add(self.regs.y as u16) & 0x00FF;
                 let value = self.bus.read_byte(addr);
 
                 self.regs.x = value;
@@ -1511,14 +1509,14 @@ impl CPU {
 
             0xD5 => {
                 let base = self.fetch_byte();
-                let addr = (base.wrapping_add(self.regs.x) & 0x00FF) as u16;
+                let addr = base.wrapping_add(self.regs.x) as u16;
                 let value = self.bus.read_byte(addr);
                 self.compare(self.regs.a, value);
             }
 
             0xB5 => {
                 let base = self.fetch_byte();
-                let addr = (base.wrapping_add(self.regs.x) & 0x00FF) as u16;
+                let addr = base.wrapping_add(self.regs.x) as u16;
                 let value = self.bus.read_byte(addr);
                 self.regs.a = value;
                 self.update_zero_and_negative_flags(self.regs.a);
@@ -1570,7 +1568,7 @@ impl CPU {
 
             0xA1 => {
                 let base_address = self.fetch_byte();
-                let zp_addr = base_address.wrapping_add(self.regs.x) & 0xFF;
+                let zp_addr = base_address.wrapping_add(self.regs.x);
                 let effective_address = self.bus.read_word(zp_addr as u16);
                 self.regs.a = self.bus.read_byte(effective_address);
                 self.update_zero_and_negative_flags(self.regs.a);
@@ -1578,7 +1576,7 @@ impl CPU {
 
             0x81 => {
                 let base_address = self.fetch_byte();
-                let zp_addr = (base_address.wrapping_add(self.regs.x)) & 0xFF;
+                let zp_addr = base_address.wrapping_add(self.regs.x);
                 let effective_address = self.bus.read_word(zp_addr as u16);
 
                 self.bus.write_byte(effective_address, self.regs.a);
@@ -1742,7 +1740,7 @@ impl CPU {
 
             0xF6 => {
                 let base_addr = self.fetch_byte();
-                let addr = (base_addr.wrapping_add(self.regs.x)) as u8 as u16;
+                let addr = (base_addr.wrapping_add(self.regs.x)) as u16;
 
                 let mut value = self.bus.read_byte(addr);
                 value = value.wrapping_add(1);

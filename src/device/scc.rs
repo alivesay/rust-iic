@@ -317,10 +317,9 @@ impl SccChannel {
                     let clock_mode = match (value >> 6) & 0x03 {
                         0 => "x1", 1 => "x16", 2 => "x32", 3 => "x64", _ => "?",
                     };
-                    println!("SCC[{}]: WR4={:#04X} parity={}{} stop={} clock={}",
+                    println!("SCC[{}]: WR4={:#04X} parity={} stop={} clock={}",
                         self.id, value,
-                        if parity_en { if parity_even { "even" } else { "odd" } } else { "none" },
-                        "", stop, clock_mode);
+                        if parity_en { if parity_even { "even" } else { "odd" } } else { "none" }, stop, clock_mode);
                 }
             }
 

@@ -38,7 +38,7 @@ use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use crate::app::{run_monitor_mode, App};
 use crate::audio_mixer::AudioMixer;
 use crate::cli::{Args, ShaderType};
-use crate::cpu::{CpuType, SystemType, CPU};
+use crate::cpu::{CpuType, SystemType, Cpu};
 
 const BANNER: &str = r#"*
      ██▀███   █    ██   ██████ ▄▄▄█████▓ ██▓ ██▓ ▄████▄  
@@ -83,7 +83,7 @@ fn main() -> Result<(), Error> {
         println!("audio {:>12} {:>8}    {} Hz", "MIXER", "ONLINE", sample_rate);
     }
 
-    let mut cpu = CPU::new(
+    let mut cpu = Cpu::new(
         SystemType::AppleIIc,
         CpuType::CMOS65C02,
         (args.speed as f64 * timing::CYCLES_PER_SECOND) as u32,
@@ -188,7 +188,7 @@ fn main() -> Result<(), Error> {
             std::process::exit(2);
         }
     };
-    let iic_rom = rom::ROM::load_from_bytes(&iic_rom_bytes, cpu.system_type).unwrap();
+    let iic_rom = rom::Rom::load_from_bytes(&iic_rom_bytes, cpu.system_type).unwrap();
     cpu.load_rom(iic_rom);
     cpu.init();
 
@@ -306,7 +306,7 @@ fn main() -> Result<(), Error> {
 }
 
 /// Run emulator in headless (no video) mode.
-fn run_headless(mut cpu: CPU) {
+fn run_headless(mut cpu: Cpu) {
     loop {
         cpu.tick();
         if cpu.bus.interrupts.halted {
@@ -317,7 +317,7 @@ fn run_headless(mut cpu: CPU) {
 }
 
 fn run_gui(
-    mut cpu: CPU,
+    mut cpu: Cpu,
     args: &Args,
     config: config::Config,
     audio_controls: Option<audio_mixer::AudioControls>,
@@ -558,7 +558,7 @@ fn run_gui(
 
         if let PumpStatus::Exit(exit_code) = status {
             app.flush_disks();
-            std::process::exit(exit_code as i32);
+            std::process::exit(exit_code);
         }
 
         // snap window to aspect ratio after user finishes resizing
@@ -585,7 +585,7 @@ fn run_gui(
             } else {
                 6
             };
-            if monitor_frame_ctr % stride == 0 {
+            if monitor_frame_ctr.is_multiple_of(stride) {
                 mw.request_redraw();
                 diag_monitor_redraws += 1;
             }

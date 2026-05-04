@@ -625,10 +625,8 @@ impl Iwm {
         let raw: Vec<u8>;
         let final_path_for_disk: String;
         let mut converted = false;
-        if raw_bytes.len() > 256 && &raw_bytes[0..4] == b"WOZ1" {
-            raw = raw_bytes;
-            final_path_for_disk = effective_path;
-        } else if raw_bytes.len() > 1536 && &raw_bytes[0..4] == b"WOZ2" {
+        if (raw_bytes.len() > 256 && &raw_bytes[0..4] == b"WOZ1") ||
+            (raw_bytes.len() > 1536 && &raw_bytes[0..4] == b"WOZ2") {
             raw = raw_bytes;
             final_path_for_disk = effective_path;
         } else {
@@ -887,8 +885,8 @@ impl Iwm {
         self.drives[d].cycles_since_save_check += cycles;
 
         // Check if we need to load track
-        if self.drives[d].head_pos % 4 == 0 {
-            let track_num = (self.drives[d].head_pos / 4) as u16;
+        if self.drives[d].head_pos.is_multiple_of(4) {
+            let track_num = self.drives[d].head_pos / 4;
 
             if track_num < 35 && self.drives[d].loaded_track != Some(track_num as u8) {
                 if self.drives[d].dirty {
@@ -1596,8 +1594,8 @@ impl Iwm {
                 // Motor-On=0 + L6=1+L7=1 → mode register
                 // Motor-On=1 + L6=1+L7=1 → write data register (write load)
                 self.q6 = true;
-                if write {
-                    if self.q7 {
+                if write
+                    && self.q7 {
                         if self.motor_on {
                             // Write Load: load data into write buffer
                             if self.is_smartport_write_routed(effective_disk35_mode) {
@@ -1611,7 +1609,6 @@ impl Iwm {
                             if self.debug { println!("IWM Mode set to: {:02X} (via Q6H)", self.mode); }
                         }
                     }
-                }
             },
             0xE => {
                 // L7 going OFF = leaving write mode.
@@ -1718,9 +1715,7 @@ impl Iwm {
             //   L7=1, L6=1, Motor=1  →  (write load state, return buffer for verify)
             match (self.q7, self.q6) {
                 (false, false) => {
-                     if self.is_smartport_data_active(effective_disk35_mode) {
-                         self.read_data(floating_bus, effective_disk35_mode)
-                     } else if self.motor_on {
+                     if self.is_smartport_data_active(effective_disk35_mode) || self.motor_on {
                          self.read_data(floating_bus, effective_disk35_mode)
                      } else {
                          floating_bus  // Motor off returns floating bus

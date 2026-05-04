@@ -1,4 +1,4 @@
-use crate::{iou::IOU, memory::Memory, rom::ROM, video::VideoModeMask};
+use crate::{iou::Iou, memory::Memory, rom::Rom, video::VideoModeMask};
 
 const RAM_SIZE: usize = 64 * 1024;
 const ROM_SIZE: usize = 16 * 1024;
@@ -62,14 +62,14 @@ impl LcRamMode {
     pub const C08F: u8 = MemStateMask::LCRAM | MemStateMask::WRITE;
 }
 
-pub struct MMU {
+pub struct Mmu {
     rom: [Memory; 2],   // Two 16KB ROM banks | [ROM1, ROM2]
     ram: [Memory; 2],   // 64KB Main and Auxiliary RAM | [MAIN, AUX]
     lcram: [Memory; 4], // Four 4KB Language Card RAM banks | [MAIN1, MAIN2, AUX1, AUX2]
     lcram_high: [Memory; 2], // Two 8KB high LC RAM banks | [MAIN, AUX]
 }
 
-impl MMU {
+impl Mmu {
     pub fn new() -> Self {
         let mut mmu = Self {
             rom: [
@@ -107,7 +107,7 @@ impl MMU {
         }
     }
 
-    pub fn load_rom(&mut self, rom: ROM) {
+    pub fn load_rom(&mut self, rom: Rom) {
         // v3 iic rom boundary $3fff
         self.rom[0].load_bytes(0, &rom.data[0..ROM_SIZE]);
         self.rom[1].load_bytes(0, &rom.data[ROM_SIZE..(ROM_SIZE << 1)]);
@@ -129,7 +129,7 @@ impl MMU {
         self.ram[1].read_byte(addr)
     }
 
-    pub fn read_byte(&self, iou: &mut IOU, addr: u16) -> u8 {
+    pub fn read_byte(&self, iou: &mut Iou, addr: u16) -> u8 {
         let mem_state = iou.mem_state.get();
         let video_mode = iou.video_mode.get();
         let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
@@ -228,7 +228,7 @@ impl MMU {
 
     pub fn write_byte(
         &mut self,
-        iou: &mut IOU,
+        iou: &mut Iou,
         addr: u16,
         value: u8,
         mem_state: u8,

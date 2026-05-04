@@ -36,6 +36,7 @@ pub const BLOCK_SIZE: usize = 512;
 pub const MAX_BLOCKS: u32 = 65535;
 
 // SmartPort block device (hard drive image)
+#[derive(Default)]
 pub struct SmartPortDevice {
     // Path to the image file
     pub path: String,
@@ -55,20 +56,6 @@ pub struct SmartPortDevice {
     pub debug: bool,
 }
 
-impl Default for SmartPortDevice {
-    fn default() -> Self {
-        Self {
-            path: String::new(),
-            file: None,
-            data_offset: 0,
-            block_count: 0,
-            write_protected: false,
-            enabled: false,
-            dirty: false,
-            debug: false,
-        }
-    }
-}
 
 impl SmartPortDevice {
     pub fn new() -> Self {

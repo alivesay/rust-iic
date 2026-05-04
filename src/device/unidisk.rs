@@ -142,7 +142,7 @@ impl UniDisk35 {
     // a wire-protocol response packet.
     pub fn execute(&mut self, cmd: u8, decoded: &[u8]) -> CommandResult {
         // Light up the drive activity indicator for a few frames
-        if matches!(cmd, 0x01 | 0x02 | 0x03) {
+        if matches!(cmd, 0x01..=0x03) {
             self.active_frames = 6;
         }
         match cmd {

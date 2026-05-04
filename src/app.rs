@@ -18,7 +18,7 @@ use winit::platform::macos::WindowExtMacOS;
 use crate::cli::ShaderType;
 use crate::config::Config;
 use crate::audio_mixer::AudioControls;
-use crate::cpu::CPU;
+use crate::cpu::Cpu;
 use crate::cpu_monitor::{CpuMonitor, CpuState};
 use crate::cpu_monitor_window::CpuMonitorWindow;
 use crate::device::drive_audio::DriveAudioParams;
@@ -32,7 +32,7 @@ use crate::settings_window::{render_settings_window, SettingsState};
 pub struct App {
     pub pixels: Option<Pixels<'static>>,
     pub window: Option<Arc<Window>>,
-    pub cpu: CPU,
+    pub cpu: Cpu,
     pub surface_width: u32,
     pub surface_height: u32,
     pub buffer_width: u32,
@@ -87,12 +87,12 @@ pub struct FrameProgress {
 
 impl App {
     #[allow(dead_code)]
-    pub fn new(cpu: CPU, shader_type: ShaderType, start_fullscreen: bool, mouse_enabled: bool) -> Self {
+    pub fn new(cpu: Cpu, shader_type: ShaderType, start_fullscreen: bool, mouse_enabled: bool) -> Self {
         Self::new_with_config(cpu, shader_type, start_fullscreen, mouse_enabled, Config::default())
     }
 
     pub fn new_with_config(
-        cpu: CPU,
+        cpu: Cpu,
         shader_type: ShaderType,
         start_fullscreen: bool,
         mouse_enabled: bool,
@@ -1990,7 +1990,7 @@ impl App {
     }
 }
 
-pub fn run_monitor_mode(cpu: &mut CPU) {
+pub fn run_monitor_mode(cpu: &mut Cpu) {
     let mut monitor = Monitor::new(cpu);
     monitor.repl();
 }

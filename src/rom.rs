@@ -4,11 +4,11 @@ use std::io::{self, BufRead, BufReader, Read};
 use crate::cpu::SystemType;
 use crate::util::hexdump;
 
-pub struct ROM {
+pub struct Rom {
     pub data: Vec<u8>,
 }
 
-impl ROM {
+impl Rom {
     pub fn load_from_file(filename: &str, system_type: SystemType) -> io::Result<Self> {
         let mut file = File::open(filename)?;
         let mut data = Vec::new();

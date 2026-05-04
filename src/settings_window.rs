@@ -36,21 +36,13 @@ pub struct SettingsResult {
     pub status_message: Option<String>,
 }
 
+#[derive(Default)]
 pub struct SettingsState {
     pub active_tab: SettingsTab,
     pub status: Option<String>,
     pub just_opened: bool,
 }
 
-impl Default for SettingsState {
-    fn default() -> Self {
-        Self {
-            active_tab: SettingsTab::default(),
-            status: None,
-            just_opened: false,
-        }
-    }
-}
 
 pub fn render_settings_window(
     ctx: &egui::Context,

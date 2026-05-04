@@ -128,11 +128,10 @@ impl Mouse {
                 self.x_dir.set(true);
             }
             let x0 = self.x0.get();
-            if (x0 && self.x0_edge.get()) || (!x0 && !self.x0_edge.get()) {
-                if self.xy_mask.get() {
+            if ((x0 && self.x0_edge.get()) || (!x0 && !self.x0_edge.get()))
+                && self.xy_mask.get() {
                     self.x_int.set(true);
                 }
-            }
             self.x0.set(!x0);
         }
 
@@ -146,11 +145,10 @@ impl Mouse {
                 self.y_dir.set(false);
             }
             let y0 = self.y0.get();
-            if (y0 && self.y0_edge.get()) || (!y0 && !self.y0_edge.get()) {
-                if self.xy_mask.get() {
+            if ((y0 && self.y0_edge.get()) || (!y0 && !self.y0_edge.get()))
+                && self.xy_mask.get() {
                     self.y_int.set(true);
                 }
-            }
             self.y0.set(!y0);
         }
     }

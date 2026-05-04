@@ -46,8 +46,10 @@ pub struct HookContext {
 // Filter conditions for hooks - determines when a hook should be active
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
+#[derive(Default)]
 pub enum HookFilter {
     // Always active (no filtering)
+    #[default]
     Always,
     // Only when ProDOS is detected (checks MLI signature at $BF00)
     ProDOS,
@@ -65,12 +67,6 @@ pub enum HookFilter {
     Any(Vec<HookFilter>),
     // Invert another filter
     Not(Box<HookFilter>),
-}
-
-impl Default for HookFilter {
-    fn default() -> Self {
-        HookFilter::Always
-    }
 }
 
 // A registered hook
@@ -327,7 +323,7 @@ impl HookManager {
                 // Check $67-$68 (MEMSIZ) is reasonable for BASIC
                 let memsiz_lo = peek(0x67);
                 let memsiz_hi = peek(0x68);
-                memsiz_hi >= 0x08 && memsiz_hi <= 0xBF && memsiz_lo == 0x00
+                (0x08..=0xBF).contains(&memsiz_hi) && memsiz_lo == 0x00
             }
             
             HookFilter::MemorySignature(addr, bytes) => {

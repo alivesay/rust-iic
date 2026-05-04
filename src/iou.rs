@@ -3,9 +3,9 @@ use std::collections::VecDeque;
 
 use crate::{device::{iwm::Iwm, paddle::Paddle, keyboard::Keyboard, memexp::MemoryExpansion, mockingboard::Mockingboard, mouse::Mouse, scc::Scc, speaker::{AudioProducer, Speaker}, zip::ZipChip}, mmu::{LcRamMode, MemStateMask, LCRAMMODEMASK}, timing, video::VideoModeMask};
 
-/// Even $C08x access: apply mode (never includes WRITE).
-/// Also resets the consecutive-read tracking since any even access
-/// breaks the double-read sequence needed for write-enable.
+// Even $C08x access: apply mode (never includes WRITE).
+// Also resets the consecutive-read tracking since any even access
+// breaks the double-read sequence needed for write-enable.
 macro_rules! set_lcram_mode {
   ($mem_state:expr, $mode:expr, $last_addr:expr) => {{
       let current = $mem_state.get();
@@ -15,9 +15,9 @@ macro_rules! set_lcram_mode {
   }};
 }
 
-/// Odd $C08x access: WRITE is enabled only on the second consecutive
-/// access of the SAME odd address. On first access of a different odd
-/// address, the WRITE latch is preserved.
+// Odd $C08x access: WRITE is enabled only on the second consecutive
+// access of the SAME odd address. On first access of a different odd
+// address, the WRITE latch is preserved.
 macro_rules! set_lcram_mode_rr {
   ($mem_state:expr, $mode:expr, $addr:expr, $last_addr:expr) => {{
       let current_mode = $mode;
@@ -40,7 +40,7 @@ macro_rules! set_lcram_mode_rr {
   }};
 }
 
-pub struct IOU {
+pub struct Iou {
   pub mem_state: Cell<u8>,
   pub last_read_addr: Cell<u16>,
   pub current_pc: Cell<u16>,
@@ -81,7 +81,7 @@ pub struct IouAccessEntry {
 
 pub const IOU_ACCESS_LOG_CAP: usize = 64;
 
-impl IOU {
+impl Iou {
     pub fn new(self_test: bool, audio_producer: AudioProducer, sample_rate: u32) -> Self {
       Self {
           mem_state: Cell::new(MemStateMask::INIT),
@@ -127,17 +127,17 @@ impl IOU {
         });
     }
 
-    /// Enable or disable the ZIP Chip accelerator.
+    // Enable or disable the ZIP Chip accelerator.
     pub fn set_zip_enabled(&mut self, present: bool) {
         self.zip = ZipChip::new(present);
     }
 
-    /// Enable the Mockingboard sound card in slot 5.
+    // Enable the Mockingboard sound card in slot 5.
     pub fn set_mockingboard_enabled(&mut self, enabled: bool) {
         self.mockingboard.set_enabled(enabled);
     }
 
-    /// Enable the second Mockingboard in slot 4 (disables memory expansion).
+    // Enable the second Mockingboard in slot 4 (disables memory expansion).
     pub fn set_mockingboard2_enabled(&mut self, enabled: bool) {
         self.mockingboard2.set_enabled(enabled);
         if enabled {
@@ -232,7 +232,7 @@ impl IOU {
         // Bit 6: 0=5.25" drives, 1=3.5"/SmartPort mode
         // Bit 7: Read/Write head select (for double-sided 3.5")
         0xC031 => {
-            ((self.disk35_mode as u8) << 6) | ((self.iwm.get_head35() as u8) << 7)
+            ((self.disk35_mode as u8) << 6) | (self.iwm.get_head35() << 7)
         },
 
         // Zilog 8530 SCC — $C038: ChB Cmd, $C039: ChA Cmd, $C03A: ChB Data, $C03B: ChA Data
@@ -443,33 +443,17 @@ impl IOU {
 
       let result = match addr {
           0xC000 => { 
-              if self.debug { println!("IOU: 80STORE OFF"); }
             self.is_80store.set(false);
-            0x00 
+            0x00
           },
           0xC001 => { 
-              if self.debug { println!("IOU: 80STORE ON"); }
             self.is_80store.set(true);
             0x00 
           },
-          0xC00C => {
-              if self.debug { println!("IOU: 80COL OFF"); }
-            let result = clear_bits_cell!(self.video_mode, VideoModeMask::COL80);
-            result
-          },
-          0xC00D => {
-              if self.debug { println!("IOU: 80COL ON"); }
-            let result = set_bits_cell!(self.video_mode, VideoModeMask::COL80);
-            result
-          },
-          0xC00E => {
-              if self.debug { println!("IOU: ALTCHAR OFF"); }
-              clear_bits_cell!(self.video_mode, VideoModeMask::ALTCHAR)
-          },
-          0xC00F => {
-              if self.debug { println!("IOU: ALTCHAR ON"); }
-              set_bits_cell!(self.video_mode, VideoModeMask::ALTCHAR)
-          },
+          0xC00C => clear_bits_cell!(self.video_mode, VideoModeMask::COL80),
+          0xC00D => set_bits_cell!(self.video_mode, VideoModeMask::COL80),
+          0xC00E => clear_bits_cell!(self.video_mode, VideoModeMask::ALTCHAR),
+          0xC00F => set_bits_cell!(self.video_mode, VideoModeMask::ALTCHAR),
             0xC010 => {
                 // KBDSTRB - writing also clears the strobe
                 self.keyboard.write_strobe();
@@ -537,51 +521,23 @@ impl IOU {
           
           0xC028 => toggle_bits_cell!(self.mem_state, MemStateMask::ALTROM),
 
-
           0xC006 | 0xC007 | 0xC00A | 0xC00B => 0x00,
 
-          0xC050 => {
-              if self.debug { println!("IOU: TEXT OFF"); }
-              let result = clear_bits_cell!(self.video_mode, VideoModeMask::TEXT);
-              result
-          }, 
-          0xC051 => {
-              if self.debug { println!("IOU: TEXT ON"); }
-              let result = set_bits_cell!(self.video_mode, VideoModeMask::TEXT);
-              result
-          },   
-          0xC052 => {
-              if self.debug { println!("IOU: MIXED OFF"); }
-              let result = clear_bits_cell!(self.video_mode, VideoModeMask::MIXED);
-              result
-          }, 
-          0xC053 => {
-              if self.debug { println!("IOU: MIXED ON"); }
-              let result = set_bits_cell!(self.video_mode, VideoModeMask::MIXED);
-              result
-          },   
-          0xC054 => {
-              if self.debug { println!("IOU: PAGE2 OFF"); }
-              let result = clear_bits_cell!(self.video_mode, VideoModeMask::PAGE2);
-              result
-          }, 
-          0xC055 => {
-              if self.debug { println!("IOU: PAGE2 ON"); }
-              let result = set_bits_cell!(self.video_mode, VideoModeMask::PAGE2);
-              result
-          },   
+          0xC050 => clear_bits_cell!(self.video_mode, VideoModeMask::TEXT), 
+          0xC051 => set_bits_cell!(self.video_mode, VideoModeMask::TEXT),
+          0xC052 => clear_bits_cell!(self.video_mode, VideoModeMask::MIXED), 
+          0xC053 => set_bits_cell!(self.video_mode, VideoModeMask::MIXED),   
+          0xC054 => clear_bits_cell!(self.video_mode, VideoModeMask::PAGE2), 
+          0xC055 => set_bits_cell!(self.video_mode, VideoModeMask::PAGE2),   
 
           0xC056 => {
-            if self.debug { println!("IOU: LORES ON / HIRES OFF"); }
             clear_bits_cell!(self.video_mode, VideoModeMask::HIRES);
-            let result = set_bits_cell!(self.video_mode, VideoModeMask::LORES);
-            result
+            set_bits_cell!(self.video_mode, VideoModeMask::LORES)
           },
           0xC057 => {
             if self.debug { println!("IOU: HIRES ON / LORES OFF"); }
             clear_bits_cell!(self.video_mode, VideoModeMask::LORES);
-            let result = set_bits_cell!(self.video_mode, VideoModeMask::HIRES);
-            result
+            set_bits_cell!(self.video_mode, VideoModeMask::HIRES)
           },
 
           0xC062 => 0x00, // Ignore write to Button 1

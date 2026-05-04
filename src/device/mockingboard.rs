@@ -216,7 +216,7 @@ impl Ay8910 {
             if self.noise_counter == 0 {
                 self.noise_counter = self.noise_period;
                 // 17-bit LFSR: taps at bits 0 and 2
-                let bit = ((self.rng >> 0) ^ (self.rng >> 2)) & 1;
+                let bit = (self.rng ^ (self.rng >> 2)) & 1;
                 self.rng = (self.rng >> 1) | (bit << 16);
                 self.noise_output = (self.rng & 1) != 0;
             } else {

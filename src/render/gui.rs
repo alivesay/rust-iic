@@ -21,7 +21,7 @@ fn rasterize_apple_label(text: &str) -> (usize, usize, Vec<u8>) {
     for (ci, ch) in text.chars().enumerate() {
         // Map ASCII to font ROM offset: uppercase A-Z at 0x40-0x5A, numbers/symbols at 0x20-0x3F
         let code = ch as u8;
-        let font_index = if code >= 0x20 && code <= 0x7F {
+        let font_index = if (0x20..=0x7F).contains(&code) {
             code as usize
         } else {
             0x20
@@ -123,8 +123,6 @@ pub fn blit_direct(frame: &mut [u8], src: &[u8]) {
 }
 
 // Nearest-neighbor blit from src into frame at (dst_x, dst_y) scaled to (dst_w × dst_h).
-// Preserves pixel-perfect sharpness, each source pixel maps to an integer number of
-// destination pixels. Caller should ensure dst_w/dst_h are integer multiples of src_w/src_h.
 pub fn blit_nearest(
     frame: &mut [u8],
     frame_w: u32,

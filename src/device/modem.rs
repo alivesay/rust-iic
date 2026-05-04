@@ -81,7 +81,7 @@ impl HayesModem {
                         self.plus_count = 0;
                         for _ in 0..count {
                             if let Some(ref mut s) = stream {
-                                let _ = s.write_all(&[b'+']);
+                                let _ = s.write_all(b"+");
                             }
                         }
                     }

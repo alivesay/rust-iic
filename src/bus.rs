@@ -1,10 +1,10 @@
 use crate::cpu::{CpuType, SystemType};
 use crate::device::speaker::AudioProducer;
 use crate::interrupts::InterruptController;
-use crate::iou::IOU;
+use crate::iou::Iou;
 use crate::memory::Memory;
-use crate::mmu::MMU;
-use crate::rom::ROM;
+use crate::mmu::Mmu;
+use crate::rom::Rom;
 use crate::util::mem_state_to_string;
 use crate::video::{Video, VideoModeMask};
 use crate::timing;
@@ -14,8 +14,8 @@ const RAM_BANK_SIZE: usize = 48 * 1024;
 
 pub struct Bus {
     system_type: SystemType,
-    pub iou: IOU,
-    mmu: MMU,
+    pub iou: Iou,
+    mmu: Mmu,
     bus_ram: Memory,
     pub interrupts: InterruptController,
 
@@ -34,8 +34,8 @@ impl Bus {
 
         Self {
             system_type,
-            iou: IOU::new(self_test, audio_producer, sample_rate),
-            mmu: MMU::new(),
+            iou: Iou::new(self_test, audio_producer, sample_rate),
+            mmu: Mmu::new(),
             interrupts: InterruptController::default(),
 
             video: Video::new(),
@@ -76,7 +76,7 @@ impl Bus {
         self.video.compose_monitor_partial(&self.iou, &self.mmu, up_to_scanline)
     }
 
-    pub fn load_rom(&mut self, rom: ROM) {
+    pub fn load_rom(&mut self, rom: Rom) {
         if self.system_type == SystemType::AppleIIc {
             self.mmu.load_rom(rom);
         } else {
@@ -86,7 +86,7 @@ impl Bus {
 
     pub fn peek_byte(&mut self, addr: u16) -> u8 {
         if self.system_type == SystemType::AppleIIc {
-            if addr >= 0xC000 && addr <= 0xC0FF {
+            if (0xC000..=0xC0FF).contains(&addr) {
                 // TODO: for now, return 0 for soft switches to avoid side effects
                 0x00
             } else {
@@ -108,7 +108,7 @@ impl Bus {
 
     pub fn read_byte(&mut self, addr: u16) -> u8 {
         if self.system_type == SystemType::AppleIIc {
-            if addr >= 0xC000 && addr <= 0xC0FF {
+            if (0xC000..=0xC0FF).contains(&addr) {
                 let result = self.handle_iic_read(addr);
                 if self.debug {
                     println!("SoftSwitch Read: {:#06X} = {:#04X}", addr, result);
@@ -138,7 +138,7 @@ impl Bus {
 
     pub fn write_byte(&mut self, addr: u16, value: u8) -> u8 {
         if self.system_type == SystemType::AppleIIc {
-            if addr >= 0xC000 && addr <= 0xC0FF {
+            if (0xC000..=0xC0FF).contains(&addr) {
                 let result = self.handle_iic_write(addr, value);
                 if self.debug {
                     println!("SoftSwitch Write: {:#06X} = {:#04X}", addr, value);

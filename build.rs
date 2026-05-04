@@ -11,17 +11,42 @@ fn main() {
 
     fs::create_dir_all(build_dir).expect("Failed to create build/asm directory");
 
-    let asm_sources: Vec<PathBuf> = fs::read_dir(asm_dir)
+    // Top-level modules: asm/<name>.s + asm/<name>.cfg -> build/asm/<name>.bin
+    let mut asm_sources: Vec<(PathBuf, PathBuf)> = fs::read_dir(asm_dir)
         .expect("Failed to read asm directory")
         .filter_map(|entry| {
             let path = entry.ok()?.path();
-            if path.extension()?.to_str()? == "s" {
-                Some(path)
-            } else {
-                None
+            if path.extension()?.to_str()? != "s" {
+                return None;
             }
+            let base = path.file_stem()?.to_string_lossy().into_owned();
+            let cfg = asm_dir.join(format!("{base}.cfg"));
+            Some((path, cfg))
         })
         .collect();
+
+    // Game projects: asm/games/<name>/<name>.s + asm/games/<name>/<name>.cfg
+    // -> build/asm/<name>.bin (same flat output dir as top-level modules).
+    let games_dir = asm_dir.join("games");
+    if games_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&games_dir) {
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                let name = match dir.file_name().and_then(|s| s.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                let src = dir.join(format!("{name}.s"));
+                let cfg = dir.join(format!("{name}.cfg"));
+                if src.is_file() && cfg.is_file() {
+                    asm_sources.push((src, cfg));
+                }
+            }
+        }
+    }
 
     if asm_sources.is_empty() {
         println!("cargo:warning=No assembly source files found in asm/");
@@ -30,15 +55,14 @@ fn main() {
 
     let have_ca65 = which("ca65") && which("ld65");
 
-    for source in &asm_sources {
+    for (source, cfg_file) in &asm_sources {
         let base_name = source.file_stem().unwrap().to_string_lossy().into_owned();
-        let cfg_file = asm_dir.join(format!("{base_name}.cfg"));
         let bin_file = build_dir.join(format!("{base_name}.bin"));
 
         println!("cargo:rerun-if-changed={}", source.display());
         println!("cargo:rerun-if-changed={}", cfg_file.display());
 
-        let needs_rebuild = match (mtime(&bin_file), mtime(source), mtime(&cfg_file)) {
+        let needs_rebuild = match (mtime(&bin_file), mtime(source), mtime(cfg_file)) {
             (Some(b), Some(s), c_opt) => {
                 let cfg_newer = c_opt.map(|c| c > b).unwrap_or(false);
                 s > b || cfg_newer
@@ -78,7 +102,7 @@ fn main() {
 
         let status = Command::new("ld65")
             .arg("-C")
-            .arg(&cfg_file)
+            .arg(cfg_file)
             .arg(&obj_file)
             .arg("-o")
             .arg(&bin_file)

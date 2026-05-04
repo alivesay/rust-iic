@@ -1,17 +1,17 @@
-use crate::cpu::CPU;
-use crate::rom::ROM;
+use crate::cpu::Cpu;
+use crate::rom::Rom;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
 pub struct Monitor<'a> {
-    cpu: &'a mut CPU,
+    cpu: &'a mut Cpu,
     breakpoints: HashSet<u16>,
 }
 
 impl<'a> Monitor<'a> {
-    pub fn new(cpu: &'a mut CPU) -> Self {
+    pub fn new(cpu: &'a mut Cpu) -> Self {
         cpu.bus.interrupts.enter_halt();
         Self {
             cpu,
@@ -112,7 +112,7 @@ impl<'a> Monitor<'a> {
             .and_then(|s| u16::from_str_radix(s, 16).ok())
             .unwrap_or(0x0000);
 
-        match ROM::load_from_file(filename, self.cpu.system_type) {
+        match Rom::load_from_file(filename, self.cpu.system_type) {
             Ok(rom) => {
                 self.cpu.bus.write_bytes(load_address, &rom.data);
                 println!(

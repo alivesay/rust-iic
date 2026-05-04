@@ -1,9 +1,9 @@
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum InterruptType {
-    NMI,
-    IRQ,
-    BRK,
-    RST,
+    Nmi,
+    Irq,
+    Brk,
+    Rst,
 }
 
 #[derive(Default)]
@@ -73,15 +73,15 @@ impl InterruptController {
         }
 
         let (interrupt_type, resolved_vector) = if self.nmi {
-            (InterruptType::NMI, nmi_vector)
+            (InterruptType::Nmi, nmi_vector)
         } else if self.reset {
             self.reset = false;
-            (InterruptType::RST, reset_vector)
+            (InterruptType::Rst, reset_vector)
         } else if self.brk {
             self.brk = false;
-            (InterruptType::BRK, irq_vector)
+            (InterruptType::Brk, irq_vector)
         } else if self.irq {
-            (InterruptType::IRQ, irq_vector)
+            (InterruptType::Irq, irq_vector)
         } else {
             return None;
         };
