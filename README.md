@@ -160,7 +160,15 @@ term is loaded into RAM and connected to a loopback BBS.
 
 The Asimov **FILEZ** section for example:
 
-![Filez](docs/screenshots/filez.png)
+![FILEZ](docs/screenshots/filez.png)
+
+Or reading **TEXTZ**...
+
+![TEXTZ](docs/screenshots/textz.png)
+
+Telnet with vt100 emulation, in DHIRES 80-column w/ ANSI color highlighting:
+
+![TEXTZ](docs/screenshots/anet.png)
 
 ## CPU Monitor
 
