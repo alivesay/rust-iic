@@ -17,6 +17,7 @@ env:
   BIN_NAME: rust-iic
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -29,10 +30,6 @@ jobs:
           - label: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
-            archive: tar.gz
-          - label: macos-x86_64
-            os: macos-13
-            target: x86_64-apple-darwin
             archive: tar.gz
           - label: linux-x86_64
             os: ubuntu-latest
