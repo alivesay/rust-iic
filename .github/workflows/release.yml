@@ -112,6 +112,8 @@ jobs:
           </dict></plist>
           EOF
 
+          codesign --force --deep --sign - "${APP_DIR}"
+
           cp README.md LICENSE "${stage}/"
           tar -czf "dist/${stem}.tar.gz" -C dist "${stem}"
 
