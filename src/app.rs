@@ -314,7 +314,7 @@ impl App {
 
         let surface_texture = SurfaceTexture::new(surface_w, surface_h, window.clone());
         let mut pixels = match PixelsBuilder::new(buf_w, buf_h, surface_texture)
-            .texture_format(wgpu::TextureFormat::Rgba8UnormSrgb)
+            .texture_format(wgpu::TextureFormat::Rgba8Unorm)
             .render_texture_format(wgpu::TextureFormat::Bgra8UnormSrgb)
             .build()
         {
@@ -324,11 +324,13 @@ impl App {
                 return;
             }
         };
-        if self.is_fullscreen {
-            pixels.set_scaling_mode(ScalingMode::PixelPerfect);
+
+        let mode = if self.shader_type == ShaderType::Crt {
+            ScalingMode::PixelPerfect
         } else {
-            pixels.set_scaling_mode(ScalingMode::Fill);
-        }
+            ScalingMode::Fill
+        };
+        pixels.set_scaling_mode(mode);
         pixels.clear_color(wgpu::Color::BLACK);
         let surface_format = pixels.render_texture_format();
 
@@ -587,12 +589,12 @@ impl winit::application::ApplicationHandler for App {
 
         let scale_factor = window.scale_factor();
         let window_size = window.inner_size();
-        
+
         let phys_w = (win_w * scale_factor) as u32;
         let phys_h = (win_h * scale_factor) as u32;
         let surface_w = window_size.width.max(phys_w);
         let surface_h = window_size.height.max(phys_h);
-        
+
         self.surface_width = surface_w;
         self.surface_height = surface_h;
         
@@ -610,15 +612,18 @@ impl winit::application::ApplicationHandler for App {
             SurfaceTexture::new(surface_w, surface_h, window.clone());
 
         self.pixels = match PixelsBuilder::new(buf_w, buf_h, surface_texture)
-            .texture_format(wgpu::TextureFormat::Rgba8UnormSrgb)
+            // See note in `rebuild_render_pipeline`: framebuffer is raw
+            // gun voltages, CRT gamma decode happens in the shader.
+            .texture_format(wgpu::TextureFormat::Rgba8Unorm)
             .render_texture_format(wgpu::TextureFormat::Bgra8UnormSrgb)
             .build() {
             Ok(mut pixels) => {
-                if self.is_fullscreen {
-                    pixels.set_scaling_mode(ScalingMode::PixelPerfect);
+                let mode = if self.shader_type == ShaderType::Crt {
+                    ScalingMode::PixelPerfect
                 } else {
-                    pixels.set_scaling_mode(ScalingMode::Fill);
-                }
+                    ScalingMode::Fill
+                };
+                pixels.set_scaling_mode(mode);
                 pixels.clear_color(wgpu::Color::BLACK);
                 let surface_format = pixels.render_texture_format();
 
@@ -734,8 +739,8 @@ impl winit::application::ApplicationHandler for App {
 
                         if let Some(pixels) = self.pixels.as_mut() {
                             let _ = pixels.resize_surface(size.width, size.height);
-                            
-                            if self.shader_type != ShaderType::Crt {
+
+                            if self.shader_type == ShaderType::Lcd {
                                 self.buffer_width = size.width;
                                 self.buffer_height = size.height;
                                 let _ = pixels.resize_buffer(size.width, size.height);
@@ -1193,6 +1198,8 @@ impl App {
             self.cpu.bus.video.effects.comb_filter        = self.shader_params.comb_filter;
             self.cpu.bus.video.effects.phosphor_spread    = self.shader_params.phosphor_spread;
             self.cpu.bus.video.effects.white_preservation = self.shader_params.white_preservation;
+            self.cpu.bus.video.effects.chroma_saturation  = self.shader_params.chroma_saturation;
+            self.cpu.bus.video.effects.chroma_luma_scale  = self.shader_params.chroma_luma_scale;
 
             self.cpu.video_update();
 
@@ -1423,6 +1430,7 @@ impl App {
                         if settings_changed {
                             self.cpu.bus.video.set_monochrome(self.config.display.monochrome);
                             self.cpu.bus.video.scanline_intensity = self.config.display.scanline_intensity;
+                            self.cpu.bus.video.stable_page = self.config.display.stable_page;
                             self.cpu.bus.video.set_mono_colors(
                                 self.config.display.mono_fg,
                                 self.config.display.mono_bg,
@@ -1466,6 +1474,7 @@ impl App {
                             self.cpu.bus.iou.iwm.drive_audio.apply_params();
                             self.cpu.bus.video.set_monochrome(self.config.display.monochrome);
                             self.cpu.bus.video.scanline_intensity = self.config.display.scanline_intensity;
+                            self.cpu.bus.video.stable_page = self.config.display.stable_page;
                             self.cpu.bus.video.set_mono_colors(
                                 self.config.display.mono_fg,
                                 self.config.display.mono_bg,
@@ -1772,11 +1781,12 @@ impl App {
                     self.is_fullscreen = entering;
 
                     if let Some(pixels) = &mut self.pixels {
-                        if entering {
-                            pixels.set_scaling_mode(ScalingMode::PixelPerfect);
+                        let mode = if self.shader_type == ShaderType::Crt {
+                            ScalingMode::PixelPerfect
                         } else {
-                            pixels.set_scaling_mode(ScalingMode::Fill);
-                        }
+                            ScalingMode::Fill
+                        };
+                        pixels.set_scaling_mode(mode);
                     }
 
                     if !entering {

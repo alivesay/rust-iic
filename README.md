@@ -13,6 +13,8 @@ A cycle-accurate Apple //c emulator.
 </tr>
 </table>
 
+<img src="docs/screenshots/karateka.png" alt="Karateka" />
+
 ## Specs
 
 | | |

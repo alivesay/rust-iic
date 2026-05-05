@@ -29,10 +29,12 @@ fn vs_main(@location(0) position: vec2<f32>) -> VertexOutput {
 
 const GAMMA: f32 = 2.2;
 
-// Sample with threshold - only bright pixels contribute to glow
+// Sample with threshold - only bright pixels contribute to glow.
+// Note: sRGB-format texture sampling is auto-decoded to linear-light, so
+// we don't need an explicit `pow(raw, GAMMA)` here.  The sRGB render
+// target similarly auto-encodes on write at the end of the pass.
 fn tex2D_glow(uv: vec2<f32>) -> vec3<f32> {
-    let raw = textureSampleLevel(r_texture, r_sampler, uv, 0.0).rgb;
-    let linear = pow(max(raw, vec3<f32>(0.0)), vec3<f32>(GAMMA));
+    let linear = max(textureSampleLevel(r_texture, r_sampler, uv, 0.0).rgb, vec3<f32>(0.0));
     // Threshold: only values above 0.1 contribute, with soft falloff
     let lum = dot(linear, vec3<f32>(0.299, 0.587, 0.114));
     let threshold = 0.1;
@@ -86,6 +88,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     sum += (tex2D_glow(uv - 7.0 * step) + tex2D_glow(uv + 7.0 * step)) * w7;
     sum += (tex2D_glow(uv - 8.0 * step) + tex2D_glow(uv + 8.0 * step)) * w8;
 
-    let result = pow(sum * norm, vec3<f32>(1.0 / GAMMA));
+    let result = sum * norm;
     return vec4<f32>(result, 1.0);
 }

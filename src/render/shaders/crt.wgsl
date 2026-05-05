@@ -13,8 +13,8 @@ struct ShaderParams {
     group3: vec4<f32>,  // curvature_on, saturation, halation, rasterbloom
     group4: vec4<f32>,  // blur_width, mask_type, vignette, phosphor
     group5: vec4<f32>,  // glow, glow_width, vignette_opacity, flicker
-    group6: vec4<f32>,  // chromatic_aberration, unused, unused, v_roll
-    group7: vec4<f32>,  // unused, unused, unused, unused
+    group6: vec4<f32>,  // chromatic_aberration, white_preservation, tone_knee, v_roll
+    group7: vec4<f32>,  // chroma_blur_on, comb_filter_on, phosphor_spread_on, scanline_floor
 };
 
 struct VertexOutput {
@@ -114,19 +114,37 @@ fn corner_mask(coord: vec2<f32>, ovs: vec2<f32>, csize: f32, csmooth: f32) -> f3
 }
 
 // --- Scanline beam profile (non-gaussian, 3x oversampled) ---
-
-fn scanline_weights(dist: f32, color: vec4<f32>, sw: f32, lum: f32) -> vec4<f32> {
+//
+// `color` is expected in [0,1] linear-light.  Phosphor persistence and
+// other upstream passes can occasionally push a component above 1.0; if
+// we let that flow into `pow(color, 4)` the resulting `wid` grows
+// without bound, `pow(w*isr, wid)` saturates, and every scanline weight
+// collapses to ~0 (screen goes black).  Clamp defensively here, and
+// also `abs(dist)` since the 3x oversample can pass slightly negative
+// offsets through the first call before later calls take their abs().
+fn scanline_weights(dist: f32, color_in: vec4<f32>, sw_in: f32, lum: f32) -> vec4<f32> {
+    let color = clamp(color_in, vec4<f32>(0.0), vec4<f32>(1.0));
+    let sw = max(sw_in, 0.05);
+    let d = abs(dist);
     let wid = 2.0 + 2.0 * pow(color, vec4<f32>(4.0));
-    let w = vec4<f32>(dist / sw);
+    let w = vec4<f32>(d / sw);
     return (lum + 1.4) * exp(-pow(w * inverseSqrt(0.5 * wid), wid)) / (0.6 + 0.2 * wid);
 }
 
-// --- Sample with CRT gamma ---
+// --- Sample helpers ---
+//
+// Color-space note: `r_texture` is `Rgba8UnormSrgb`, so `textureSample`
+// already returns linear-light values (auto sRGB->linear decode), and the
+// render target is `Bgra8UnormSrgb` which auto-encodes linear->sRGB on
+// write.  All math in this shader therefore runs in linear-light space.
+// The gamma `g` parameter is kept on the function signatures so the rest
+// of the shader can still pass `CRTgamma` around, but it's a no-op here:
+// applying it would double-decode the already-linear input.
 
 fn tex2D_crt(uv: vec2<f32>, g: f32) -> vec4<f32> {
     let underscan = step(vec2<f32>(0.0), uv) * step(vec2<f32>(0.0), vec2<f32>(1.0) - uv);
     let raw = textureSampleLevel(r_texture, r_sampler, uv, 0.0) * vec4<f32>(underscan.x * underscan.y);
-    return pow(max(raw, vec4<f32>(0.0)), vec4<f32>(g));
+    return max(raw, vec4<f32>(0.0));
 }
 
 // Convert emulator-space [0,1] coords to texture UV
@@ -141,11 +159,11 @@ fn emu_to_tex_clamped(emu_xy: vec2<f32>, cr_l: f32, cr_t: f32, cr_r: f32, cr_b: 
     return clamp(uv, vec2<f32>(cr_l + margin.x, cr_t + margin.y), vec2<f32>(cr_r - margin.x, cr_b - margin.y));
 }
 
-// Sample with clamping to prevent letterbox bleed
+// Sample with clamping to prevent letterbox bleed (input already linear).
 fn tex2D_crt_clamped(uv: vec2<f32>, g: f32, cr_l: f32, cr_t: f32, cr_r: f32, cr_b: f32, margin: vec2<f32>) -> vec4<f32> {
     let clamped_uv = clamp(uv, vec2<f32>(cr_l + margin.x, cr_t + margin.y), vec2<f32>(cr_r - margin.x, cr_b - margin.y));
     let raw = textureSampleLevel(r_texture, r_sampler, clamped_uv, 0.0);
-    return pow(max(raw, vec4<f32>(0.0)), vec4<f32>(g));
+    return max(raw, vec4<f32>(0.0));
 }
 
 // --- Procedural shadow masks ---
@@ -476,13 +494,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Use xy_bloomed coords for blur/glow - border handles edge sampling
     let blur_uv = emu_to_tex(xy_bloomed, cr_left, cr_top, content_span);
     let blur_raw = textureSampleLevel(r_blur, r_sampler, blur_uv, 0.0).rgb;
-    let blur = pow(max(blur_raw, vec3<f32>(0.0)), vec3<f32>(CRTgamma));
+    // r_blur / r_glow are also sRGB-format intermediates so their samples
+    // are already linear; no decode needed.
+    let blur = max(blur_raw, vec3<f32>(0.0));
 
     // --- Fullscreen CRT glow: larger, softer bloom ---
-    // Glow is already gamma-correct from gauss.wgsl, convert to linear for additive blend
     let glow_raw = textureSampleLevel(r_glow, r_sampler, blur_uv, 0.0).rgb;
-    var glow = pow(max(glow_raw, vec3<f32>(0.0)), vec3<f32>(2.2));
-    
+    var glow = max(glow_raw, vec3<f32>(0.0));
+
     // Apply power curve to concentrate glow around bright sources
     // Power > 1 suppresses dim areas (glow edges) while preserving bright areas (near source)
     // This creates natural exponential falloff instead of uniform gaussian spread
@@ -498,6 +517,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Add halation to base image (halation goes through shadow mask)
     // Glow is added AFTER shadow mask to avoid mask pattern in the soft bloom
     mul_res = (mul_res + blur * effective_halation) * vec3<f32>(cval * rbloom);
+
 
     // --- Energy-conserving shadow mask (from deluxe) ---
     // Halve position for HiDPI/Retina (physical pixels are 2x logical)
@@ -519,8 +539,33 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Store cval in alpha for the chromatic pass to use with glow
     let glow_cval_rbloom = cval * rbloom;
 
-    // Output gamma
-    var result = pow(max(cout_masked, vec3<f32>(0.0)), vec3<f32>(1.0 / mgamma));
+    // Math up to here ran in linear-light luminance.  The sRGB render
+    // target auto-encodes linear->display-encoded on write, so the user's
+    // modern sRGB monitor will sRGB-decode back and display the correct
+    // CRT-emitted luminance.  No additional output curve is needed: the
+    // CRT response curve was already applied at input (see
+    // `input_gamma.wgsl`), so the whole pipeline is end-to-end correct.
+    var result = max(cout_masked, vec3<f32>(0.0));
+
+    // --- Content-aware shadow floor (scanline-gap fill) ---
+    // Applied AFTER the shadow mask so its `clow = (1-ap_str)*mul_res`
+    // attenuation can't crush the floor back to zero.  `nearby` is the
+    // brightness of the brighter adjacent scanline sample, so true black
+    // regions (vignette, borders, off-screen) stay black, but the gap
+    // between two lit scanlines gets a small phosphor-bleed floor.
+    let nearby = max(col.rgb, col2.rgb) * vec3<f32>(cval * rbloom);
+    let scanline_floor = params.group7.w;
+    result = max(result, nearby * scanline_floor);
+
+    // --- Highlight shoulder (soft clip / tone rolloff) ---
+    // Reinhard knee that maps [knee, +inf) -> [knee, 1.0) so values past
+    // the knee asymptote toward 1.0 instead of hard-clipping at 255.
+    // Below `knee`, output == input (preserves midtone calibration).
+    let knee = clamp(params.group6.z, 0.5, 0.999);
+    let above = max(result - vec3<f32>(knee), vec3<f32>(0.0));
+    let head = vec3<f32>(1.0 - knee);
+    let rolled = vec3<f32>(knee) + head * above / (above + head);
+    result = select(rolled, result, result < vec3<f32>(knee));
 
     // Saturation
     let l = dot(result, vec3<f32>(0.2126, 0.7152, 0.0722));

@@ -91,12 +91,19 @@ pub struct CrtRenderer {
     ntsc_uniform_buffer: wgpu::Buffer,
     ntsc_texture: wgpu::Texture,
     ntsc_view: wgpu::TextureView,
-    ntsc_strength: std::cell::Cell<f32>,
+    chroma_pass_active: std::cell::Cell<bool>,
     text_only: std::cell::Cell<bool>,  // Text-only mode (no color burst, skip NTSC)
     // Phosphor beam-spot spread pass. Shares the NTSC bind group + scratch
     // texture (`ntsc_view`) since the two passes never run in parallel.
     phosphor_spread_pipeline: wgpu::RenderPipeline,
     phosphor_spread_on: std::cell::Cell<bool>,
+    // input gamma decode pass
+    stage1_texture: wgpu::Texture,
+    stage1_view: wgpu::TextureView,
+    input_gamma_pipeline: wgpu::RenderPipeline,
+    input_gamma_bind_group_layout: wgpu::BindGroupLayout,
+    input_gamma_bind_group: wgpu::BindGroup,
+    input_gamma_uniform_buffer: wgpu::Buffer,
 }
 
 #[repr(C)]
@@ -766,7 +773,7 @@ impl CrtRenderer {
         );
 
         // --- NTSC notch filter pass ---
-        let ntsc_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/ntsc.wgsl"));
+        let ntsc_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/chroma_comb.wgsl"));
 
         let ntsc_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ntsc_bind_group_layout"),
@@ -905,6 +912,99 @@ impl CrtRenderer {
             cache: None,
         });
 
+        // Stage 1 texture: scaling_renderer writes the framebuffer (raw byte
+        // gun voltages, since the framebuffer texture is `Rgba8Unorm`) here.
+        // Format must match the scaling_renderer's `render_texture_format`
+        // (which is `surface_format`, e.g. `Bgra8UnormSrgb`).
+        let (stage1_texture, stage1_view, _) = Self::create_intermediate(
+            device, surface_width, surface_height, surface_format, 1,
+        );
+
+        let input_gamma_shader =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/input_gamma.wgsl"));
+
+        let input_gamma_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("input_gamma_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let input_gamma_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("input_gamma_pipeline_layout"),
+            bind_group_layouts: &[&input_gamma_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let input_gamma_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("input_gamma_pipeline"),
+            layout: Some(&input_gamma_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &input_gamma_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &input_gamma_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // Default input gamma 2.5 (CRT response).  Updated each frame in
+        // `update_shader_params` from `params.crt_gamma`.
+        let input_gamma_uniforms: [f32; 4] = [2.5, 0.0, 0.0, 0.0];
+        let input_gamma_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("input_gamma_uniform_buffer"),
+            contents: bytemuck::cast_slice(&input_gamma_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let input_gamma_bind_group = Self::create_input_gamma_bind_group(
+            device, &input_gamma_bind_group_layout, &stage1_view,
+            &sampler, &input_gamma_uniform_buffer,
+        );
+
         Self {
             pipeline,
             bind_group_layout,
@@ -975,10 +1075,16 @@ impl CrtRenderer {
             ntsc_uniform_buffer,
             ntsc_texture,
             ntsc_view,
-            ntsc_strength: std::cell::Cell::new(0.0),
+            chroma_pass_active: std::cell::Cell::new(false),
             text_only: std::cell::Cell::new(false),
             phosphor_spread_pipeline,
             phosphor_spread_on: std::cell::Cell::new(true),
+            stage1_texture,
+            stage1_view,
+            input_gamma_pipeline,
+            input_gamma_bind_group_layout,
+            input_gamma_bind_group,
+            input_gamma_uniform_buffer,
         }
     }
 
@@ -1181,6 +1287,33 @@ impl CrtRenderer {
         })
     }
 
+    fn create_input_gamma_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        texture_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("input_gamma_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
     // Call when the surface is resized to recreate the intermediate texture.
     // Uniforms (content_rect) are now updated per-frame via update_content_rect.
     pub fn resize(
@@ -1200,6 +1333,16 @@ impl CrtRenderer {
         self.intermediate_texture = tex;
         self.intermediate_view = view;
         self.intermediate_render_view = render_view;
+
+        // Recreate stage 1 texture (scaling_renderer's target) and rebind
+        // the input-gamma pass which now reads from this fresh stage1 view.
+        let (s1_tex, s1_view, _) = Self::create_intermediate(device, width, height, format, 1);
+        self.stage1_texture = s1_tex;
+        self.stage1_view = s1_view;
+        self.input_gamma_bind_group = Self::create_input_gamma_bind_group(
+            device, &self.input_gamma_bind_group_layout, &self.stage1_view,
+            &self.sampler, &self.input_gamma_uniform_buffer,
+        );
 
         // Recreate gaussx intermediate texture (1/2 resolution, no mipmaps)
         let gauss_w = (width / 2).max(1);
@@ -1353,6 +1496,16 @@ impl CrtRenderer {
     pub fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams) {
         let gpu = params.to_gpu();
         queue.write_buffer(&self.shader_params_buffer, 0, bytemuck::bytes_of(&gpu));
+        // Update input gamma (CRT response curve, voltage -> linear luminance).
+        // Layout matches `InputGammaUniforms` in `input_gamma.wgsl`:
+        //   x = alpha1 (crt_gamma)   y = alpha2   z = black-lift b   w = mode
+        let input_gamma: [f32; 4] = [
+            params.crt_gamma,
+            params.crt_alpha2,
+            params.crt_black_lift,
+            params.crt_curve_mode as f32,
+        ];
+        queue.write_buffer(&self.input_gamma_uniform_buffer, 0, bytemuck::cast_slice(&input_gamma));
         // Update blur_width in gauss uniform buffers (offset 8 = third float)
         queue.write_buffer(&self.gaussx_uniform_buffer, 8, bytemuck::bytes_of(&params.blur_width));
         queue.write_buffer(&self.gaussy_uniform_buffer, 8, bytemuck::bytes_of(&params.blur_width));
@@ -1383,17 +1536,28 @@ impl CrtRenderer {
             curvature: self.curvature_cache.get(),
         };
         queue.write_buffer(&self.chroma_uniform_buffer, 0, bytemuck::bytes_of(&chroma_uniforms));
-        self.ntsc_strength.set(params.ntsc_strength);
-        self.phosphor_spread_on.set(params.phosphor_spread);
+        // The chroma+comb pass runs whenever either sub-effect is enabled.
+        // Composite NTSC decoding now happens on the CPU, so there is no
+        // separate strength mix.  Mono mode skips this pass entirely (its
+        // gaussian fallback is gated separately by `run_ntsc` below).
+        let chroma_pass = params.chroma_blur || params.comb_filter;
+        self.chroma_pass_active.set(chroma_pass);
+        // Phosphor spread is only meaningful in mono mode (it widens the
+        // beam spot to simulate phosphor bleed on text/hires).  In color
+        // mode the same horizontal blur smears NTSC chroma artifacts and
+        // produces wrong colors, so force it off.
+        let mono = self.is_mono.get() > 0.5;
+        let phosphor_spread_active = params.phosphor_spread && mono;
+        self.phosphor_spread_on.set(phosphor_spread_active);
         let content_rect = self.content_rect_cache.get();
         let b = |v: bool| if v { 1.0_f32 } else { 0.0_f32 };
         let ntsc_uniforms: [f32; 16] = [
-            params.ntsc_strength,
+            0.0,
             self.source_width_cache.get(),
             self.source_height_cache.get(),
             self.is_mono.get(),
             content_rect[0], content_rect[1], content_rect[2], content_rect[3],
-            b(params.chroma_blur), b(params.comb_filter), b(params.phosphor_spread), params.white_preservation,
+            b(params.chroma_blur), b(params.comb_filter), b(phosphor_spread_active), params.white_preservation,
             params.phosphor_spread_sigma_x, params.phosphor_spread_sigma_y, params.phosphor_spread_intensity, 0.0,
         ];
         queue.write_buffer(&self.ntsc_uniform_buffer, 0, bytemuck::bytes_of(&ntsc_uniforms));
@@ -1505,32 +1669,37 @@ impl CrtRenderer {
         }
     }
 
-    // Get a reference to the intermediate texture view.
-    // The scaling renderer should render into this instead of the final surface.
+    // Get a reference to the stage 1 texture view.
+    // The scaling renderer writes the framebuffer (raw byte gun voltages
+    // since the framebuffer texture is `Rgba8Unorm`) into stage 1.  The
+    // input-gamma decode pass then converts voltage -> linear-light
+    // luminance and writes to the main `intermediate` texture, which is
+    // what every other pass actually consumes.
     #[allow(clippy::misnamed_getters)]
     pub fn intermediate_view(&self) -> &wgpu::TextureView {
-        &self.intermediate_render_view
+        &self.stage1_view
     }
 
-    // Clear the intermediate texture to black.
+    // Clear the stage 1 + intermediate textures to black.
     // Call this before the scaling renderer writes to prevent ghosting artifacts.
     pub fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder) {
-        let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("intermediate_clear_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.intermediate_render_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-        // Pass drops immediately, executing the clear
+        for view in [&self.stage1_view, &self.intermediate_render_view] {
+            let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("intermediate_clear_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
     }
 
     // Render the CRT post-processing passes:
@@ -1538,18 +1707,47 @@ impl CrtRenderer {
     // 2. Composite: CRT shader with intermediate + bloom → final surface
     pub fn render(&self, encoder: &mut wgpu::CommandEncoder, render_target: &wgpu::TextureView, device: &wgpu::Device) {
         // Pipeline order (matches real CRT signal chain):
-        //   Pass 0   NTSC decode      (intermediate raw   -> intermediate, copy back)
-        //   Pass 1   Phosphor history (intermediate + history -> intermediate, copy back)
-        //   Pass 2   Mipgen           (intermediate (final) -> mip chain)  used by bloom + rasterbloom
-        //   Pass 3-4 Gauss H/V        halation blur (1/2 res)
-        //   Pass 5-6 Glow  H/V        fullscreen glow (1/8 res)
-        //   Pass 7   CRT composite    intermediate + blur + glow -> chroma texture
+        //   Pass -1  Input gamma     stage1 (voltage) -> intermediate (luminance)
+        //   Pass 0   NTSC decode     intermediate raw   -> intermediate, copy back
+        //   Pass 1   Phosphor history intermediate + history -> intermediate, copy back
+        //   Pass 2   Mipgen          intermediate (final) -> mip chain  (used by bloom + rasterbloom)
+        //   Pass 3-4 Gauss H/V       halation blur (1/2 res)
+        //   Pass 5-6 Glow  H/V       fullscreen glow (1/8 res)
+        //   Pass 7   CRT composite   intermediate + blur + glow -> chroma texture
         //   Pass 8   Chromatic + glow chroma + glow -> screen
 
-        // Pass 0: NTSC filter (intermediate -> ntsc_texture -> intermediate)
-        // Color mode only; skipped in mono and text-only.
+        // Pass -1: Input gamma decode (CRT response curve).
+        // Reads gun voltages from `stage1_view` (where scaling_renderer wrote
+        // the framebuffer; format is sRGB so byte/255 floats round-trip
+        // through storage), applies pow(., crt_gamma) to convert to
+        // CRT-emitted linear luminance, and writes to the main intermediate
+        // (mip 0).  Every downstream pass operates on linear luminance.
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("input_gamma_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.intermediate_render_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.input_gamma_pipeline);
+            rpass.set_bind_group(0, &self.input_gamma_bind_group, &[]);
+            rpass.set_vertex_buffer(0, self.gauss_vertex_buffer.slice(..));
+            rpass.draw(0..3, 0..1);
+        }
+
+        // Pass 0: Chroma blur + comb filter (intermediate -> ntsc_texture -> intermediate)
+        // Color mode only; skipped in text-only.
         let is_mono = self.is_mono.get() > 0.5;
-        let run_ntsc = self.ntsc_strength.get() > 0.01 && !self.text_only.get() && !is_mono;
+        let run_ntsc = self.chroma_pass_active.get() && !self.text_only.get() && !is_mono;
         if run_ntsc {
             {
                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

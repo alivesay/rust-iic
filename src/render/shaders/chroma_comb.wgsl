@@ -1,4 +1,4 @@
-// NTSC chroma processing (Apple //c).
+// Chroma blur + 2-line comb filter (Apple //c).
 //
 // One render pass that performs, in YIQ space:
 //   1. Horizontal asymmetric chroma blur on I/Q channels (left-heavy 7-tap;
@@ -10,6 +10,10 @@
 // Luma (Y) is preserved so text and pixel edges stay sharp. A white-protection
 // branch reduces tinting near saturation. Mono mode uses a wide horizontal
 // Gaussian as an anti-aliasing fallback.
+//
+// Composite NTSC decoding (chroma demod + lowpass) is done on the CPU in
+// `video.rs::ntsc_decode_hires_row`; this shader operates on already-decoded
+// RGB and only adds the analog blurring/comb artifacts.
 //
 const PI: f32 = 3.14159265358979;
 
@@ -55,7 +59,7 @@ struct VertexOutput {
 };
 
 struct NtscUniforms {
-    // x = filter_strength (0-1), y = source_width, z = source_height, w = is_mono
+    // x = unused (was filter_strength), y = source_width, z = source_height, w = is_mono
     params: vec4<f32>,
     // left, top, right, bottom in UV
     content_rect: vec4<f32>,
@@ -95,7 +99,6 @@ fn sample_iq_row_blur(uv: vec2<f32>, texel_x: f32) -> vec2<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = in.tex_coord;
-    let strength = uniforms.params.x;
     let src_w = uniforms.params.y;
     let is_mono = uniforms.params.w > 0.5;
     let cr = uniforms.content_rect;
@@ -104,8 +107,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let original = textureSample(r_texture, r_sampler, uv);
 
-    // Outside content rect or fully disabled: pass through unchanged.
-    if uv.x < cr.x || uv.x > cr.z || uv.y < cr.y || uv.y > cr.w || strength < 0.01 {
+    // Outside content rect: pass through unchanged.
+    if uv.x < cr.x || uv.x > cr.z || uv.y < cr.y || uv.y > cr.w {
         return original;
     }
 
@@ -127,8 +130,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             weight_sum = weight_sum + weight;
         }
         let blurred = sum / weight_sum;
-        let mix_amt = max(strength, 0.5);
-        return vec4<f32>(mix(original.rgb, blurred, mix_amt), original.a);
+        return vec4<f32>(blurred, original.a);
     }
 
     // Color path. Samples and writes are linear-light (sRGB framebuffer).
@@ -193,5 +195,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let processed = clamp(yiq_to_rgb(vec3<f32>(y_eff, i_val, q_val)),
                           vec3<f32>(0.0), vec3<f32>(1.0));
-    return vec4<f32>(mix(original.rgb, processed, strength), original.a);
+    return vec4<f32>(processed, original.a);
 }

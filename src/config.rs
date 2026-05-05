@@ -71,6 +71,8 @@ pub struct DisplayConfig {
     pub scanline_intensity: f32,
     pub mono_fg: [u8; 3],
     pub mono_bg: [u8; 3],
+
+    pub stable_page: bool,
 }
 
 impl Default for DisplayConfig {
@@ -82,6 +84,7 @@ impl Default for DisplayConfig {
             scanline_intensity: 0.5,
             mono_fg: [118, 255, 211],
             mono_bg: [15, 23, 23],
+            stable_page: false,
         }
     }
 }

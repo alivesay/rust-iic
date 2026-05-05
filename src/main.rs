@@ -64,6 +64,14 @@ fn main() -> Result<(), Error> {
 
     let config = config::Config::load();
 
+    // materialize a defaults file on first run
+    let cfg_path = config::config_path();
+    if !cfg_path.exists() {
+        if let Err(e) = config.save_to(&cfg_path) {
+            log::warn!("config: failed to write default {}: {}", cfg_path.display(), e);
+        }
+    }
+
     let (sample_rate, audio_producers, audio_controls, _audio_mixer, _dummy_mixer);
     if args.no_audio {
         let (dm, ap) = audio_mixer::DummyAudioMixer::new();
@@ -107,6 +115,7 @@ fn main() -> Result<(), Error> {
     cpu.bus.iou.iwm.fast_disk = args.fast_disk;
     cpu.bus.video.set_monochrome(args.monochrome || config.display.monochrome);
     cpu.bus.video.set_mono_colors(config.display.mono_fg, config.display.mono_bg);
+    cpu.bus.video.stable_page = config.display.stable_page;
     cpu.bus.video.shader_enabled = args.shader != ShaderType::None;
     cpu.bus.video.scanline_intensity = args.scanline_intensity;
     cpu.bus.video.effects.chroma_blur = !args.no_chroma_blur;
@@ -341,7 +350,6 @@ fn run_gui(
     if args.no_chroma_blur { app.shader_params.chroma_blur = false; }
     if args.no_comb_filter { app.shader_params.comb_filter = false; }
     if args.no_phosphor_spread { app.shader_params.phosphor_spread = false; }
-    app.shader_params.ntsc_strength = args.ntsc_strength.clamp(0.0, 1.0);
 
     app.cpu.bus.iou.iwm.drive_audio.params = app.drive_audio_params.clone();
     app.cpu.bus.iou.iwm.drive_audio.apply_params();

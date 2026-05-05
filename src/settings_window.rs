@@ -150,6 +150,9 @@ fn render_video_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
     ui.heading("Display");
     result.changed |= ui.checkbox(&mut d.fullscreen, "Start fullscreen").changed();
     result.changed |= ui.checkbox(&mut d.monochrome, "Monochrome").changed();
+    let resp = ui.checkbox(&mut d.stable_page, "Stable page (prevents mid-frame page flips)");
+    result.changed |= resp.changed();
+    resp.on_hover_text("Latches the displayed video page (PAGE2 / 80STORE) once per frame.");
 
     ui.horizontal(|ui| {
         ui.label("Shader:");

@@ -62,10 +62,6 @@ pub struct Args {
     #[arg(long)]
     pub no_phosphor_spread: bool,
 
-    // NTSC pass strength, 0.0..=1.0
-    #[arg(long, default_value_t = 1.0)]
-    pub ntsc_strength: f32,
-
     // Show performance metrics
     #[arg(long)]
     pub perf: bool,

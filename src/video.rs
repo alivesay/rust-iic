@@ -63,6 +63,8 @@ pub struct VideoEffects {
     pub phosphor_spread: bool,
     pub scanlines: bool,
     pub white_preservation: f32,
+    pub chroma_saturation: f32,
+    pub chroma_luma_scale: f32,
 }
 
 impl Default for VideoEffects {
@@ -73,6 +75,8 @@ impl Default for VideoEffects {
             phosphor_spread: true,
             scanlines: true,
             white_preservation: 0.0,
+            chroma_saturation: 2.2,
+            chroma_luma_scale: 1.0,
         }
     }
 }
@@ -106,6 +110,10 @@ pub struct Video {
     pub border_size: usize,
 
     pub effects: VideoEffects,
+
+    pub stable_page: bool,
+    live_page2: bool,
+    live_80store: bool,
 
     scanline_modes: [u8; 192],
     scanline_80store: [bool; 192],
@@ -171,6 +179,9 @@ impl Video {
             scanline_intensity: 0.15,
             border_size: border,
             effects: VideoEffects::default(),
+            stable_page: false,
+            live_page2: false,
+            live_80store: false,
             scanline_modes: [0; 192],
             scanline_80store: [false; 192],
             scanline_count: 0,
@@ -210,6 +221,9 @@ impl Video {
         
         self.framebuffer.fill(0);
 
+        self.live_page2   = (iou.video_mode.get() & VideoModeMask::PAGE2) != 0;
+        self.live_80store = iou.is_80store.get();
+
         let new_active_width = 560;
         let new_active_height = 384;
         let new_width = new_active_width + self.border_size * 2;
@@ -223,6 +237,8 @@ impl Video {
 
         let has_snapshots = self.scanline_count >= 192;
         let mut any_graphics = false;
+
+        let mut any_non_hires_color = false;
 
         for scanline in 0..192_usize {
             let mode = if has_snapshots {
@@ -253,13 +269,15 @@ impl Video {
             } else if is_hires {
                 if is_dhires && is_80col {
                     self.render_double_hires_scanline(iou, mmu, scanline);
+                    any_non_hires_color = true;
                 } else {
-                    self.render_hires_scanline(iou, mmu, scanline);
+                    self.render_hires_scanline(iou, mmu, scanline, mode, is_80store);
                 }
                 any_graphics = true;
             } else if lo_res_mode {
                 self.render_lores_scanline(iou, mmu, scanline, mode, is_80store);
                 any_graphics = true;
+                any_non_hires_color = true;
             } else {
                 self.render_text_scanline(iou, mmu, scanline, mode, is_80store);
             }
@@ -287,7 +305,7 @@ impl Video {
         let gpu_owns_scanlines = self.shader_enabled;
         let gpu_owns_phosphor_spread = self.shader_enabled;
 
-        if any_graphics && !self.monochrome && !gpu_owns_chroma {
+        if any_graphics && !self.monochrome && !gpu_owns_chroma && any_non_hires_color {
             if self.effects.chroma_blur {
                 self.apply_chroma_blur(0, 192 * 2);
             }
@@ -328,7 +346,7 @@ impl Video {
             if is_dhires && is_80col {
                 self.render_double_hires_scanline(iou, mmu, scanline);
             } else {
-                self.render_hires_scanline(iou, mmu, scanline);
+                self.render_hires_scanline(iou, mmu, scanline, mode, is_80store);
             }
         } else if lo_res_mode {
             self.render_lores_scanline(iou, mmu, scanline, mode, is_80store);
@@ -699,24 +717,31 @@ impl Video {
             });
     }
 
-    fn read_hires_memory(&self, iou: &Iou, mmu: &Mmu, addr: u16) -> u8 {
-        let video_mode = iou.video_mode.get();
-        let is_page2 = check_bits_u8!(video_mode, VideoModeMask::PAGE2);
-        let is_80store = iou.is_80store.get();
+
+    fn read_hires_memory(
+        &self,
+        mmu: &Mmu,
+        addr: u16,
+        mode: u8,
+        is_80store: bool,
+    ) -> u8 {
+        let (is_page2, is_80store) = if self.stable_page {
+            (self.live_page2, self.live_80store)
+        } else {
+            (check_bits_u8!(mode, VideoModeMask::PAGE2), is_80store)
+        };
 
         if is_80store {
-             let real_addr = addr.wrapping_add(0x2000);
-             if is_page2 {
-                 mmu.read_aux_byte(real_addr)
-             } else {
-                 mmu.read_main_byte(real_addr)
-             }
+            let real_addr = addr.wrapping_add(0x2000);
+            if is_page2 {
+                mmu.read_aux_byte(real_addr)
+            } else {
+                mmu.read_main_byte(real_addr)
+            }
+        } else if is_page2 {
+            mmu.read_main_byte(addr.wrapping_add(0x4000))
         } else {
-             if is_page2 {
-                 mmu.read_main_byte(addr.wrapping_add(0x4000))
-             } else {
-                 mmu.read_main_byte(addr.wrapping_add(0x2000))
-             }
+            mmu.read_main_byte(addr.wrapping_add(0x2000))
         }
     }
    
@@ -784,8 +809,8 @@ impl Video {
 
         // Flashing range in VRAM: 0x40-0x7F (when not in AltChar/MouseText mode).
         // Flash rate ~2 Hz: 60 fps / 32 ≈ 1.8 Hz.
-        if !is_altchar && (char_code >= 0x40 && char_code <= 0x7F) {
-            let flash_on = (self.frame_count / 16) % 2 == 0;
+        if !is_altchar && (0x40..=0x7F).contains(&char_code) {
+            let flash_on = (self.frame_count / 16).is_multiple_of(2);
             if !flash_on {
                 invert = false;
             }
@@ -894,72 +919,6 @@ impl Video {
         }
     }
 
-    // Palette 0 (bit 7=0): even->Violet (3), odd->Green (12)
-    // Palette 1 (bit 7=1): even->Blue (6), odd->Orange (9)
-    #[inline]
-    fn ntsc_hires_artifact_color(
-        cur: bool, prev: bool, next: bool,
-        prev2: bool, next2: bool,
-        phase_column: usize, palette: bool,
-        shader_smears: bool,
-    ) -> [u8; 4] {
-        let even_phase = phase_column % 2 == 0;
-        let dim_phase = phase_column % 4 >= 2;
-        let truly_isolated = !prev && !next && !prev2 && !next2;
-
-        // Palette 0 even = violet family (bright [3] / dark [2])
-        // Palette 0 odd  = green  family (bright [12] / dark [4])
-        // Palette 1 even = blue   family (bright [6]  / dark [2])
-        // Palette 1 odd  = orange family (bright [9]  / dark [8])
-        let bright_color = if palette {
-            if even_phase { NTSC_PALETTE[6] } else { NTSC_PALETTE[9] }
-        } else {
-            if even_phase { NTSC_PALETTE[3] } else { NTSC_PALETTE[12] }
-        };
-        let dark_color = if palette {
-            if even_phase { NTSC_PALETTE[2] } else { NTSC_PALETTE[8] }
-        } else {
-            if even_phase { NTSC_PALETTE[2] } else { NTSC_PALETTE[4] }
-        };
-        let pixel_color = if truly_isolated && dim_phase {
-            dark_color
-        } else {
-            bright_color
-        };
-
-        let opposite_bright = if palette {
-            if even_phase { NTSC_PALETTE[9] } else { NTSC_PALETTE[6] }
-        } else {
-            if even_phase { NTSC_PALETTE[12] } else { NTSC_PALETTE[3] }
-        };
-
-        if cur {
-            if prev || next {
-                // adjacent ON pixels cancel chroma
-                NTSC_PALETTE[15]
-            } else {
-                pixel_color
-            }
-        } else if prev && next {
-            // between two ON pixels
-            opposite_bright
-        } else if prev || next {
-            if shader_smears {
-                // Discrete-decode mode: let the GPU chroma blur produce
-                // the single-neighbor fringe. Emit black here.
-                NTSC_PALETTE[0]
-            } else {
-                [
-                    (opposite_bright[0] as f32 * 0.56) as u8,
-                    (opposite_bright[1] as f32 * 0.56) as u8,
-                    (opposite_bright[2] as f32 * 0.56) as u8,
-                    255,
-                ]
-            }
-        } else {
-            NTSC_PALETTE[0] // black
-        }
-    }
 
     fn render_lores_scanline(
         &mut self,
@@ -1010,7 +969,7 @@ impl Video {
                     mmu.read_main_byte(mem_addr)
                 };
 
-                let nibble = if half_row % 2 == 0 {
+                let nibble = if half_row.is_multiple_of(2) {
                     color_byte & 0x0F
                 } else {
                     (color_byte >> 4) & 0x0F
@@ -1045,7 +1004,7 @@ impl Video {
                     mmu.read_main_byte(addr)
                 };
 
-                let color_code = if half_row % 2 == 0 {
+                let color_code = if half_row.is_multiple_of(2) {
                     color_byte & 0x0F
                 } else {
                     (color_byte >> 4) & 0x0F
@@ -1069,7 +1028,14 @@ impl Video {
     // Render HiRes mode using direct NTSC artifact color palette lookup.
     // HiRes only has 4 possible artifact colors per palette: violet/green
     // (palette 0) and blue/orange (palette 1)
-    fn render_hires_scanline(&mut self, iou: &Iou, mmu: &Mmu, scanline: usize) {
+    fn render_hires_scanline(
+        &mut self,
+        _iou: &Iou,
+        mmu: &Mmu,
+        scanline: usize,
+        mode: u8,
+        is_80store: bool,
+    ) {
         let base_vram: u16 = 0x0000;
 
         let group = scanline / 8;
@@ -1086,7 +1052,7 @@ impl Video {
         if self.monochrome {
             for col in 0..40_u16 {
                 let addr = row_base.wrapping_add(col);
-                let byte = self.read_hires_memory(iou, mmu, addr);
+                let byte = self.read_hires_memory(mmu, addr, mode, is_80store);
                 for bit in 0..7_usize {
                     let pixel_on = (byte >> bit) & 1 != 0;
                     let color = if pixel_on { self.mono_fg } else { self.mono_bg };
@@ -1107,73 +1073,107 @@ impl Video {
             return;
         }
 
-        // Color HiRes: direct palette lookup from pixel context.
-        let mut prev_byte: u8 = 0;
+        let mut comp = [0.0f32; 560];
         for col in 0..40_usize {
             let addr = row_base.wrapping_add(col as u16);
-            let byte = self.read_hires_memory(iou, mmu, addr);
-            let next_byte = if col < 39 {
-                self.read_hires_memory(iou, mmu, row_base.wrapping_add(col as u16 + 1))
-            } else {
-                0
-            };
-
+            let byte = self.read_hires_memory(mmu, addr, mode, is_80store);
             let palette = (byte & 0x80) != 0;
-
+            let base_sample = col * 14 + if palette { 1 } else { 0 };
             for bit in 0..7_usize {
-                let cur = (byte >> bit) & 1 != 0;
-                let prev = if bit == 0 {
-                    (prev_byte >> 6) & 1 != 0
-                } else {
-                    (byte >> (bit - 1)) & 1 != 0
-                };
-                let next = if bit == 6 {
-                    (next_byte >> 0) & 1 != 0
-                } else {
-                    (byte >> (bit + 1)) & 1 != 0
-                };
-
-                let prev2 = if bit >= 2 {
-                    (byte >> (bit - 2)) & 1 != 0
-                } else if bit == 1 {
-                    (prev_byte >> 6) & 1 != 0
-                } else {
-                    (prev_byte >> 5) & 1 != 0
-                };
-                let next2 = if bit + 2 <= 6 {
-                    (byte >> (bit + 2)) & 1 != 0
-                } else if bit == 5 {
-                    (next_byte >> 0) & 1 != 0
-                } else {
-                    (next_byte >> 1) & 1 != 0
-                };
-
-                let phase_column = col * 7 + bit;
-                let color = Self::ntsc_hires_artifact_color(
-                    cur, prev, next, prev2, next2,
-                    phase_column, palette, self.shader_enabled,
-                );
-
-                let x = col * 14 + bit * 2;
-                for dy in 0..2_usize {
-                    for dx in 0..2_usize {
-                        if x + dx < self.active_width {
-                            let index = self.fb_index(x + dx, y + dy);
-                            if index + 4 <= self.framebuffer.len() {
-                                self.framebuffer[index..index + 4]
-                                    .copy_from_slice(&color);
-                            }
-                        }
-                    }
-                }
+                let on = (byte >> bit) & 1 != 0;
+                if !on { continue; }
+                let s0 = base_sample + bit * 2;
+                let s1 = s0 + 1;
+                if s0 < 560 { comp[s0] = 1.0; }
+                if s1 < 560 { comp[s1] = 1.0; }
             }
-            prev_byte = byte;
         }
+        self.ntsc_decode_hires_row(&comp, y);
     }
 
-    // Blur the I and Q channels independently in YIQ space to simulate analog
-    // chroma bandwidth limiting. The kernel is asymmetric and right-biased to
-    // match NTSC chroma demodulator group delay: color bleeds about 1.5 pixels
+    fn ntsc_decode_hires_row(&mut self, comp: &[f32; 560], fb_y: usize) {
+        const PHI: f32 = std::f32::consts::FRAC_PI_4;
+
+        // Chroma lowpass
+        const LP_KERN: [f32; 11] = [
+            1.0/32.0, 2.0/32.0, 3.0/32.0, 4.0/32.0, 4.0/32.0,
+            4.0/32.0,
+            4.0/32.0, 4.0/32.0, 3.0/32.0, 2.0/32.0, 1.0/32.0,
+        ];
+        const N_TAPS: usize = 11;
+        const HALF: i32 = 5;
+
+        // Luminance lowpass
+        const Y_LP: [f32; 5] = [0.125, 0.25, 0.25, 0.25, 0.125];
+        const Y_HALF: i32 = 2;
+        const Y_TAPS: usize = 5;
+
+        // Saturation
+        let sat = self.effects.chroma_saturation;
+        let luma_scale = self.effects.chroma_luma_scale;
+
+        // Demodulate to baseband I, Q
+        let mut i_demod = [0.0f32; 560];
+        let mut q_demod = [0.0f32; 560];
+        for k in 0..560 {
+            let theta = (k as f32) * std::f32::consts::FRAC_PI_2 + PHI;
+            let (s, c) = theta.sin_cos();
+            i_demod[k] = comp[k] * c;
+            q_demod[k] = comp[k] * s;
+        }
+
+        // Lowpass I, Q
+        let mut i_lp = [0.0f32; 560];
+        let mut q_lp = [0.0f32; 560];
+        let mut y_lp = [0.0f32; 560];
+        for k in 0..560 {
+            let mut acc_i = 0.0f32;
+            let mut acc_q = 0.0f32;
+            for t in 0..N_TAPS {
+                let src = (k as i32 + t as i32 - HALF).clamp(0, 559) as usize;
+                acc_i += i_demod[src] * LP_KERN[t];
+                acc_q += q_demod[src] * LP_KERN[t];
+            }
+            i_lp[k] = acc_i;
+            q_lp[k] = acc_q;
+
+            let mut acc_y = 0.0f32;
+            for t in 0..Y_TAPS {
+                let src = (k as i32 + t as i32 - Y_HALF).clamp(0, 559) as usize;
+                acc_y += comp[src] * Y_LP[t];
+            }
+            y_lp[k] = acc_y;
+        }
+
+        for k in 0..560_usize {
+            let i_val = i_lp[k] * sat;
+            let q_val = q_lp[k] * sat;
+
+            let chroma_mag = (i_val * i_val + q_val * q_val).sqrt().min(1.0);
+            let y_factor = 1.0 + (luma_scale - 1.0) * chroma_mag;
+            let y_val = y_lp[k] * y_factor;
+
+            let r = (y_val + 0.9563 * i_val + 0.6210 * q_val).clamp(0.0, 1.0);
+            let g = (y_val - 0.2721 * i_val - 0.6474 * q_val).clamp(0.0, 1.0);
+            let b = (y_val - 1.1070 * i_val + 1.7046 * q_val).clamp(0.0, 1.0);
+
+            let rb = (r * 255.0 + 0.5) as u8;
+            let gb = (g * 255.0 + 0.5) as u8;
+            let bb = (b * 255.0 + 0.5) as u8;
+            let color = [rb, gb, bb, 255];
+
+            if k < self.active_width {
+                let i_top = self.fb_index(k, fb_y);
+                let i_bot = self.fb_index(k, fb_y + 1);
+                if i_top + 4 <= self.framebuffer.len() {
+                    self.framebuffer[i_top..i_top + 4].copy_from_slice(&color);
+                }
+                if i_bot + 4 <= self.framebuffer.len() {
+                    self.framebuffer[i_bot..i_bot + 4].copy_from_slice(&color);
+                }
+            }
+        }
+    }
 
     fn apply_chroma_blur(&mut self, y_start: usize, y_end: usize) {
         const I_KERNEL: [f32; 7] = [0.15, 0.2, 0.25, 0.2, 0.1, 0.07, 0.03];
@@ -1183,7 +1183,7 @@ impl Video {
         let stride = self.width * 4;
         let border = self.border_size;
 
-        // Per-x kernel sums for edge pixels where the kernel is truncated;
+        // per-x kernel sums for edge pixels where the kernel is truncated
         // interior pixels share `i_full` / `q_full`.
         let mut i_wsum_left = [0.0f32; HALF];
         let mut q_wsum_left = [0.0f32; HALF];
