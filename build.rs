@@ -25,11 +25,11 @@ fn main() {
         })
         .collect();
 
-    // Game projects: asm/games/<name>/<name>.s + asm/games/<name>/<name>.cfg
+    // Program projects: asm/programs/<name>/<name>.s + asm/programs/<name>/<name>.cfg
     // -> build/asm/<name>.bin (same flat output dir as top-level modules).
-    let games_dir = asm_dir.join("games");
-    if games_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&games_dir) {
+    let programs_dir = asm_dir.join("programs");
+    if programs_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&programs_dir) {
             for entry in entries.flatten() {
                 let dir = entry.path();
                 if !dir.is_dir() {
@@ -91,6 +91,8 @@ fn main() {
         let obj_file = format!("{out_dir}/{base_name}.o");
 
         let status = Command::new("ca65")
+            .arg("-I")
+            .arg(asm_dir.join("lib"))
             .arg(source)
             .arg("-o")
             .arg(&obj_file)
