@@ -3,7 +3,7 @@ use crate::device::speaker::AudioProducer;
 use crate::interrupts::InterruptController;
 use crate::iou::Iou;
 use crate::memory::Memory;
-use crate::mmu::Mmu;
+use crate::mmu::{Mmu, WriteCtx};
 use crate::rom::Rom;
 use crate::util::mem_state_to_string;
 use crate::video::{Video, VideoModeMask};
@@ -155,10 +155,7 @@ impl Bus {
                     &mut self.iou,
                     addr,
                     value,
-                    mem_state,
-                    is_80store,
-                    is_page2,
-                    is_hires,
+                    WriteCtx { mem_state, is_80store, is_page2, is_hires },
                 )
             }
         } else {
@@ -217,10 +214,7 @@ impl Bus {
                     &mut self.iou,
                     addr,
                     value,
-                    mem_state,
-                    is_80store,
-                    is_page2,
-                    is_hires,
+                    WriteCtx { mem_state, is_80store, is_page2, is_hires },
                 )
             }
         }

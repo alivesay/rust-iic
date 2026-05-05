@@ -122,18 +122,19 @@ pub fn blit_direct(frame: &mut [u8], src: &[u8]) {
     frame[..len].copy_from_slice(&src[..len]);
 }
 
+pub struct BlitRect {
+    pub frame_w: u32,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub dst_x: u32,
+    pub dst_y: u32,
+    pub dst_w: u32,
+    pub dst_h: u32,
+}
+
 // Nearest-neighbor blit from src into frame at (dst_x, dst_y) scaled to (dst_w × dst_h).
-pub fn blit_nearest(
-    frame: &mut [u8],
-    frame_w: u32,
-    src: &[u8],
-    src_w: u32,
-    src_h: u32,
-    dst_x: u32,
-    dst_y: u32,
-    dst_w: u32,
-    dst_h: u32,
-) {
+pub fn blit_nearest(frame: &mut [u8], src: &[u8], rect: BlitRect) {
+    let BlitRect { frame_w, src_w, src_h, dst_x, dst_y, dst_w, dst_h } = rect;
     for y in 0..dst_h {
         let src_y = (y as u64 * src_h as u64 / dst_h as u64) as usize;
         let src_y = src_y.min(src_h as usize - 1);

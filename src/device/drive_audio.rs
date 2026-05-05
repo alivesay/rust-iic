@@ -192,9 +192,19 @@ impl DampedOscillator {
     }
 }
 
+struct ImpactConfig {
+    body_freq: f32,
+    body_decay_ms: f32,
+    attack_mix: f32,
+    attack_decay_ms: f32,
+    pitch_sweep_start: f32,
+    pitch_sweep_ms: f32,
+    harmonic_mix: f32,
+}
+
 struct ImpactSynthesizer {
     sample_rate: f32,
-    
+
     // Attack transient, very short high-freq burst for initial "crack"
     attack_phase: f32,
     attack_amp: f32,
@@ -241,9 +251,16 @@ impl ImpactSynthesizer {
         }
     }
     
-    fn configure(&mut self, body_freq: f32, body_decay_ms: f32, attack_mix: f32, 
-                 attack_decay_ms: f32, pitch_sweep_start: f32, pitch_sweep_ms: f32,
-                 harmonic_mix: f32) {
+    fn configure(&mut self, cfg: ImpactConfig) {
+        let ImpactConfig {
+            body_freq,
+            body_decay_ms,
+            attack_mix,
+            attack_decay_ms,
+            pitch_sweep_start,
+            pitch_sweep_ms,
+            harmonic_mix,
+        } = cfg;
         self.body_freq = body_freq;
         self.body_decay = 0.001_f32.powf(1.0 / (body_decay_ms * 0.001 * self.sample_rate));
         
@@ -453,12 +470,15 @@ impl DriveAudio {
             click_filter: LowpassFilter::new(params.click_filter_freq, sample_rate),
             click_body: {
                 let mut synth = ImpactSynthesizer::new(sample_rate);
-                synth.configure(
-                    params.click_body_freq, params.click_body_decay_ms,
-                    params.click_attack_mix, params.click_attack_decay_ms,
-                    params.click_pitch_sweep, params.click_pitch_sweep_ms,
-                    params.click_harmonic_mix
-                );
+                synth.configure(ImpactConfig {
+                    body_freq: params.click_body_freq,
+                    body_decay_ms: params.click_body_decay_ms,
+                    attack_mix: params.click_attack_mix,
+                    attack_decay_ms: params.click_attack_decay_ms,
+                    pitch_sweep_start: params.click_pitch_sweep,
+                    pitch_sweep_ms: params.click_pitch_sweep_ms,
+                    harmonic_mix: params.click_harmonic_mix,
+                });
                 synth
             },
             click_tick: DampedOscillator::new(
@@ -564,12 +584,15 @@ impl DriveAudio {
         
         self.click_noise_decay = Self::decay_from_ms(p.click_noise_decay_ms, sr);
         self.click_filter = LowpassFilter::new(p.click_filter_freq, sr);
-        self.click_body.configure(
-            p.click_body_freq, p.click_body_decay_ms,
-            p.click_attack_mix, p.click_attack_decay_ms,
-            p.click_pitch_sweep, p.click_pitch_sweep_ms,
-            p.click_harmonic_mix
-        );
+        self.click_body.configure(ImpactConfig {
+            body_freq: p.click_body_freq,
+            body_decay_ms: p.click_body_decay_ms,
+            attack_mix: p.click_attack_mix,
+            attack_decay_ms: p.click_attack_decay_ms,
+            pitch_sweep_start: p.click_pitch_sweep,
+            pitch_sweep_ms: p.click_pitch_sweep_ms,
+            harmonic_mix: p.click_harmonic_mix,
+        });
         self.click_tick.freq = p.click_tick_freq;
         self.click_tick.decay = Self::decay_from_ms(p.click_tick_decay_ms, sr);
         self.click_crunch_decay = Self::decay_from_ms(p.click_crunch_decay_ms, sr);

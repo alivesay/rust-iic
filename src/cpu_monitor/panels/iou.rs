@@ -271,7 +271,7 @@ fn softswitch_list(ui: &mut egui::Ui, iou: &IouSnapshot) {
 
     let dim = ui.visuals().weak_text_color();
     let hot = egui::Color32::from_rgb(0xE5, 0xC0, 0x70);
-    let half = (ENTRIES.len() + 1) / 2;
+    let half = ENTRIES.len().div_ceil(2);
 
     let render_cell = |ui: &mut egui::Ui, addr: u16, mnemonic: &str| {
         let val = iou.softswitches[(addr - 0xC000) as usize];
@@ -295,8 +295,7 @@ fn softswitch_list(ui: &mut egui::Ui, iou: &IouSnapshot) {
         .spacing([8.0, 1.0])
         .min_col_width(0.0)
         .show(ui, |ui| {
-            for i in 0..half {
-                let (addr_l, mnem_l) = ENTRIES[i];
+            for (i, &(addr_l, mnem_l)) in ENTRIES[..half].iter().enumerate() {
                 render_cell(ui, addr_l, mnem_l);
 
                 // gap column between the two halves

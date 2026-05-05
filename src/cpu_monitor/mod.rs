@@ -19,6 +19,15 @@ pub struct FramebufferView<'a> {
     pub height: u32,
 }
 
+pub struct MonitorFrame<'a> {
+    pub cpu_state: &'a CpuState,
+    pub iou: &'a IouSnapshot,
+    pub devices: &'a DevicesSnapshot,
+    pub memory_reader: &'a dyn Fn(u16) -> u8,
+    pub framebuffer: Option<FramebufferView<'a>>,
+    pub framebuffer_raw: Option<FramebufferView<'a>>,
+}
+
 // Default height (px) of the bottom-pinned Trace and Video panes. They share
 // this so their tops align across the Code and Memory columns.
 const BOTTOM_PANE_HEIGHT: f32 = 280.0;
@@ -189,7 +198,14 @@ impl CpuMonitor {
             .hscroll(false)
             .show(ctx, |ui| {
                 let devs = DevicesSnapshot::default();
-                self.render_body(ui, cpu_state, iou, &devs, memory_reader, None, None);
+                self.render_body(ui, MonitorFrame {
+                    cpu_state,
+                    iou,
+                    devices: &devs,
+                    memory_reader,
+                    framebuffer: None,
+                    framebuffer_raw: None,
+                });
             });
 
         self.visible = open;
@@ -204,29 +220,19 @@ impl CpuMonitor {
     // Render the monitor contents directly into a Ui, without an
     // egui::Window wrapper. Used when the monitor lives in its own
     // OS-level window.
-    pub fn render_inline(
-        &mut self,
-        ui: &mut egui::Ui,
-        cpu_state: &CpuState,
-        iou: &IouSnapshot,
-        devices: &DevicesSnapshot,
-        memory_reader: &dyn Fn(u16) -> u8,
-        framebuffer: Option<FramebufferView<'_>>,
-        framebuffer_raw: Option<FramebufferView<'_>>,
-    ) {
-        self.render_body(ui, cpu_state, iou, devices, memory_reader, framebuffer, framebuffer_raw);
+    pub fn render_inline(&mut self, ui: &mut egui::Ui, frame: MonitorFrame<'_>) {
+        self.render_body(ui, frame);
     }
 
-    fn render_body(
-        &mut self,
-        ui: &mut egui::Ui,
-        cpu_state: &CpuState,
-        iou: &IouSnapshot,
-        devices: &DevicesSnapshot,
-        memory_reader: &dyn Fn(u16) -> u8,
-        framebuffer: Option<FramebufferView<'_>>,
-        framebuffer_raw: Option<FramebufferView<'_>>,
-    ) {
+    fn render_body(&mut self, ui: &mut egui::Ui, frame: MonitorFrame<'_>) {
+        let MonitorFrame {
+            cpu_state,
+            iou,
+            devices,
+            memory_reader,
+            framebuffer,
+            framebuffer_raw,
+        } = frame;
         // The monitor displays many fields that change every CPU tick
         // (scan_cycle, cycle counter, $C0xx access log, audio scopes…).
         // egui only repaints on input events by default, which makes

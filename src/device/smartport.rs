@@ -912,11 +912,11 @@ impl SmartPort {
         // Odd section
         if odd_bytes > 0 {
             let mut topbits = 0x80u8;
-            for i in 0..odd_bytes {
-                if payload[i] & 0x80 != 0 { topbits |= 0x40 >> i; }
+            for (i, &b) in payload[..odd_bytes].iter().enumerate() {
+                if b & 0x80 != 0 { topbits |= 0x40 >> i; }
             }
             self.resp_buffer.push(topbits);
-            for i in 0..odd_bytes { self.resp_buffer.push(payload[i] | 0x80); }
+            for &b in &payload[..odd_bytes] { self.resp_buffer.push(b | 0x80); }
         }
 
         // Groups of 7

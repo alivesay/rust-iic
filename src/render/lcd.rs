@@ -1,8 +1,8 @@
 use wgpu::util::DeviceExt;
 
-use super::screen::PostProcessor;
+use super::screen::{ContentRect, PostProcessor, RendererInit};
 
-/// Apple IIc flat panel LCD renderer.
+// Apple IIc flat panel LCD renderer.
 pub struct LcdRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -36,23 +36,24 @@ struct LcdUniforms {
 }
 
 impl LcdRenderer {
-    /// LCD vertical aspect correction factor.
-    /// The Apple IIc flat panel was significantly shorter than CRT equivalent.
-    /// Contemporary reviews noted it "squishes 25 lines into a 16 line space"
-    /// which gives us 16/25 = 0.64
+    // LCD vertical aspect correction factor.
+    // The Apple IIc flat panel was significantly shorter than CRT equivalent.
+    // Contemporary reviews noted it "squishes 25 lines into a 16 line space"
+    // which gives us 16/25 = 0.64
     pub const LCD_ASPECT_CORRECTION: f32 = 0.64;
 
-    pub fn new(
-        device: &wgpu::Device,
-        surface_width: u32,
-        surface_height: u32,
-        _buffer_width: u32,
-        _buffer_height: u32,
-        bar_height: u32,
-        source_width: f32,
-        source_height: f32,
-        surface_format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn new(init: RendererInit<'_>) -> Self {
+        let RendererInit {
+            device,
+            surface_width,
+            surface_height,
+            buffer_width: _,
+            buffer_height: _,
+            bar_height,
+            source_width,
+            source_height,
+            surface_format,
+        } = init;
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/lcd.wgsl"));
 
         // Full-screen triangle
@@ -346,19 +347,14 @@ impl PostProcessor for LcdRenderer {
         );
     }
 
-    fn update_content_rect(
-        &self,
-        queue: &wgpu::Queue,
-        surface_w: u32,
-        surface_h: u32,
-        offset_x: u32,
-        offset_y: u32,
-        dst_w: u32,
-        dst_h: u32,
-        bar_h: u32,
-        source_width: f32,
-        source_height: f32,
-    ) {
+    fn update_content_rect(&self, queue: &wgpu::Queue, rect: &ContentRect) {
+        let &ContentRect {
+            surface_w, surface_h,
+            offset_x, offset_y,
+            dst_w, dst_h,
+            bar_h,
+            source_width, source_height,
+        } = rect;
         let sw = surface_w as f64;
         let sh = surface_h as f64;
 

@@ -1100,13 +1100,11 @@ impl Video {
             4.0/32.0,
             4.0/32.0, 4.0/32.0, 3.0/32.0, 2.0/32.0, 1.0/32.0,
         ];
-        const N_TAPS: usize = 11;
         const HALF: i32 = 5;
 
         // Luminance lowpass
         const Y_LP: [f32; 5] = [0.125, 0.25, 0.25, 0.25, 0.125];
         const Y_HALF: i32 = 2;
-        const Y_TAPS: usize = 5;
 
         // Saturation
         let sat = self.effects.chroma_saturation;
@@ -1129,18 +1127,18 @@ impl Video {
         for k in 0..560 {
             let mut acc_i = 0.0f32;
             let mut acc_q = 0.0f32;
-            for t in 0..N_TAPS {
+            for (t, &w) in LP_KERN.iter().enumerate() {
                 let src = (k as i32 + t as i32 - HALF).clamp(0, 559) as usize;
-                acc_i += i_demod[src] * LP_KERN[t];
-                acc_q += q_demod[src] * LP_KERN[t];
+                acc_i += i_demod[src] * w;
+                acc_q += q_demod[src] * w;
             }
             i_lp[k] = acc_i;
             q_lp[k] = acc_q;
 
             let mut acc_y = 0.0f32;
-            for t in 0..Y_TAPS {
+            for (t, &w) in Y_LP.iter().enumerate() {
                 let src = (k as i32 + t as i32 - Y_HALF).clamp(0, 559) as usize;
-                acc_y += comp[src] * Y_LP[t];
+                acc_y += comp[src] * w;
             }
             y_lp[k] = acc_y;
         }

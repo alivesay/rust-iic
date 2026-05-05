@@ -1,6 +1,6 @@
 use wgpu::util::DeviceExt;
 
-use super::screen::PostProcessor;
+use super::screen::{ContentRect, PostProcessor, RendererInit};
 
 // Post-processing CRT shader renderer with multi-pass bloom.
 //
@@ -117,6 +117,20 @@ struct CrtUniforms {
     extra: [f32; 4],
 }
 
+/// Arguments to the internal `CrtRenderer::create_bind_group` helper.
+/// Bundled into a struct to avoid clippy `too_many_arguments` and to keep
+/// the call sites readable.
+struct BindGroupArgs<'a> {
+    device: &'a wgpu::Device,
+    layout: &'a wgpu::BindGroupLayout,
+    texture_view: &'a wgpu::TextureView,
+    sampler: &'a wgpu::Sampler,
+    uniform_buffer: &'a wgpu::Buffer,
+    bloom_view: &'a wgpu::TextureView,
+    shader_params_buffer: &'a wgpu::Buffer,
+    glow_view: &'a wgpu::TextureView,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ChromaUniforms {
@@ -141,17 +155,18 @@ impl CrtRenderer {
     const GLOW_MAX_W: u32 = 240;
     const GLOW_MAX_H: u32 = 135;
 
-    pub fn new(
-        device: &wgpu::Device,
-        surface_width: u32,
-        surface_height: u32,
-        buffer_width: u32,
-        buffer_height: u32,
-        bar_height: u32,
-        source_width: f32,
-        source_height: f32,
-        surface_format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn new(init: RendererInit<'_>) -> Self {
+        let RendererInit {
+            device,
+            surface_width,
+            surface_height,
+            buffer_width,
+            buffer_height,
+            bar_height,
+            source_width,
+            source_height,
+            surface_format,
+        } = init;
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/crt.wgsl"));
 
         // Full-screen triangle
@@ -525,16 +540,16 @@ impl CrtRenderer {
             device, &gauss_bind_group_layout, &glowx_view, &sampler, &glowy_uniform_buffer,
         );
 
-        let bind_group = Self::create_bind_group(
+        let bind_group = Self::create_bind_group(BindGroupArgs {
             device,
-            &bind_group_layout,
-            &intermediate_view,
-            &sampler,
-            &uniform_buffer,
-            &blur_view,
-            &shader_params_buffer,
-            &glow_view,
-        );
+            layout: &bind_group_layout,
+            texture_view: &intermediate_view,
+            sampler: &sampler,
+            uniform_buffer: &uniform_buffer,
+            bloom_view: &blur_view,
+            shader_params_buffer: &shader_params_buffer,
+            glow_view: &glow_view,
+        });
 
         // --- Phosphor persistence pipeline ---
         let phosphor_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/phosphor.wgsl"));
@@ -1132,16 +1147,17 @@ impl CrtRenderer {
         (texture, view, render_view)
     }
 
-    fn create_bind_group(
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        texture_view: &wgpu::TextureView,
-        sampler: &wgpu::Sampler,
-        uniform_buffer: &wgpu::Buffer,
-        bloom_view: &wgpu::TextureView,
-        shader_params_buffer: &wgpu::Buffer,
-        glow_view: &wgpu::TextureView,
-    ) -> wgpu::BindGroup {
+    fn create_bind_group(args: BindGroupArgs<'_>) -> wgpu::BindGroup {
+        let BindGroupArgs {
+            device,
+            layout,
+            texture_view,
+            sampler,
+            uniform_buffer,
+            bloom_view,
+            shader_params_buffer,
+            glow_view,
+        } = args;
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("crt_bind_group"),
             layout,
@@ -1408,16 +1424,16 @@ impl CrtRenderer {
         queue.write_buffer(&self.glowy_uniform_buffer, 12, bytemuck::bytes_of(&glow_h_f32));
 
         // Recreate CRT bind group (reads from intermediate + blur + glow)
-        self.bind_group = Self::create_bind_group(
+        self.bind_group = Self::create_bind_group(BindGroupArgs {
             device,
-            &self.bind_group_layout,
-            &self.intermediate_view,
-            &self.sampler,
-            &self.uniform_buffer,
-            &self.blur_view,
-            &self.shader_params_buffer,
-            &self.glow_view,
-        );
+            layout: &self.bind_group_layout,
+            texture_view: &self.intermediate_view,
+            sampler: &self.sampler,
+            uniform_buffer: &self.uniform_buffer,
+            bloom_view: &self.blur_view,
+            shader_params_buffer: &self.shader_params_buffer,
+            glow_view: &self.glow_view,
+        });
 
         // Recreate phosphor history textures at new resolution
         let (hist_a, hist_a_view, _) = Self::create_intermediate(device, width, height, format, 1);
@@ -1567,21 +1583,17 @@ impl CrtRenderer {
         queue.write_buffer(&self.ntsc_uniform_buffer, 0, bytemuck::bytes_of(&ntsc_uniforms));
     }
 
-    // Update the content rect and source dimensions based on actual blit geometry.
-    // Call each frame with the real position/size of the emulator content in the surface.
-    pub fn update_content_rect(
-        &self, queue: &wgpu::Queue,
-        surface_w: u32, surface_h: u32,
-        offset_x: u32, offset_y: u32,
-        dst_w: u32, dst_h: u32,
-        bar_h: u32,
-        source_width: f32, source_height: f32,
-    ) {
+        pub fn update_content_rect(&self, queue: &wgpu::Queue, rect: &ContentRect) {
+        let &ContentRect {
+            surface_w, surface_h,
+            offset_x, offset_y,
+            dst_w, dst_h,
+            bar_h,
+            source_width, source_height,
+        } = rect;
         let sw = surface_w as f64;
         let sh = surface_h as f64;
 
-        // Content rect accurately describes where scaling_renderer places content
-        // Edge artifact prevention is handled in the shader via clamped sampling
         let left = offset_x as f64 / sw;
         let top = offset_y as f64 / sh;
         let right = (offset_x + dst_w) as f64 / sw;
@@ -2140,24 +2152,8 @@ impl PostProcessor for CrtRenderer {
         CrtRenderer::resize(self, device, queue, width, height)
     }
 
-    fn update_content_rect(
-        &self,
-        queue: &wgpu::Queue,
-        surface_w: u32,
-        surface_h: u32,
-        offset_x: u32,
-        offset_y: u32,
-        dst_w: u32,
-        dst_h: u32,
-        bar_h: u32,
-        source_width: f32,
-        source_height: f32,
-    ) {
-        CrtRenderer::update_content_rect(
-            self, queue, surface_w, surface_h,
-            offset_x, offset_y, dst_w, dst_h,
-            bar_h, source_width, source_height,
-        )
+    fn update_content_rect(&self, queue: &wgpu::Queue, rect: &ContentRect) {
+        CrtRenderer::update_content_rect(self, queue, rect)
     }
 
     fn update_time(&self, queue: &wgpu::Queue, time: f32) {

@@ -24,8 +24,9 @@ use crate::cpu_monitor_window::CpuMonitorWindow;
 use crate::device::drive_audio::DriveAudioParams;
 use crate::monitor::Monitor;
 use crate::render::{
-    blit_direct, blit_nearest, CrtRenderer,
-    DriveIcons, DriveStatusInfo, LcdRenderer, PostProcessor, ToolbarAction, ToolbarLabels, render_toolbar_ui,
+    blit_direct, blit_nearest, BlitRect, ContentRect, CrtRenderer,
+    DriveIcons, DriveStatusInfo, LcdRenderer, PostProcessor, RendererInit,
+    ToolbarAction, ToolbarLabels, render_toolbar_ui,
 };
 use crate::settings_window::{render_settings_window, SettingsState};
 
@@ -368,28 +369,28 @@ impl App {
         let surface_format = pixels.render_texture_format();
 
         self.post_processor = match self.shader_type {
-            ShaderType::Crt => Some(Box::new(CrtRenderer::new(
-                pixels.device(),
-                surface_w,
-                surface_h,
-                buf_w,
-                buf_h,
-                0,
-                active_w as f32,
-                active_h as f32,
+            ShaderType::Crt => Some(Box::new(CrtRenderer::new(RendererInit {
+                device: pixels.device(),
+                surface_width: surface_w,
+                surface_height: surface_h,
+                buffer_width: buf_w,
+                buffer_height: buf_h,
+                bar_height: 0,
+                source_width: active_w as f32,
+                source_height: active_h as f32,
                 surface_format,
-            )) as Box<dyn PostProcessor>),
-            ShaderType::Lcd => Some(Box::new(LcdRenderer::new(
-                pixels.device(),
-                surface_w,
-                surface_h,
-                buf_w,
-                buf_h,
-                0,
-                active_w as f32,
-                active_h as f32,
+            })) as Box<dyn PostProcessor>),
+            ShaderType::Lcd => Some(Box::new(LcdRenderer::new(RendererInit {
+                device: pixels.device(),
+                surface_width: surface_w,
+                surface_height: surface_h,
+                buffer_width: buf_w,
+                buffer_height: buf_h,
+                bar_height: 0,
+                source_width: active_w as f32,
+                source_height: active_h as f32,
                 surface_format,
-            )) as Box<dyn PostProcessor>),
+            })) as Box<dyn PostProcessor>),
             ShaderType::None => None,
         };
         if let Some(pp) = &mut self.post_processor {
@@ -662,28 +663,28 @@ impl winit::application::ApplicationHandler for App {
 
                 if self.shader_type != ShaderType::None {
                     self.post_processor = match self.shader_type {
-                        ShaderType::Crt => Some(Box::new(CrtRenderer::new(
-                            pixels.device(),
-                            surface_w,
-                            surface_h,
-                            buf_w,
-                            buf_h,
-                            0,
-                            active_w as f32,
-                            active_h as f32,
+                        ShaderType::Crt => Some(Box::new(CrtRenderer::new(RendererInit {
+                            device: pixels.device(),
+                            surface_width: surface_w,
+                            surface_height: surface_h,
+                            buffer_width: buf_w,
+                            buffer_height: buf_h,
+                            bar_height: 0,
+                            source_width: active_w as f32,
+                            source_height: active_h as f32,
                             surface_format,
-                        )) as Box<dyn PostProcessor>),
-                        ShaderType::Lcd => Some(Box::new(LcdRenderer::new(
-                            pixels.device(),
-                            surface_w,
-                            surface_h,
-                            buf_w,
-                            buf_h,
-                            0,
-                            active_w as f32,
-                            active_h as f32,
+                        })) as Box<dyn PostProcessor>),
+                        ShaderType::Lcd => Some(Box::new(LcdRenderer::new(RendererInit {
+                            device: pixels.device(),
+                            surface_width: surface_w,
+                            surface_height: surface_h,
+                            buffer_width: buf_w,
+                            buffer_height: buf_h,
+                            bar_height: 0,
+                            source_width: active_w as f32,
+                            source_height: active_h as f32,
                             surface_format,
-                        )) as Box<dyn PostProcessor>),
+                        })) as Box<dyn PostProcessor>),
                         ShaderType::None => None,
                     };
 
@@ -983,24 +984,24 @@ impl App {
         };
 
         let mut memory_snapshot = [0u8; 768];
-        for i in 0..256 {
-            memory_snapshot[i] = self.cpu.bus.read_byte(0x0100 + i as u16);
+        for (i, slot) in memory_snapshot[..256].iter_mut().enumerate() {
+            *slot = self.cpu.bus.read_byte(0x0100 + i as u16);
         }
         let mem_page = self.cpu_monitor.memory.page;
         let page_base = (mem_page as u16) << 8;
-        for i in 0..256 {
-            memory_snapshot[256 + i] = self.cpu.bus.read_byte(page_base + i as u16);
+        for (i, slot) in memory_snapshot[256..512].iter_mut().enumerate() {
+            *slot = self.cpu.bus.read_byte(page_base + i as u16);
         }
         let pc_base = cpu_state.pc.wrapping_sub(32) & 0xFF00;
-        for i in 0..256 {
-            memory_snapshot[512 + i] = self.cpu.bus.read_byte(pc_base.wrapping_add(i as u16));
+        for (i, slot) in memory_snapshot[512..768].iter_mut().enumerate() {
+            *slot = self.cpu.bus.read_byte(pc_base.wrapping_add(i as u16));
         }
 
         let iou_snapshot = {
             let iou = &self.cpu.bus.iou;
             let mut softswitches = [None; 256];
-            for i in 0..256 {
-                softswitches[i] = iou.peek_softswitch(0xC000 + i as u16);
+            for (i, slot) in softswitches.iter_mut().enumerate() {
+                *slot = iou.peek_softswitch(0xC000 + i as u16);
             }
             // Mirror the tail of the IOU access log into the snapshot so the
             // monitor panel can render it without holding a borrow into the
@@ -1153,12 +1154,14 @@ impl App {
                         };
                         cpu_monitor.render_inline(
                             ui,
-                            &cpu_state,
-                            &iou_snapshot,
-                            &devices_snapshot,
-                            &memory_reader,
-                            Some(fb_view),
-                            Some(fb_raw_view),
+                            crate::cpu_monitor::MonitorFrame {
+                                cpu_state: &cpu_state,
+                                iou: &iou_snapshot,
+                                devices: &devices_snapshot,
+                                memory_reader: &memory_reader,
+                                framebuffer: Some(fb_view),
+                                framebuffer_raw: Some(fb_raw_view),
+                            },
                         );
                     });
             });
@@ -1270,15 +1273,17 @@ impl App {
                     
                     crt.update_content_rect(
                         pixels.queue(),
-                        surf_w,
-                        surf_h,
-                        offset_x + border_inset_x,
-                        offset_y + border_inset_y,
-                        scaled_w - 2 * border_inset_x,
-                        scaled_h - 2 * border_inset_y,
-                        0,
-                        active_w as f32,
-                        (active_h / 2) as f32,
+                        &ContentRect {
+                            surface_w: surf_w,
+                            surface_h: surf_h,
+                            offset_x: offset_x + border_inset_x,
+                            offset_y: offset_y + border_inset_y,
+                            dst_w: scaled_w - 2 * border_inset_x,
+                            dst_h: scaled_h - 2 * border_inset_y,
+                            bar_h: 0,
+                            source_width: active_w as f32,
+                            source_height: (active_h / 2) as f32,
+                        },
                     );
 
                     let elapsed = self.shader_start_time.elapsed().as_secs_f32();
@@ -1320,14 +1325,16 @@ impl App {
 
                     blit_nearest(
                         frame,
-                        buf_w,
                         video_pixels,
-                        src_w,
-                        src_h,
-                        blit_offset_x,
-                        blit_offset_y,
-                        blit_dst_w,
-                        blit_dst_h,
+                        BlitRect {
+                            frame_w: buf_w,
+                            src_w,
+                            src_h,
+                            dst_x: blit_offset_x,
+                            dst_y: blit_offset_y,
+                            dst_w: blit_dst_w,
+                            dst_h: blit_dst_h,
+                        },
                     );
                 }
 
@@ -1345,15 +1352,17 @@ impl App {
 
                     lcd.update_content_rect(
                         pixels.queue(),
-                        buf_w,
-                        buf_h,
-                        active_offset_x,
-                        active_offset_y,
-                        active_dst_w,
-                        active_dst_h,
-                        bar_h,
-                        active_w as f32,
-                        (active_h / 2) as f32,
+                        &ContentRect {
+                            surface_w: buf_w,
+                            surface_h: buf_h,
+                            offset_x: active_offset_x,
+                            offset_y: active_offset_y,
+                            dst_w: active_dst_w,
+                            dst_h: active_dst_h,
+                            bar_h,
+                            source_width: active_w as f32,
+                            source_height: (active_h / 2) as f32,
+                        },
                     );
                 }
             }

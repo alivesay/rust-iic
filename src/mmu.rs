@@ -69,6 +69,13 @@ pub struct Mmu {
     lcram_high: [Memory; 2], // Two 8KB high LC RAM banks | [MAIN, AUX]
 }
 
+pub struct WriteCtx {
+    pub mem_state: u8,
+    pub is_80store: bool,
+    pub is_page2: bool,
+    pub is_hires: bool,
+}
+
 impl Mmu {
     pub fn new() -> Self {
         let mut mmu = Self {
@@ -231,11 +238,9 @@ impl Mmu {
         iou: &mut Iou,
         addr: u16,
         value: u8,
-        mem_state: u8,
-        is_80store: bool,
-        is_page2: bool,
-        is_hires: bool,
+        ctx: WriteCtx,
     ) -> u8 {
+        let WriteCtx { mem_state, is_80store, is_page2, is_hires } = ctx;
         let altzp = check_bits_u8!(mem_state, MemStateMask::ALTZP) as usize;
         let bank = check_bits_u8!(mem_state, MemStateMask::RDBNK) as usize;
         let ramwrt = check_bits_u8!(mem_state, MemStateMask::RAMWRT) as usize;

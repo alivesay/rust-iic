@@ -1,3 +1,27 @@
+pub struct RendererInit<'a> {
+    pub device: &'a wgpu::Device,
+    pub surface_width: u32,
+    pub surface_height: u32,
+    pub buffer_width: u32,
+    pub buffer_height: u32,
+    pub bar_height: u32,
+    pub source_width: f32,
+    pub source_height: f32,
+    pub surface_format: wgpu::TextureFormat,
+}
+
+pub struct ContentRect {
+    pub surface_w: u32,
+    pub surface_h: u32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+    pub dst_w: u32,
+    pub dst_h: u32,
+    pub bar_h: u32,
+    pub source_width: f32,
+    pub source_height: f32,
+}
+
 pub trait PostProcessor {
     // Returns the intermediate texture view to render emulator output into.
     fn intermediate_view(&self) -> &wgpu::TextureView;
@@ -12,19 +36,7 @@ pub trait PostProcessor {
     );
 
     // Update the content rect and source dimensions based on actual blit geometry.
-    fn update_content_rect(
-        &self,
-        queue: &wgpu::Queue,
-        surface_w: u32,
-        surface_h: u32,
-        offset_x: u32,
-        offset_y: u32,
-        dst_w: u32,
-        dst_h: u32,
-        bar_h: u32,
-        source_width: f32,
-        source_height: f32,
-    );
+    fn update_content_rect(&self, queue: &wgpu::Queue, rect: &ContentRect);
 
     // Update the time uniform for animation effects.
     fn update_time(&self, queue: &wgpu::Queue, time: f32);

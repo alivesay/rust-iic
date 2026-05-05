@@ -1,12 +1,7 @@
+#[derive(Default)]
 pub struct MemoryPanelState {
     pub page: u8,
     pub goto: String,
-}
-
-impl Default for MemoryPanelState {
-    fn default() -> Self {
-        Self { page: 0x00, goto: String::new() }
-    }
 }
 
 pub fn render(
