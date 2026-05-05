@@ -75,6 +75,37 @@ pub struct App {
     pub frame_progress: FrameProgress,
     pub last_memexp_flush: Instant,
     pub bbs_handle: Option<crate::bbs::BbsHandle>,
+
+    pub gpu_perf: GpuPerf,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GpuPerf {
+    pub samples: u32,
+    pub total_us: u64,
+    pub max_us: u64,
+}
+
+impl GpuPerf {
+    pub fn record(&mut self, us: u64) {
+        self.samples = self.samples.saturating_add(1);
+        self.total_us = self.total_us.saturating_add(us);
+        if us > self.max_us {
+            self.max_us = us;
+        }
+    }
+    pub fn drain(&mut self) -> (f64, u64, u32) {
+        let avg = if self.samples > 0 {
+            self.total_us as f64 / self.samples as f64
+        } else {
+            0.0
+        };
+        let out = (avg, self.max_us, self.samples);
+        self.samples = 0;
+        self.total_us = 0;
+        self.max_us = 0;
+        out
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -143,6 +174,7 @@ impl App {
             frame_progress: FrameProgress::default(),
             last_memexp_flush: Instant::now(),
             bbs_handle: None,
+            gpu_perf: GpuPerf::default(),
         }
     }
 
@@ -316,6 +348,7 @@ impl App {
         let mut pixels = match PixelsBuilder::new(buf_w, buf_h, surface_texture)
             .texture_format(wgpu::TextureFormat::Rgba8Unorm)
             .render_texture_format(wgpu::TextureFormat::Bgra8UnormSrgb)
+            .present_mode(wgpu::PresentMode::Mailbox)
             .build()
         {
             Ok(p) => p,
@@ -612,10 +645,10 @@ impl winit::application::ApplicationHandler for App {
             SurfaceTexture::new(surface_w, surface_h, window.clone());
 
         self.pixels = match PixelsBuilder::new(buf_w, buf_h, surface_texture)
-            // See note in `rebuild_render_pipeline`: framebuffer is raw
-            // gun voltages, CRT gamma decode happens in the shader.
             .texture_format(wgpu::TextureFormat::Rgba8Unorm)
             .render_texture_format(wgpu::TextureFormat::Bgra8UnormSrgb)
+            // non-blocking present
+            .present_mode(wgpu::PresentMode::Mailbox)
             .build() {
             Ok(mut pixels) => {
                 let mode = if self.shader_type == ShaderType::Crt {
@@ -1561,6 +1594,7 @@ impl App {
 
                 let post_proc = self.post_processor.take();
 
+                let render_t0 = Instant::now();
                 let render_res = pixels.render_with(|encoder, render_target, context| {
                     if let Some(ref crt) = post_proc {
                         crt.clear_intermediate(encoder);
@@ -1604,6 +1638,8 @@ impl App {
 
                 self.egui_renderer = egui_renderer;
                 self.post_processor = post_proc;
+
+                self.gpu_perf.record(render_t0.elapsed().as_micros() as u64);
 
                 // Free old egui textures
                 if let Some((ref output, _, _)) = egui_output {

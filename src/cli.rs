@@ -66,6 +66,9 @@ pub struct Args {
     #[arg(long)]
     pub perf: bool,
 
+    #[arg(long)]
+    pub perf_gpu: bool,
+
     // Boot into self-test mode (hold Open+Closed Apple)
     #[arg(long)]
     pub self_test: bool,

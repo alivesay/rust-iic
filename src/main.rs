@@ -602,7 +602,8 @@ fn run_gui(
         // performance metrics
         perf_frames += 1;
         if perf_start.elapsed() >= Duration::from_secs(1) {
-            if args.perf {
+            let show_perf = args.perf || args.perf_gpu;
+            if show_perf {
                 let elapsed = perf_start.elapsed().as_secs_f64();
                 let cycles_total = app.cpu.cycles - perf_cycles_start;
                 let mhz = cycles_total as f64 / elapsed / 1_000_000.0;
@@ -641,8 +642,18 @@ fn run_gui(
                     misses,
                     app.cpu_monitor.trace_buffer.len(),
                 );
+                if args.perf_gpu {
+                    let (avg_us, max_us, samples) = app.gpu_perf.drain();
+                    println!(
+                        "      gpu_render: avg:{:>5.2}ms  max:{:>5.2}ms  samples:{}",
+                        avg_us / 1000.0,
+                        max_us as f64 / 1000.0,
+                        samples,
+                    );
+                }
             } else {
                 app.cpu.bus.iou.iwm.get_and_reset_metrics();
+                let _ = app.gpu_perf.drain();
             }
 
             diag_pump_us = 0;

@@ -135,6 +135,12 @@ impl CrtRenderer {
     // Scale factor: 420/192 = 2.1875, so correction = 2.1875/2.0 = 1.09375
     pub const CRT_ASPECT_CORRECTION: f32 = 1.09375;
 
+    // caps on blur/glow target dimensions, ~1080p reference
+    const GAUSS_MAX_W: u32 = 960;
+    const GAUSS_MAX_H: u32 = 540;
+    const GLOW_MAX_W: u32 = 240;
+    const GLOW_MAX_H: u32 = 135;
+
     pub fn new(
         device: &wgpu::Device,
         surface_width: u32,
@@ -332,9 +338,9 @@ impl CrtRenderer {
             cache: None,
         });
 
-        // Gauss textures at 1/2 surface resolution for smoother blur
-        let gauss_w = (surface_width / 2).max(1);
-        let gauss_h = (surface_height / 2).max(1);
+    
+        let gauss_w = (surface_width / 2).clamp(1, Self::GAUSS_MAX_W);
+        let gauss_h = (surface_height / 2).clamp(1, Self::GAUSS_MAX_H);
 
         // Gauss uniform buffers (direction + blur_width + source_size)
         let default_blur_width = shader_ui::ShaderParams::default().blur_width;
@@ -360,9 +366,8 @@ impl CrtRenderer {
             device, gauss_w, gauss_h, surface_format, 1,
         );
 
-        // Glow textures at 1/8 surface resolution for larger fullscreen glow
-        let glow_w = (surface_width / 8).max(1);
-        let glow_h = (surface_height / 8).max(1);
+        let glow_w = (surface_width / 8).clamp(1, Self::GLOW_MAX_W);
+        let glow_h = (surface_height / 8).clamp(1, Self::GLOW_MAX_H);
 
         // Glow uniform buffers (direction + blur_width + source_size)
         let default_glow_width = shader_ui::ShaderParams::default().glow_width;
@@ -1344,9 +1349,9 @@ impl CrtRenderer {
             &self.sampler, &self.input_gamma_uniform_buffer,
         );
 
-        // Recreate gaussx intermediate texture (1/2 resolution, no mipmaps)
-        let gauss_w = (width / 2).max(1);
-        let gauss_h = (height / 2).max(1);
+        // Recreate gaussx intermediate texture (capped 1/2 resolution, no mipmaps)
+        let gauss_w = (width / 2).clamp(1, Self::GAUSS_MAX_W);
+        let gauss_h = (height / 2).clamp(1, Self::GAUSS_MAX_H);
         let (gaussx_tex, gaussx_v, _) = Self::create_intermediate(
             device, gauss_w, gauss_h, format, 1,
         );
@@ -1374,9 +1379,8 @@ impl CrtRenderer {
         queue.write_buffer(&self.gaussx_uniform_buffer, 12, bytemuck::bytes_of(&gw_f32));
         queue.write_buffer(&self.gaussy_uniform_buffer, 12, bytemuck::bytes_of(&gh_f32));
 
-        // Recreate glow textures (1/8 resolution for fullscreen glow)
-        let glow_w = (width / 8).max(1);
-        let glow_h = (height / 8).max(1);
+        let glow_w = (width / 8).clamp(1, Self::GLOW_MAX_W);
+        let glow_h = (width / 8).clamp(1, Self::GLOW_MAX_W);
         let (glowx_tex, glowx_v, _) = Self::create_intermediate(
             device, glow_w, glow_h, format, 1,
         );
