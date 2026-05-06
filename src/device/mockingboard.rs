@@ -375,19 +375,31 @@ impl Default for Via6522 {
 }
 
 impl Via6522 {
-    fn read(&self, reg: u8) -> u8 {
+    fn read(&mut self, reg: u8) -> u8 {
         match reg & 0x0F {
             0x00 => (self.orb & self.ddrb) | (self.irb & !self.ddrb), // ORB/IRB
             0x01 => (self.ora & self.ddra) | (self.ira & !self.ddra), // ORA/IRA
             0x02 => self.ddrb,
             0x03 => self.ddra,
-            0x04 => self.t1c as u8,         // T1C-L
+            0x04 => {
+                // Reading T1C-L clears the T1 interrupt flag
+                self.ifr &= !0x40;
+                self.t1c as u8
+            }
             0x05 => (self.t1c >> 8) as u8,  // T1C-H
             0x06 => self.t1l as u8,         // T1L-L
             0x07 => (self.t1l >> 8) as u8,  // T1L-H
-            0x08 => self.t2c as u8,         // T2C-L
+            0x08 => {
+                // Reading T2C-L clears the T2 interrupt flag
+                self.ifr &= !0x20;
+                self.t2c as u8
+            }
             0x09 => (self.t2c >> 8) as u8,  // T2C-H
-            0x0A => self.sr,
+            0x0A => {
+                // Reading SR clears the SR interrupt flag
+                self.ifr &= !0x04;
+                self.sr
+            }
             0x0B => self.acr,
             0x0C => self.pcr,
             0x0D => self.ifr,

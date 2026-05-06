@@ -103,24 +103,32 @@ fn instruction_length(opcode: u8) -> u8 {
     }
 }
 
+pub static LAST_PC: std::sync::atomic::AtomicU16 =
+    std::sync::atomic::AtomicU16::new(0);
+pub static LAST_AXYSP: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+pub static LAST_P: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
 
 const CYCLE_TABLE: [u64; 256] = [
-    7, 6, 2, 2, 2, 3, 5, 2, 3, 2, 2, 2, 2, 4, 6, 2,
-    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
-    6, 6, 2, 2, 3, 3, 5, 2, 4, 2, 2, 2, 4, 4, 6, 2,
-    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
-    6, 6, 2, 2, 2, 3, 5, 2, 3, 2, 2, 2, 3, 4, 6, 2,
-    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
-    6, 6, 2, 2, 2, 3, 5, 2, 4, 2, 2, 2, 5, 4, 6, 2,
-    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
-    2, 6, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2, 4, 4, 4, 2,
-    2, 6, 2, 2, 4, 4, 4, 2, 2, 5, 2, 2, 2, 5, 2, 2,
-    2, 6, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2, 4, 4, 4, 2,
-    2, 5, 2, 2, 4, 4, 4, 2, 2, 4, 2, 2, 4, 4, 4, 2,
-    2, 6, 2, 2, 3, 3, 5, 2, 2, 2, 2, 2, 4, 4, 6, 2,
-    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
-    2, 6, 2, 2, 3, 3, 5, 2, 2, 2, 2, 2, 4, 4, 6, 2,
-    2, 5, 2, 2, 2, 4, 6, 2, 2, 4, 2, 2, 2, 4, 7, 2,
+    // x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 xA xB xC xD xE xF
+       7, 6, 2, 1, 5, 3, 5, 5, 3, 2, 2, 1, 6, 4, 6, 5, // 0x
+       2, 5, 5, 1, 5, 4, 6, 5, 2, 4, 2, 1, 6, 4, 6, 5, // 1x
+       6, 6, 2, 1, 3, 3, 5, 5, 4, 2, 2, 1, 4, 4, 6, 5, // 2x
+       2, 5, 5, 1, 4, 4, 6, 5, 2, 4, 2, 1, 4, 4, 6, 5, // 3x
+       6, 6, 2, 1, 3, 3, 5, 5, 3, 2, 2, 1, 3, 4, 6, 5, // 4x
+       2, 5, 5, 1, 4, 4, 6, 5, 2, 4, 3, 1, 8, 4, 6, 5, // 5x
+       6, 6, 2, 1, 3, 3, 5, 5, 4, 2, 2, 1, 6, 4, 6, 5, // 6x
+       2, 5, 5, 1, 4, 4, 6, 5, 2, 4, 4, 1, 6, 4, 6, 5, // 7x
+       // 0x80 BRA: base 2, branch() adds +1 for the always-taken cost (= 3)
+       2, 6, 2, 1, 3, 3, 3, 5, 2, 2, 2, 1, 4, 4, 4, 5, // 8x
+       2, 6, 5, 1, 4, 4, 4, 5, 2, 5, 2, 1, 4, 5, 5, 5, // 9x
+       2, 6, 2, 1, 3, 3, 3, 5, 2, 2, 2, 1, 4, 4, 4, 5, // Ax
+       2, 5, 5, 1, 4, 4, 4, 5, 2, 4, 2, 1, 4, 4, 4, 5, // Bx
+       2, 6, 2, 1, 3, 3, 5, 5, 2, 2, 2, 1, 4, 4, 6, 5, // Cx
+       2, 5, 5, 1, 4, 4, 6, 5, 2, 4, 3, 1, 4, 4, 7, 5, // Dx
+       2, 6, 2, 1, 3, 3, 5, 5, 2, 2, 2, 1, 4, 4, 6, 5, // Ex
+       2, 5, 5, 1, 4, 4, 6, 5, 2, 4, 4, 1, 4, 4, 7, 5, // Fx
 ];
 
 
@@ -142,6 +150,9 @@ pub struct Cpu {
     pub entry_point_override: Option<u16>,
     pub debug: bool,
     extra_cycles: u64,  // Extra cycles for taken branches / page crosses
+
+    // Latches IRQ-line state at the END of the previous instruction
+    irq_pending_at_instr_end: bool,
     
     // Hook manager for ROM/execution hooks
     pub hooks: HookManager,
@@ -167,6 +178,7 @@ impl Cpu {
             symbol_table: SymbolTable::new(),
             debug: false,
             extra_cycles: 0,
+            irq_pending_at_instr_end: false,
             hooks: HookManager::new(),
             capture_trace: false,
             last_trace: CpuTraceEntry::default(),
@@ -263,21 +275,18 @@ impl Cpu {
     pub fn power_cycle(&mut self) {
         println!("CPU POWER CYCLE: Full cold reboot...");
 
-        // Simulate fresh power-on RAM contents (indeterminate state)
         self.bus.randomize_ram();
 
-        // Full re-init: registers, flags, soft switches
         self.initialize_registers();
         self.initialize_flags();
         self.bus.interrupts.clear_all();
         self.bus.iou.reset();
 
-        // Reset cycle counters (fresh power-on state)
         self.cycles = 0;
         self.bus.iou.cycles = 0;
         self.bus.iou.scan_cycle = 0;
 
-        // Clear and re-register timed hooks (mockingboard deactivated on IOU reset)
+        // hooks
         self.hooks.clear_timed_hooks();
         if self.bus.iou.mockingboard.is_enabled() {
             self.hooks.register_mockingboard_hook(0, 3_000_000);
@@ -324,73 +333,74 @@ impl Cpu {
             return false;
         }
 
-        // if only IRQ is pending and it is masked, return immediately
-        if self.bus.interrupts.irq && !self.bus.interrupts.nmi && !self.bus.interrupts.reset && !self.bus.interrupts.brk && self.p.contains(Flags::IRQ_DISABLE) {
-            return false;
+        // IRQ-only path
+        if self.bus.interrupts.irq && !self.bus.interrupts.nmi && !self.bus.interrupts.reset && !self.bus.interrupts.brk {
+            if self.p.contains(Flags::IRQ_DISABLE) {
+                return false;
+            }
+            if !self.irq_pending_at_instr_end {
+                return false;
+            }
         }
 
-        let nmi_vector = self.bus.read_word(0xFFFA);
-        let reset_vector = self.bus.read_word(0xFFFC);
-        let irq_vector = self.bus.read_word(0xFFFE);
-
-        if let Some((interrupt_type, target_pc)) = self
-            .bus
-            .interrupts
-            .handle_interrupt_with_vectors(nmi_vector, reset_vector, irq_vector)
-        {
-            if self.p.contains(Flags::IRQ_DISABLE) && interrupt_type == InterruptType::Irq {
+        // pick the highest-priority pending interrupt and the vector address
+        // BEFORE doing any memory accesses so we only read one vector...
+        let (interrupt_type, vector_addr) = if self.bus.interrupts.nmi {
+            (InterruptType::Nmi, 0xFFFAu16)
+        } else if self.bus.interrupts.reset {
+            (InterruptType::Rst, 0xFFFCu16)
+        } else if self.bus.interrupts.brk {
+            (InterruptType::Brk, 0xFFFEu16)
+        } else if self.bus.interrupts.irq {
+            if self.p.contains(Flags::IRQ_DISABLE) {
                 return false;
             }
+            (InterruptType::Irq, 0xFFFEu16)
+        } else {
+            return false;
+        };
 
-            if interrupt_type == InterruptType::Rst {
-                println!("Handling CPU Reset...");
-                self.pc = target_pc;
-                return true;
-            }
 
-            let pushed_pc = match interrupt_type {
-                InterruptType::Brk => match self.cpu_type {
-                    CpuType::NMOS6502 => self.pc.wrapping_add(1),
-                    CpuType::CMOS65C02 | CpuType::WDC65C02S => self.pc.wrapping_add(1),
-                },
-                _ => self.pc,
-            };
-
-            self.push_stack((pushed_pc >> 8) as u8);
-            self.push_stack((pushed_pc & 0xFF) as u8);
-
-            let mut pushed_p = self.p;
-            pushed_p.insert(Flags::UNUSED);
-            pushed_p.set(Flags::BREAK, interrupt_type == InterruptType::Brk);
-
-            self.push_stack(pushed_p.bits());
-
-            self.p.insert(Flags::IRQ_DISABLE);
-            self.p.remove(Flags::BREAK);
-
-            if self.cpu_type != CpuType::NMOS6502 {
-                self.p.remove(Flags::DECIMAL);
-            }
-
+        if interrupt_type == InterruptType::Rst {
+            let target_pc = self.bus.read_word(vector_addr);
+            self.bus.interrupts.reset = false;
+            println!("Handling CPU Reset...");
             self.pc = target_pc;
-
-            if interrupt_type == InterruptType::Irq {
-                self.bus.interrupts.irq = false;
-                self.bus.interrupts.leave_wait();
-                return false;
-            }
-
-            if interrupt_type == InterruptType::Nmi {
-                self.bus.interrupts.nmi = false;
-                self.bus.interrupts.leave_wait();
-                return false;
-            }
-
-            self.bus.interrupts.leave_wait();
-
             return true;
         }
-        false
+
+        let pushed_pc = match interrupt_type {
+            InterruptType::Brk => self.pc.wrapping_add(1),
+            _ => self.pc,
+        };
+
+        self.push_stack((pushed_pc >> 8) as u8);
+        self.push_stack((pushed_pc & 0xFF) as u8);
+
+        let mut pushed_p = self.p;
+        pushed_p.insert(Flags::UNUSED);
+        pushed_p.set(Flags::BREAK, interrupt_type == InterruptType::Brk);
+        self.push_stack(pushed_p.bits());
+
+        self.p.insert(Flags::IRQ_DISABLE);
+        self.p.remove(Flags::BREAK);
+
+        if self.cpu_type != CpuType::NMOS6502 {
+            self.p.remove(Flags::DECIMAL);
+        }
+
+
+        let target_pc = self.bus.read_word(vector_addr);
+        self.pc = target_pc;
+
+        match interrupt_type {
+            InterruptType::Irq => { self.bus.interrupts.irq = false; }
+            InterruptType::Nmi => { self.bus.interrupts.nmi = false; }
+            InterruptType::Brk => { self.bus.interrupts.brk = false; }
+            _ => {}
+        }
+        self.bus.interrupts.leave_wait();
+        true
     }
 
     fn fetch_byte(&mut self) -> u8 {
@@ -464,6 +474,13 @@ impl Cpu {
         self.bus.update_interrupts();
         let cycles = self.step();
         self.cycles += cycles;
+        LAST_PC.store(self.pc, std::sync::atomic::Ordering::Relaxed);
+        let packed = (self.regs.a as u32)
+            | ((self.regs.x as u32) << 8)
+            | ((self.regs.y as u32) << 16)
+            | ((self.regs.sp as u32) << 24);
+        LAST_AXYSP.store(packed, std::sync::atomic::Ordering::Relaxed);
+        LAST_P.store(self.p.bits(), std::sync::atomic::Ordering::Relaxed);
         cycles
     }
 
@@ -484,9 +501,18 @@ impl Cpu {
     }
 
     pub fn step(&mut self) -> u64 {
+        self.bus.step_access_count = 0;
+
         if self.handle_interrupt() {
-            self.bus.tick(7);
-            return 7;
+
+            const IRQ_CYCLES: u64 = 7;
+            let accesses = self.bus.step_access_count;
+            let internal = IRQ_CYCLES.saturating_sub(accesses);
+            if internal > 0 {
+                self.bus.tick_scan_only(internal);
+            }
+            self.bus.tick_devices(IRQ_CYCLES);
+            return IRQ_CYCLES;
         }
 
         if self.bus.interrupts.halted {
@@ -511,12 +537,10 @@ impl Cpu {
             }
         }
 
-        // Check for timed hooks (fires based on cycle count, not PC)
         if self.hooks.has_pending_timed_hooks() {
             self.hooks.check_timed_hooks(self.cycles);
         }
 
-        // Check for execution hooks at current PC
         if self.hooks.has_hooks_at(self.pc) {
             let ctx = HookContext {
                 pc: self.pc,
@@ -527,14 +551,11 @@ impl Cpu {
                 p: self.p.bits(),
                 cycles: self.cycles,
             };
-            // Provide memory peek function for filter checking
+
             let mut peek = |addr: u16| self.bus.peek_byte(addr);
             let _skip = self.hooks.execute_hooks_filtered(&ctx, &mut peek);
-            // Note: skip functionality would require more complex handling
-            // For now, hooks are for side effects only (like activating Mockingboard)
         }
         
-        // Process pending actions from hooks (both timed and address-based)
         if self.hooks.pending_mockingboard_activate {
             self.hooks.pending_mockingboard_activate = false;
             self.bus.iou.mockingboard.activate();
@@ -570,9 +591,8 @@ impl Cpu {
         let opcode = self.fetch_byte();
 
         if self.capture_trace {
-            // Peek at operand bytes without advancing PC
-            let operand1 = self.bus.read_byte(self.pc);
-            let operand2 = self.bus.read_byte(self.pc.wrapping_add(1));
+            let operand1 = self.bus.peek_byte(self.pc);
+            let operand2 = self.bus.peek_byte(self.pc.wrapping_add(1));
             let instruction_len = instruction_length(opcode);
             
             self.last_trace = CpuTraceEntry {
@@ -590,19 +610,19 @@ impl Cpu {
             };
         }
 
-        // tick base cycles *before* execution so that iou.cycles is accurate
+
         let base_cycles = CYCLE_TABLE[opcode as usize];
-        self.bus.tick(base_cycles);
 
         self.extra_cycles = 0;
         self.decode_execute(opcode);
 
-        // tick any extra cycles from branches/page crosses
-        if self.extra_cycles > 0 {
-            self.bus.tick(self.extra_cycles);
-        }
-
         let cycles = base_cycles + self.extra_cycles;
+        let accesses = self.bus.step_access_count;
+        let internal = cycles.saturating_sub(accesses);
+        if internal > 0 {
+            self.bus.tick_scan_only(internal);
+        }
+        self.bus.tick_devices(cycles);
 
         if self.debug {
             println!(
@@ -615,13 +635,18 @@ impl Cpu {
                 self.p.bits(),
                 self.regs.sp,
                 self.bus
-                    .read_byte(0x0100 | ((self.regs.sp.wrapping_add(1)) as u16)),
+                    .peek_byte(0x0100 | ((self.regs.sp.wrapping_add(1)) as u16)),
                 self.bus.mmu_mem_state_to_string(),
                 self.bus.interrupts.status_string(),
                 self.symbol_table.append_symbol(instruction.clone()),
             );
         }
         self.prev_pc = pc;
+
+        // latch IRQ-line state at instruction end
+        self.irq_pending_at_instr_end =
+            self.bus.interrupts.irq && !self.p.contains(Flags::IRQ_DISABLE);
+
         cycles
     }
 
@@ -1559,8 +1584,11 @@ impl Cpu {
             }
 
             0x91 => {
-                let base_address = self.fetch_byte();
-                let pointer_address = self.bus.read_word(base_address as u16 & 0xFF);
+                // STA (zp),Y, zero-page pointer must wrap within page 0
+                let zp = self.fetch_byte();
+                let lo = self.bus.read_byte(zp as u16) as u16;
+                let hi = self.bus.read_byte(zp.wrapping_add(1) as u16) as u16;
+                let pointer_address = (hi << 8) | lo;
 
                 let effective_address = pointer_address.wrapping_add(self.regs.y as u16);
                 self.bus.write_byte(effective_address, self.regs.a);

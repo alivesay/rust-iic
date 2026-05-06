@@ -67,6 +67,18 @@ pub struct VideoEffects {
     pub chroma_luma_scale: f32,
 }
 
+// A mid-scanline soft-switch change.
+//
+// `col` is the cycle position within the scanline (0..40 = active display).
+// Events at col >= 40 (HBLANK) are folded into the next line's start mode
+// rather than stored as events.
+#[derive(Clone, Copy, Debug)]
+pub struct ModeChange {
+    pub col: u8,
+    pub video_mode: u8,
+    pub is_80store: bool,
+}
+
 impl Default for VideoEffects {
     fn default() -> Self {
         Self {
@@ -118,6 +130,13 @@ pub struct Video {
     scanline_modes: [u8; 192],
     scanline_80store: [bool; 192],
     scanline_count: usize,
+
+    // Per-scanline mid-line mode changes captured at cycle granularity.
+    // `scanline_modes[N]` / `scanline_80store[N]` give the mode at cycle 0
+    // of line N; events here describe additional changes that happen during
+    // the active display portion (cycles 0..40) of that line. Used for
+    // "vapor lock" split-screen demos that flip soft switches mid-scanline.
+    scanline_changes: Vec<Vec<ModeChange>>,
 
     monitor_partial_fb: Vec<u8>,
 
@@ -185,6 +204,7 @@ impl Video {
             scanline_modes: [0; 192],
             scanline_80store: [false; 192],
             scanline_count: 0,
+            scanline_changes: (0..192).map(|_| Vec::new()).collect(),
             monitor_partial_fb: Vec::new(),
             raw_framebuffer: Vec::new(),
             srgb_to_linear_lut,
@@ -193,7 +213,26 @@ impl Video {
         }
     }
 
-    pub fn snapshot_scanline(&mut self, scanline: usize, video_mode: u8, is_80store: bool) {
+
+    pub fn snapshot_scanline(&mut self, scanline: usize, _video_mode: u8, _is_80store: bool) {
+        if scanline < 192 && scanline >= self.scanline_count {
+            self.scanline_count = scanline + 1;
+        }
+    }
+
+    pub fn begin_frame(&mut self) {
+        self.scanline_count = 0;
+        for v in &mut self.scanline_changes {
+            v.clear();
+        }
+    }
+
+    pub fn seed_frame_start_mode(&mut self, video_mode: u8, is_80store: bool) {
+        self.scanline_modes[0] = video_mode;
+        self.scanline_80store[0] = is_80store;
+    }
+
+    pub fn set_scanline_start(&mut self, scanline: usize, video_mode: u8, is_80store: bool) {
         if scanline < 192 {
             self.scanline_modes[scanline] = video_mode;
             self.scanline_80store[scanline] = is_80store;
@@ -203,8 +242,26 @@ impl Video {
         }
     }
 
-    pub fn begin_frame(&mut self) {
-        self.scanline_count = 0;
+    // record a mid-scanline soft-switch flip at cycle `col` of `scanline`
+    // HBLANK changes (col >= 40) are not recorded
+    pub fn record_mode_change(
+        &mut self,
+        scanline: usize,
+        col: u8,
+        video_mode: u8,
+        is_80store: bool,
+    ) {
+        if scanline >= 192 {
+            return;
+        }
+        if col >= 40 {
+            return;
+        }
+        self.scanline_changes[scanline].push(ModeChange {
+            col,
+            video_mode,
+            is_80store,
+        });
     }
 
     pub fn set_monochrome(&mut self, enabled: bool) {
@@ -218,7 +275,7 @@ impl Video {
 
     pub fn update(&mut self, iou: &Iou, mmu: &Mmu) -> bool {
         self.frame_count = self.frame_count.wrapping_add(1);
-        
+
         self.framebuffer.fill(0);
 
         self.live_page2   = (iou.video_mode.get() & VideoModeMask::PAGE2) != 0;
@@ -240,47 +297,156 @@ impl Video {
 
         let mut any_non_hires_color = false;
 
+        // Per-scanline list of (col_start, col_end) ranges that were rendered as TEXT
+        let mut text_segments_per_scanline: Vec<Vec<(u16, u16)>> = vec![Vec::new(); 192];
+
+        #[allow(clippy::needless_range_loop)]
         for scanline in 0..192_usize {
-            let mode = if has_snapshots {
+            let start_mode = if has_snapshots {
                 self.scanline_modes[scanline]
             } else {
                 iou.video_mode.get()
             };
-            let is_80store = if has_snapshots {
+            let start_80store = if has_snapshots {
                 self.scanline_80store[scanline]
             } else {
                 iou.is_80store.get()
             };
 
-            let text_mode = (mode & VideoModeMask::TEXT) != 0;
-            let is_hires = (mode & VideoModeMask::HIRES) != 0;
-            let lo_res_mode = (mode & VideoModeMask::LORES) != 0;
-            let is_dhires = (mode & VideoModeMask::DHIRES) != 0;
-            let is_80col = (mode & VideoModeMask::COL80) != 0;
-            let mixed_mode = (mode & VideoModeMask::MIXED) != 0;
+            // no mid-scanline mode changes
+            let changes_empty = self.scanline_changes[scanline].is_empty();
+            // TODO: DHIRES+80col splits are not supported in segment dispatch yet
+            let start_dhires80 = (start_mode & VideoModeMask::DHIRES) != 0
+                && (start_mode & VideoModeMask::COL80) != 0
+                && (start_mode & VideoModeMask::HIRES) != 0;
 
-            // in mixed mode, scanlines 160..192 (text rows 20-23) are
-            // always rendered as text regardless of the active graphics
-            // mode for that scanline.
-            let force_text = mixed_mode && scanline >= 160;
+            if changes_empty || start_dhires80 {
+                let mode = start_mode;
+                let is_80store = start_80store;
 
-            if text_mode || force_text {
-                self.render_text_scanline(iou, mmu, scanline, mode, is_80store);
-            } else if is_hires {
-                if is_dhires && is_80col {
-                    self.render_double_hires_scanline(iou, mmu, scanline);
+                let text_mode = (mode & VideoModeMask::TEXT) != 0;
+                let is_hires = (mode & VideoModeMask::HIRES) != 0;
+                let lo_res_mode = (mode & VideoModeMask::LORES) != 0;
+                let is_dhires = (mode & VideoModeMask::DHIRES) != 0;
+                let is_80col = (mode & VideoModeMask::COL80) != 0;
+                let mixed_mode = (mode & VideoModeMask::MIXED) != 0;
+                let force_text = mixed_mode && scanline >= 160;
+
+                if text_mode || force_text {
+                    self.render_text_scanline(iou, mmu, scanline, mode, is_80store);
+                    text_segments_per_scanline[scanline].push((0, 40));
+                } else if is_hires {
+                    if is_dhires && is_80col {
+                        self.render_double_hires_scanline(iou, mmu, scanline);
+                        any_non_hires_color = true;
+                    } else {
+                        self.render_hires_scanline(iou, mmu, scanline, mode, is_80store);
+                    }
+                    any_graphics = true;
+                } else if lo_res_mode {
+                    self.render_lores_scanline(iou, mmu, scanline, mode, is_80store);
+                    any_graphics = true;
                     any_non_hires_color = true;
                 } else {
-                    self.render_hires_scanline(iou, mmu, scanline, mode, is_80store);
+                    self.render_text_scanline(iou, mmu, scanline, mode, is_80store);
+                    text_segments_per_scanline[scanline].push((0, 40));
                 }
-                any_graphics = true;
-            } else if lo_res_mode {
-                self.render_lores_scanline(iou, mmu, scanline, mode, is_80store);
-                any_graphics = true;
-                any_non_hires_color = true;
-            } else {
-                self.render_text_scanline(iou, mmu, scanline, mode, is_80store);
+                continue;
             }
+
+            // segment dispatch
+            let mixed_mode = (start_mode & VideoModeMask::MIXED) != 0;
+            let force_text = mixed_mode && scanline >= 160;
+
+            // collect segments as (col_start, col_end, mode, is_80store)
+            let mut segments: Vec<(u16, u16, u8, bool)> = Vec::with_capacity(4);
+            let mut cur_mode = start_mode;
+            let mut cur_80store = start_80store;
+            let mut cur_col: u16 = 0;
+
+            // events are pushed in cycle order by bus.tick
+            let events_snapshot: Vec<ModeChange> = self.scanline_changes[scanline].clone();
+            for ev in &events_snapshot {
+                let ec = ev.col as u16;
+                if ec >= 40 { break; }
+                if ec < cur_col {
+                    continue;
+                }
+                if ec == cur_col {
+                    // multiple writes landed at the same cycle, last one wins
+                    cur_mode = ev.video_mode;
+                    cur_80store = ev.is_80store;
+                    continue;
+                }
+                segments.push((cur_col, ec, cur_mode, cur_80store));
+                cur_mode = ev.video_mode;
+                cur_80store = ev.is_80store;
+                cur_col = ec;
+            }
+            if cur_col < 40 {
+                segments.push((cur_col, 40, cur_mode, cur_80store));
+            }
+
+            let mut comp = [0.0f32; 560];
+            let mut hires_pixel_ranges: Vec<(u16, u16)> = Vec::new();
+            let mut seg_any_graphics = false;
+            let mut seg_any_non_hires_color = false;
+            let mut seg_any_text = false;
+
+            for &(c0, c1, mode, is_80store) in &segments {
+                let text_mode = (mode & VideoModeMask::TEXT) != 0;
+                let is_hires = (mode & VideoModeMask::HIRES) != 0;
+                let lo_res_mode = (mode & VideoModeMask::LORES) != 0;
+                let is_dhires = (mode & VideoModeMask::DHIRES) != 0;
+                let is_80col = (mode & VideoModeMask::COL80) != 0;
+
+                if text_mode || force_text {
+                    self.render_text_scanline_range(iou, mmu, scanline, mode, is_80store, c0, c1);
+                    text_segments_per_scanline[scanline].push((c0, c1));
+                    seg_any_text = true;
+                } else if is_hires {
+                    if is_dhires && is_80col {
+                        // whole-line dhires fallback for any DHIRES segment
+                        self.render_double_hires_scanline(iou, mmu, scanline);
+                        seg_any_graphics = true;
+                        seg_any_non_hires_color = true;
+                    } else if self.monochrome {
+                        self.render_hires_scanline_range(iou, mmu, scanline, mode, is_80store, c0, c1);
+                        seg_any_graphics = true;
+                    } else {
+                        // defer NTSC decode, fill comp for this range
+                        let group = scanline / 8;
+                        let row_in_group = (scanline % 8) as u16;
+                        let group16 = group as u16;
+                        let row_base = (row_in_group.wrapping_mul(1024))
+                            .wrapping_add((group16 % 8).wrapping_mul(128))
+                            .wrapping_add((group16 / 8).wrapping_mul(40));
+                        self.fill_hires_comp(mmu, row_base, mode, is_80store, c0, c1, &mut comp);
+                        hires_pixel_ranges.push((c0, c1));
+                        seg_any_graphics = true;
+                    }
+                } else if lo_res_mode {
+                    self.render_lores_scanline_range(iou, mmu, scanline, mode, is_80store, c0, c1);
+                    seg_any_graphics = true;
+                    seg_any_non_hires_color = true;
+                } else {
+                    self.render_text_scanline_range(iou, mmu, scanline, mode, is_80store, c0, c1);
+                    text_segments_per_scanline[scanline].push((c0, c1));
+                    seg_any_text = true;
+                }
+            }
+
+            // NTSC-decode any deferred hires segments in one pass over the shared comp buffer
+            if !hires_pixel_ranges.is_empty() {
+                let y = scanline * 2;
+                for (c0, c1) in hires_pixel_ranges {
+                    self.ntsc_decode_hires_row_range(&comp, y, c0, c1);
+                }
+            }
+
+            if seg_any_graphics { any_graphics = true; }
+            if seg_any_non_hires_color { any_non_hires_color = true; }
+            let _ = seg_any_text;
         }
 
         let final_mode = if has_snapshots {
@@ -296,6 +462,10 @@ impl Video {
         }
         self.raw_framebuffer.copy_from_slice(&self.framebuffer);
 
+        let any_text_rendered = text_segments_per_scanline.iter().any(|v| !v.is_empty());
+        if any_graphics && any_text_rendered && !self.monochrome {
+            self.apply_ntsc_to_text_segments(&text_segments_per_scanline);
+        }
         if final_mixed && !final_text_only && any_graphics && !self.monochrome {
             self.apply_mixed_mode_text_fringing(20);
         }
@@ -325,9 +495,6 @@ impl Video {
         true
     }
 
-    // Dispatch a single Apple scanline (0..192) to the appropriate
-    // per-mode renderer using the captured `scanline_modes` /
-    // `scanline_80store` snapshot.
     fn dispatch_scanline(&mut self, iou: &Iou, mmu: &Mmu, scanline: usize) {
         let mode = self.scanline_modes[scanline];
         let is_80store = self.scanline_80store[scanline];
@@ -371,9 +538,8 @@ impl Video {
         // previous frame.
         self.monitor_partial_fb.copy_from_slice(&self.framebuffer);
 
-        // Clamp + dim the un-executed region so the beam frontier is
-        // visually obvious. Each Apple scanline is 2 framebuffer rows
-        // (vertical doubling). Active video starts after the top border.
+        // clamp + dim the un-executed region so the beam frontier is
+        // visually obvious, each Apple scanline is 2 framebuffer rows
         let stride = self.width * 4;
         let up_to = up_to_scanline.min(192);
         let stale_y_start = self.border_size + up_to * 2;
@@ -748,11 +914,25 @@ impl Video {
 
     fn render_text_scanline(
         &mut self,
+        iou: &Iou,
+        mmu: &Mmu,
+        scanline: usize,
+        mode: u8,
+        is_80store: bool,
+    ) {
+        self.render_text_scanline_range(iou, mmu, scanline, mode, is_80store, 0, 40);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_text_scanline_range(
+        &mut self,
         _iou: &Iou,
         mmu: &Mmu,
         scanline: usize,
         mode: u8,
         is_80store: bool,
+        col_start: u16,
+        col_end: u16,
     ) {
         let is_80col = check_bits_u8!(mode, VideoModeMask::COL80);
         let is_altchar = check_bits_u8!(mode, VideoModeMask::ALTCHAR);
@@ -764,7 +944,7 @@ impl Video {
         let row_base = TEXT_MODE_BASE_ADDRESSES[text_row as usize];
 
         if is_80col {
-            for col_pair in 0..40_u16 {
+            for col_pair in col_start..col_end {
                 let addr = row_base + col_pair;
 
                 // Even column (0, 2, 4...) -> AUX Memory
@@ -776,7 +956,7 @@ impl Video {
                 self.draw_char_scanline(text_row, col_pair * 2 + 1, char_odd, char_row, is_altchar, double_width);
             }
         } else {
-            for col in 0..40_u16 {
+            for col in col_start..col_end {
                 // Handle Page 2 offset if 80STORE is OFF
                 let (effective_addr, use_aux) = if !is_80store && is_page2 {
                     (row_base + 0x0400 + col, false)
@@ -875,6 +1055,28 @@ impl Video {
         }
     }
 
+    // NTSC-decode framebuffer text segments so they pick up chroma fringing
+    fn apply_ntsc_to_text_segments(&mut self, segments: &[Vec<(u16, u16)>]) {
+        let aw = self.active_width.min(560);
+        for (scanline, ranges) in segments.iter().enumerate() {
+            if ranges.is_empty() { continue; }
+            let y = scanline * 2;
+            let row_idx = self.fb_index(0, y);
+            if row_idx + aw * 4 > self.framebuffer.len() {
+                continue;
+            }
+            // build a composite signal across the whole row
+            let mut comp = [0.0f32; 560];
+            for (k, slot) in comp.iter_mut().take(aw).enumerate() {
+                let px = self.framebuffer[row_idx + k * 4];
+                *slot = if px >= 128 { 1.0 } else { 0.0 };
+            }
+            for &(c0, c1) in ranges {
+                self.ntsc_decode_hires_row_range(&comp, y, c0, c1);
+            }
+        }
+    }
+
     fn apply_mixed_mode_text_fringing(&mut self, start_text_row: usize) {
         let seam_y = start_text_row * 8 * 2;
 
@@ -922,11 +1124,25 @@ impl Video {
 
     fn render_lores_scanline(
         &mut self,
+        iou: &Iou,
+        mmu: &Mmu,
+        scanline: usize,
+        mode: u8,
+        is_80store: bool,
+    ) {
+        self.render_lores_scanline_range(iou, mmu, scanline, mode, is_80store, 0, 40);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_lores_scanline_range(
+        &mut self,
         _iou: &Iou,
         mmu: &Mmu,
         scanline: usize,
         mode: u8,
         is_80store: bool,
+        col_start: u16,
+        col_end: u16,
     ) {
         let is_page2 = (mode & VideoModeMask::PAGE2) != 0;
         let is_80col = (mode & VideoModeMask::COL80) != 0;
@@ -936,10 +1152,6 @@ impl Video {
 
         let base_vram: u16 = if !is_80store && is_page2 { 0x0800 } else { 0x0400 };
 
-        // The original renderer carved the screen into "half-rows" — each
-        // 4 Apple scanlines tall, corresponding to either the low or
-        // high nibble of a VRAM byte. Map the input scanline back to its
-        // half-row index so the lookup table stays unchanged.
         let half_row = scanline / 4;
         if mixed_mode && half_row >= 40 { return; }
         if half_row >= 48 { return; }
@@ -959,7 +1171,10 @@ impl Video {
         let y_fb = scanline * 2;
 
         if is_double_lores {
-            for col in 0..80_u16 {
+            // 1 cycle = 1 col_pair = 2 dlres "cols" (aux + main).
+            let dl_start = col_start * 2;
+            let dl_end = col_end * 2;
+            for col in dl_start..dl_end.min(80) {
                 let mem_addr = base_address + (col / 2);
                 let is_aux = (col % 2) == 0;
 
@@ -994,7 +1209,7 @@ impl Video {
                 }
             }
         } else {
-            for col in 0..40_u16 {
+            for col in col_start..col_end {
                 let addr = base_address + col;
 
                 let use_aux = is_80store && is_page2;
@@ -1025,16 +1240,27 @@ impl Video {
         }
     }
 
-    // Render HiRes mode using direct NTSC artifact color palette lookup.
-    // HiRes only has 4 possible artifact colors per palette: violet/green
-    // (palette 0) and blue/orange (palette 1)
     fn render_hires_scanline(
+        &mut self,
+        iou: &Iou,
+        mmu: &Mmu,
+        scanline: usize,
+        mode: u8,
+        is_80store: bool,
+    ) {
+        self.render_hires_scanline_range(iou, mmu, scanline, mode, is_80store, 0, 40);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_hires_scanline_range(
         &mut self,
         _iou: &Iou,
         mmu: &Mmu,
         scanline: usize,
         mode: u8,
         is_80store: bool,
+        col_start: u16,
+        col_end: u16,
     ) {
         let base_vram: u16 = 0x0000;
 
@@ -1050,7 +1276,7 @@ impl Video {
         let y = scanline * 2;
 
         if self.monochrome {
-            for col in 0..40_u16 {
+            for col in col_start..col_end {
                 let addr = row_base.wrapping_add(col);
                 let byte = self.read_hires_memory(mmu, addr, mode, is_80store);
                 for bit in 0..7_usize {
@@ -1074,7 +1300,22 @@ impl Video {
         }
 
         let mut comp = [0.0f32; 560];
-        for col in 0..40_usize {
+        self.fill_hires_comp(mmu, row_base, mode, is_80store, col_start, col_end, &mut comp);
+        self.ntsc_decode_hires_row_range(&comp, y, col_start, col_end);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fill_hires_comp(
+        &self,
+        mmu: &Mmu,
+        row_base: u16,
+        mode: u8,
+        is_80store: bool,
+        col_start: u16,
+        col_end: u16,
+        comp: &mut [f32; 560],
+    ) {
+        for col in col_start as usize..col_end as usize {
             let addr = row_base.wrapping_add(col as u16);
             let byte = self.read_hires_memory(mmu, addr, mode, is_80store);
             let palette = (byte & 0x80) != 0;
@@ -1088,10 +1329,20 @@ impl Video {
                 if s1 < 560 { comp[s1] = 1.0; }
             }
         }
-        self.ntsc_decode_hires_row(&comp, y);
     }
 
+    #[allow(dead_code)]
     fn ntsc_decode_hires_row(&mut self, comp: &[f32; 560], fb_y: usize) {
+        self.ntsc_decode_hires_row_range(comp, fb_y, 0, 40);
+    }
+
+    fn ntsc_decode_hires_row_range(
+        &mut self,
+        comp: &[f32; 560],
+        fb_y: usize,
+        col_start: u16,
+        col_end: u16,
+    ) {
         const PHI: f32 = std::f32::consts::FRAC_PI_4;
 
         // Chroma lowpass
@@ -1143,7 +1394,9 @@ impl Video {
             y_lp[k] = acc_y;
         }
 
-        for k in 0..560_usize {
+        let px_start = (col_start as usize) * 14;
+        let px_end = ((col_end as usize) * 14).min(560);
+        for k in px_start..px_end {
             let i_val = i_lp[k] * sat;
             let q_val = q_lp[k] * sat;
 

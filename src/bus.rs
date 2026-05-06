@@ -22,6 +22,11 @@ pub struct Bus {
     pub video: Video,
     pub i_port: u8, // Klauss IRQ/NMI Feedback Register
 
+    last_video_mode: u8,
+    last_is_80store: bool,
+
+    pub step_access_count: u64,
+
     pub debug: bool,
 }
 
@@ -44,6 +49,9 @@ impl Bus {
 
             // #[cfg(feature = "klauss-interrupt-test")]
             i_port: 0,
+            last_video_mode: 0,
+            last_is_80store: false,
+            step_access_count: 0,
             debug: false,
         }
     }
@@ -62,6 +70,12 @@ impl Bus {
 
     pub fn video_begin_frame(&mut self) {
         self.video.begin_frame();
+
+        let mode = self.iou.video_mode.get();
+        let store = self.iou.is_80store.get();
+        self.video.seed_frame_start_mode(mode, store);
+        self.last_video_mode = mode;
+        self.last_is_80store = store;
     }
 
     pub fn video_snapshot_scanline(&mut self, scanline: usize) {
@@ -107,6 +121,13 @@ impl Bus {
     }
 
     pub fn read_byte(&mut self, addr: u16) -> u8 {
+        let result = self.read_byte_inner(addr);
+        self.step_access_count += 1;
+        self.advance_scan_one();
+        result
+    }
+
+    fn read_byte_inner(&mut self, addr: u16) -> u8 {
         if self.system_type == SystemType::AppleIIc {
             if (0xC000..=0xC0FF).contains(&addr) {
                 let result = self.handle_iic_read(addr);
@@ -118,14 +139,6 @@ impl Bus {
                 self.mmu.read_byte(&mut self.iou, addr)
             }
         } else {
-            // #[cfg(feature = "klauss-interrupt-test")]
-            // match addr {
-            //     0xBFFC => {
-            //         println!("Reading $BFFC: {:#04X}", self.i_port);
-            //         self.i_port
-            //     }
-            //     _ => self.testmem.read_byte(addr),
-            // }
             self.bus_ram.read_byte(addr)
         }
     }
@@ -137,6 +150,13 @@ impl Bus {
     }
 
     pub fn write_byte(&mut self, addr: u16, value: u8) -> u8 {
+        let result = self.write_byte_inner(addr, value);
+        self.step_access_count += 1;
+        self.advance_scan_one();
+        result
+    }
+
+    fn write_byte_inner(&mut self, addr: u16, value: u8) -> u8 {
         if self.system_type == SystemType::AppleIIc {
             if (0xC000..=0xC0FF).contains(&addr) {
                 let result = self.handle_iic_write(addr, value);
@@ -220,65 +240,117 @@ impl Bus {
         }
     }
 
-    pub fn tick(&mut self, cycles: u64) {
-        self.iou.cycles += cycles;
+    pub fn detect_video_mode_change(&mut self) {
+        let cur_video_mode = self.iou.video_mode.get();
+        let cur_is_80store = self.iou.is_80store.get();
+        if cur_video_mode == self.last_video_mode && cur_is_80store == self.last_is_80store {
+            return;
+        }
+        let scan = self.iou.scan_cycle;
+        let scanline = (scan / timing::CYCLES_PER_SCANLINE) as usize;
+        let raw_col = (scan % timing::CYCLES_PER_SCANLINE) as u8;
 
-        // Track position within NTSC frame for VBL timing
-        let old_scan = self.iou.scan_cycle;
+        const VIDEO_PIPELINE_DELAY: u8 = 2;
+        let display_raw_col = raw_col.saturating_add(VIDEO_PIPELINE_DELAY);
 
-        // Per-cycle floating bus update.
-        // The Apple II video hardware fetches one byte per cycle during active
-        // display. Software that reads the floating bus ($C000-$C07F with no
-        // switch selected, or certain unconnected addresses) sees whatever the
-        // video circuitry last put on the data bus.
-        let video_mode = self.iou.video_mode.get();
-        let is_hires = (video_mode & VideoModeMask::HIRES) != 0;
-        let is_page2 = (video_mode & VideoModeMask::PAGE2) != 0;
-        let is_80store = self.iou.is_80store.get();
-
-        for _ in 0..cycles {
-            self.iou.scan_cycle += 1;
-            if self.iou.scan_cycle >= timing::CYCLES_PER_FRAME {
-                self.iou.scan_cycle -= timing::CYCLES_PER_FRAME;
+        if display_raw_col >= 25 && (display_raw_col as u16) < timing::CYCLES_PER_SCANLINE as u16 {
+            let active_col = display_raw_col - 25;
+            if active_col < 40 && scanline < 192 {
+                self.video
+                    .record_mode_change(scanline, active_col, cur_video_mode, cur_is_80store);
             }
-
-            let scan = self.iou.scan_cycle;
-            let scanline = (scan / timing::CYCLES_PER_SCANLINE) as u16;
-            let col = (scan % timing::CYCLES_PER_SCANLINE) as u16;
-
-            if scanline < 192 && col < 40 {
-                let row = scanline / 8;
-                let group = row / 8;
-                let offset = row % 8;
-
-                if is_hires {
-                    // HiRes: video fetches from $2000/$4000 page
-                    // Address = base + scanline_row*1024 + (group%8)*128 + (group/8)*40 + col
-                    // where scanline_row = scanline % 8, group = scanline / 8
-                    let s_group = scanline / 8;
-                    let s_row = scanline % 8;
-                    let base: u16 = if !is_80store && is_page2 { 0x4000 } else { 0x2000 };
-                    let addr = base + s_row * 1024 + (s_group % 8) * 128 + (s_group / 8) * 40 + col;
-                    self.iou.floating_bus = self.mmu.read_main_byte(addr);
-                } else {
-                    // Text/LoRes: video fetches from $0400/$0800 page
-                    let base: u16 = if !is_80store && is_page2 { 0x0800 } else { 0x0400 };
-                    let addr = base + group * 0x80 + offset * 0x28 + col;
-                    self.iou.floating_bus = self.mmu.read_main_byte(addr);
-                }
+        } else if display_raw_col < 25 {
+            // HBLANK flip
+            if scanline < 192 {
+                self.video
+                    .set_scanline_start(scanline, cur_video_mode, cur_is_80store);
+            }
+        } else {
+            // delay pushed past end of scanline...
+            let next_line = scanline + 1;
+            if next_line < 192 {
+                self.video
+                    .set_scanline_start(next_line, cur_video_mode, cur_is_80store);
             }
         }
+        self.last_video_mode = cur_video_mode;
+        self.last_is_80store = cur_is_80store;
+    }
 
-        // Set VBL interrupt when entering VBL region (scanline 192+)
+    pub fn tick(&mut self, cycles: u64) {
+        for _ in 0..cycles {
+            self.advance_scan_one();
+        }
+        self.tick_devices(cycles);
+    }
+
+    // advance scan_cycle by exactly one cycle, with per-cycle side effects
+    pub fn advance_scan_one(&mut self) {
+        self.detect_video_mode_change();
+
+        let old_scan = self.iou.scan_cycle;
+        self.iou.scan_cycle += 1;
+        if self.iou.scan_cycle >= timing::CYCLES_PER_FRAME {
+            self.iou.scan_cycle -= timing::CYCLES_PER_FRAME;
+        }
+
+        // VBL edge
         if old_scan < timing::VBL_START_CYCLE && self.iou.scan_cycle >= timing::VBL_START_CYCLE {
             self.iou.mouse.vbl_int.set(true);
         }
 
-        self.iou.mouse.tick(cycles);
+        // scanline-start hook
+        let new_col = self.iou.scan_cycle % timing::CYCLES_PER_SCANLINE;
+        if new_col == 0 {
+            let new_line = (self.iou.scan_cycle / timing::CYCLES_PER_SCANLINE) as usize;
+            if new_line < 192 {
+                self.video.set_scanline_start(
+                    new_line,
+                    self.last_video_mode,
+                    self.last_is_80store,
+                );
+            }
+        }
 
-        // Per-cycle IWM ticking for precise bit timing (4 cycles = 1 bit).
-        // When the motor is active, tick one cycle at a time so the data latch
-        // becomes ready on the exact cycle.
+        // per-cycle floating-bus update
+        let video_mode = self.iou.video_mode.get();
+        let is_text = (video_mode & VideoModeMask::TEXT) != 0;
+        let is_hires = (video_mode & VideoModeMask::HIRES) != 0;
+        let is_mixed = (video_mode & VideoModeMask::MIXED) != 0;
+        let is_page2 = (video_mode & VideoModeMask::PAGE2) != 0;
+        let is_80store = self.iou.is_80store.get();
+
+        let scan = self.iou.scan_cycle;
+        let scanline = (scan / timing::CYCLES_PER_SCANLINE) as u16;
+        let col = (scan % timing::CYCLES_PER_SCANLINE) as u16;
+        let byte_idx = if col >= 25 { col - 25 } else { col + 40 };
+
+        let use_hires = is_hires && !is_text && !(is_mixed && scanline >= 160);
+
+        if use_hires {
+            let line = scanline % 192;
+            let s_row = line % 8;
+            let s_group = line / 8;
+            let base: u16 = if !is_80store && is_page2 { 0x4000 } else { 0x2000 };
+            let addr = base
+                + s_row * 0x400
+                + (s_group % 8) * 0x80
+                + (s_group / 8) * 0x28
+                + byte_idx;
+            let addr = (addr & 0x1FFF) | base;
+            self.iou.floating_bus = self.mmu.read_main_byte(addr);
+        } else {
+            let row = scanline / 8;
+            let base: u16 = if !is_80store && is_page2 { 0x0800 } else { 0x0400 };
+            let addr = base + (row / 8) * 0x28 + (row % 8) * 0x80 + byte_idx;
+            let addr = (addr & 0x03FF) | base;
+            self.iou.floating_bus = self.mmu.read_main_byte(addr);
+        }
+    }
+
+    pub fn tick_devices(&mut self, cycles: u64) {
+        self.iou.cycles += cycles;
+        self.iou.mouse.tick(cycles);
         if self.iou.iwm.motor_on {
             for _ in 0..cycles {
                 self.iou.iwm.tick(1);
@@ -286,15 +358,18 @@ impl Bus {
         } else {
             self.iou.iwm.tick(cycles);
         }
-        
         self.iou.scc.tick(cycles);
         self.iou.zip.tick();
-        
         self.iou.mockingboard.tick_n(cycles as u32);
         self.iou.mockingboard2.tick_n(cycles as u32);
-        
         if self.iou.check_interrupts() {
             self.interrupts.request_irq();
+        }
+    }
+
+    pub fn tick_scan_only(&mut self, cycles: u64) {
+        for _ in 0..cycles {
+            self.advance_scan_one();
         }
     }
 }

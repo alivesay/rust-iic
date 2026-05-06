@@ -208,12 +208,11 @@ impl Iou {
         
         0xC018 => (is_80store as u8) << 7,
         
-        0xC019 => { 
-            // Live VBL status based on scan_cycle position within NTSC frame
+        0xC019 => {
             let in_vbl = self.scan_cycle >= timing::VBL_START_CYCLE;
-            self.mouse.vbl_int.set(false); // Side effect: reset VBL interrupt
-            (in_vbl as u8) << 7
-        }, //  RSTVBL         C   R   Reset Vertical Blanking Interrupt
+            self.mouse.vbl_int.set(false);
+            ((!in_vbl) as u8) << 7
+        }, //  RDVBLBAR       C   R7  Read VBL (active-low, IIc/IIe)
 
         0xC01A => (check_bits_cell!(self.video_mode, VideoModeMask::TEXT) as u8) << 7,
         0xC01B => (check_bits_cell!(self.video_mode, VideoModeMask::MIXED) as u8) << 7,
@@ -256,9 +255,12 @@ impl Iou {
             }
             
             match addr {
-                0xC07E => (ioudis as u8) << 7, // RdIOUDis: 1 = IOUDIS on (IOU disabled)
-                0xC07F => (!check_bits_cell!(self.video_mode, VideoModeMask::DHIRES) as u8) << 7, // RdDHIRES: 1 = DHIRES off (AN3 on)
-                _ => 0x00,
+                // RdIOUDis: bit 7 = IOUDIS state, bits 0-6 from floating bus
+                0xC07E => ((ioudis as u8) << 7) | (self.floating_bus & 0x7F),
+                // RdDHIRES: bit 7 = !DHIRES, bits 0-6 from floating bus
+                0xC07F => (((!check_bits_cell!(self.video_mode, VideoModeMask::DHIRES)) as u8) << 7)
+                    | (self.floating_bus & 0x7F),
+                _ => self.floating_bus,
             }
         },
 
@@ -278,67 +280,66 @@ impl Iou {
         0xC08E => { set_lcram_mode!(self.mem_state, LcRamMode::C08E, self.last_read_addr) },
         0xC08F => { set_lcram_mode_rr!(self.mem_state, LcRamMode::C08F, addr, self.last_read_addr) },
       
-        0xC050 => clear_bits_cell!(self.video_mode, VideoModeMask::TEXT),
-        0xC051 => set_bits_cell!(self.video_mode, VideoModeMask::TEXT),
-        0xC052 => clear_bits_cell!(self.video_mode, VideoModeMask::MIXED),
-        0xC053 => set_bits_cell!(self.video_mode, VideoModeMask::MIXED),
-        0xC054 => clear_bits_cell!(self.video_mode, VideoModeMask::PAGE2),
-        0xC055 => set_bits_cell!(self.video_mode, VideoModeMask::PAGE2),
+
+        0xC050 => { clear_bits_cell!(self.video_mode, VideoModeMask::TEXT); self.floating_bus },
+        0xC051 => { set_bits_cell!(self.video_mode, VideoModeMask::TEXT); self.floating_bus },
+        0xC052 => { clear_bits_cell!(self.video_mode, VideoModeMask::MIXED); self.floating_bus },
+        0xC053 => { set_bits_cell!(self.video_mode, VideoModeMask::MIXED); self.floating_bus },
+        0xC054 => { clear_bits_cell!(self.video_mode, VideoModeMask::PAGE2); self.floating_bus },
+        0xC055 => { set_bits_cell!(self.video_mode, VideoModeMask::PAGE2); self.floating_bus },
 
         0xC056 => {
           clear_bits_cell!(self.video_mode, VideoModeMask::HIRES);
-          set_bits_cell!(self.video_mode, VideoModeMask::LORES)
+          set_bits_cell!(self.video_mode, VideoModeMask::LORES);
+          self.floating_bus
         },
         0xC057 => {
           clear_bits_cell!(self.video_mode, VideoModeMask::LORES);
-          set_bits_cell!(self.video_mode, VideoModeMask::HIRES)
+          set_bits_cell!(self.video_mode, VideoModeMask::HIRES);
+          self.floating_bus
         },
 
         0xC058 => if !ioudis {
-          self.mouse.xy_mask.set(false); 0x00 // DISXY          C  WR   If IOUDIS off: Mask X0/Y0 Move Interrupts
+          self.mouse.xy_mask.set(false); self.floating_bus // DISXY
         } else {
-          0x00 // AN0 OFF
+          self.floating_bus // AN0 OFF
         },
         0xC059 => if !ioudis {
-          self.mouse.xy_mask.set(true); 0x00 // ENBXY          C  WR   If IOUDIS off: Allow X0/Y0 Move Interrupts
+          self.mouse.xy_mask.set(true); self.floating_bus // ENBXY
         } else {
-          0x00 // AN0 ON
+          self.floating_bus // AN0 ON
         },
         0xC05A => if !ioudis {
-          self.mouse.vbl_mask.set(false); 0x00 // DISVBL         C  WR   If IOUDIS off: Disable VBL Interrupts
+          self.mouse.vbl_mask.set(false); self.floating_bus // DISVBL
         } else {
-          0x00 // AN1 OFF
+          self.floating_bus // AN1 OFF
         },
         0xC05B => if !ioudis {
-          self.mouse.vbl_mask.set(true); 0x00 // ENVBL          C  WR   If IOUDIS off: Enable VBL Interrupts
+          self.mouse.vbl_mask.set(true); self.floating_bus // ENVBL
         } else {
-          0x00 // AN1 ON
+          self.floating_bus // AN1 ON
         },
         0xC05C => if !ioudis {
-          self.mouse.x0_edge.set(false); 0x00 // X0EDGE         C  WR   If IOUDIS off: Interrupt on X0 Rising
+          self.mouse.x0_edge.set(false); self.floating_bus // X0EDGE rising
         } else {
-          0x00 // AN2 OFF
+          self.floating_bus // AN2 OFF
         },
         0xC05D => if !ioudis {
-          self.mouse.x0_edge.set(true); 0x00 // X0EDGE         C  WR   If IOUDIS off: Interrupt on X0 Falling
+          self.mouse.x0_edge.set(true); self.floating_bus // X0EDGE falling
         } else {
-          0x00 // AN2 ON
+          self.floating_bus // AN2 ON
         },
         0xC05E => if ioudis {
-          // DHIRESON: Enable double-width graphics
           set_bits_cell!(self.video_mode, VideoModeMask::DHIRES);
-          0x00
+          self.floating_bus
         } else {
-          // IOUDis OFF: Mouse Y0 edge rising
-          self.mouse.y0_edge.set(false); 0x00
+          self.mouse.y0_edge.set(false); self.floating_bus
         },
         0xC05F => if ioudis {
-          // DHIRESOFF: Disable double-width graphics
           clear_bits_cell!(self.video_mode, VideoModeMask::DHIRES);
-          0x00
+          self.floating_bus
         } else {
-          // IOUDis OFF: Mouse Y0 edge falling
-          self.mouse.y0_edge.set(true); 0x00
+          self.mouse.y0_edge.set(true); self.floating_bus
         },
           0xC060 => (self.col80_switch as u8) << 7, //   C   R7  Physical 80/40 Column Switch (1=80col, 0=40col)
           0xC061 => {
@@ -527,8 +528,8 @@ impl Iou {
           0xC051 => set_bits_cell!(self.video_mode, VideoModeMask::TEXT),
           0xC052 => clear_bits_cell!(self.video_mode, VideoModeMask::MIXED), 
           0xC053 => set_bits_cell!(self.video_mode, VideoModeMask::MIXED),   
-          0xC054 => clear_bits_cell!(self.video_mode, VideoModeMask::PAGE2), 
-          0xC055 => set_bits_cell!(self.video_mode, VideoModeMask::PAGE2),   
+          0xC054 => { clear_bits_cell!(self.video_mode, VideoModeMask::PAGE2) }, 
+          0xC055 => { set_bits_cell!(self.video_mode, VideoModeMask::PAGE2) },   
 
           0xC056 => {
             clear_bits_cell!(self.video_mode, VideoModeMask::HIRES);

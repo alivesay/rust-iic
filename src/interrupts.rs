@@ -62,38 +62,6 @@ impl InterruptController {
         self.reset = false;
     }
 
-    pub fn handle_interrupt_with_vectors(
-        &mut self,
-        nmi_vector: u16,
-        reset_vector: u16,
-        irq_vector: u16,
-    ) -> Option<(InterruptType, u16)> {
-        if self.halted {
-            return None;
-        }
-
-        let (interrupt_type, resolved_vector) = if self.nmi {
-            (InterruptType::Nmi, nmi_vector)
-        } else if self.reset {
-            self.reset = false;
-            (InterruptType::Rst, reset_vector)
-        } else if self.brk {
-            self.brk = false;
-            (InterruptType::Brk, irq_vector)
-        } else if self.irq {
-            (InterruptType::Irq, irq_vector)
-        } else {
-            return None;
-        };
-
-        // println!(
-        //     "Handling {:?} Interrupt: Jumping to {:#06X}",
-        //     interrupt_type, resolved_vector
-        // );
-
-        Some((interrupt_type, resolved_vector))
-    }
-
     pub fn status_string(&self) -> String {
         format!(
             "I:{}{}{}{}{}{}",
