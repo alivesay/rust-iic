@@ -1870,6 +1870,9 @@ impl App {
                     window.set_has_shadow(false);
                 }
 
+                self.is_fullscreen = entering;
+                self.last_resize_time = None;
+
                 #[cfg(target_os = "macos")]
                 let success = window.set_simple_fullscreen(entering);
                 #[cfg(not(target_os = "macos"))]
@@ -1883,8 +1886,6 @@ impl App {
                 };
 
                 if success {
-                    self.is_fullscreen = entering;
-
                     if let Some(pixels) = &mut self.pixels {
                         let mode = if self.shader_type == ShaderType::Crt {
                             ScalingMode::PixelPerfect
@@ -1904,6 +1905,7 @@ impl App {
                         }
                     }
                 } else {
+                    self.is_fullscreen = !entering;
                     if entering {
                         window.set_decorations(true);
                         #[cfg(target_os = "macos")]
