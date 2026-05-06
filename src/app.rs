@@ -348,7 +348,6 @@ impl App {
         let surface_texture = SurfaceTexture::new(surface_w, surface_h, window.clone());
         let mut pixels = match PixelsBuilder::new(buf_w, buf_h, surface_texture)
             .texture_format(wgpu::TextureFormat::Rgba8Unorm)
-            .render_texture_format(wgpu::TextureFormat::Bgra8UnormSrgb)
             .present_mode(wgpu::PresentMode::Mailbox)
             .build()
         {
@@ -366,7 +365,7 @@ impl App {
         };
         pixels.set_scaling_mode(mode);
         pixels.clear_color(wgpu::Color::BLACK);
-        let surface_format = pixels.render_texture_format();
+        let surface_format = pixels.surface_texture_format();
 
         self.post_processor = match self.shader_type {
             ShaderType::Crt => Some(Box::new(CrtRenderer::new(RendererInit {
@@ -647,7 +646,6 @@ impl winit::application::ApplicationHandler for App {
 
         self.pixels = match PixelsBuilder::new(buf_w, buf_h, surface_texture)
             .texture_format(wgpu::TextureFormat::Rgba8Unorm)
-            .render_texture_format(wgpu::TextureFormat::Bgra8UnormSrgb)
             // non-blocking present
             .present_mode(wgpu::PresentMode::Mailbox)
             .build() {
@@ -659,7 +657,7 @@ impl winit::application::ApplicationHandler for App {
                 };
                 pixels.set_scaling_mode(mode);
                 pixels.clear_color(wgpu::Color::BLACK);
-                let surface_format = pixels.render_texture_format();
+                let surface_format = pixels.surface_texture_format();
 
                 if self.shader_type != ShaderType::None {
                     self.post_processor = match self.shader_type {
