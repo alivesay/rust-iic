@@ -11,6 +11,8 @@ use winit::{
     keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
     window::{Window, WindowButtons, WindowId},
 };
+#[cfg(not(target_os = "macos"))]
+use winit::window::Fullscreen;
 
 #[cfg(target_os = "macos")]
 use winit::platform::macos::WindowExtMacOS;
@@ -593,19 +595,37 @@ impl winit::application::ApplicationHandler for App {
         self.window_aspect_ratio = base_w / base_h;
 
         let window_buttons = WindowButtons::CLOSE | WindowButtons::MINIMIZE;
-        
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("Apple //c")
-                        .with_inner_size(LogicalSize::new(win_w, win_h))
-                        .with_min_inner_size(LogicalSize::new(base_w, base_h))
-                        .with_enabled_buttons(window_buttons)
-                        .with_window_icon(Self::load_window_icon()),
-                )
-                .unwrap(),
-        );
+
+        #[cfg(not(target_os = "macos"))]
+        let initial_fullscreen = if self.start_fullscreen {
+            Some(Fullscreen::Borderless(None))
+        } else {
+            None
+        };
+
+        #[cfg(target_os = "macos")]
+        let attrs = Window::default_attributes()
+            .with_title("Apple //c")
+            .with_inner_size(LogicalSize::new(win_w, win_h))
+            .with_min_inner_size(LogicalSize::new(base_w, base_h))
+            .with_enabled_buttons(window_buttons)
+            .with_window_icon(Self::load_window_icon());
+        #[cfg(not(target_os = "macos"))]
+        let attrs = {
+            let mut attrs = Window::default_attributes()
+                .with_title("Apple //c")
+                .with_inner_size(LogicalSize::new(win_w, win_h))
+                .with_min_inner_size(LogicalSize::new(base_w, base_h))
+                .with_enabled_buttons(window_buttons)
+                .with_window_icon(Self::load_window_icon())
+                .with_fullscreen(initial_fullscreen);
+            if self.start_fullscreen {
+                attrs = attrs.with_decorations(false);
+            }
+            attrs
+        };
+
+        let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
         self.window = Some(window.clone());
 
@@ -617,6 +637,11 @@ impl winit::application::ApplicationHandler for App {
             window.set_decorations(false);
             window.set_has_shadow(false);
             let _ = window.set_simple_fullscreen(true);
+            self.is_fullscreen = true;
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        if self.start_fullscreen {
             self.is_fullscreen = true;
         }
 
@@ -1807,18 +1832,38 @@ impl App {
             }
         }
 
+        let is_enter = event.logical_key == Key::Named(NamedKey::Enter);
+        let is_f11 = event.logical_key == Key::Named(NamedKey::F11);
         #[cfg(target_os = "macos")]
-        if event.logical_key == Key::Named(NamedKey::Enter) && self.modifiers.super_key() && event.state.is_pressed() {
+        let fullscreen_modifier = self.modifiers.super_key();
+        #[cfg(not(target_os = "macos"))]
+        let fullscreen_modifier = self.modifiers.alt_key();
+        let fullscreen_combo = (is_enter && fullscreen_modifier) || is_f11;
+        if fullscreen_combo && event.state.is_pressed() {
             if let Some(window) = &self.window {
+                #[cfg(target_os = "macos")]
                 let current = window.simple_fullscreen();
+                #[cfg(not(target_os = "macos"))]
+                let current = window.fullscreen().is_some();
                 let entering = !current;
 
                 if entering {
                     window.set_decorations(false);
+                    #[cfg(target_os = "macos")]
                     window.set_has_shadow(false);
                 }
 
+                #[cfg(target_os = "macos")]
                 let success = window.set_simple_fullscreen(entering);
+                #[cfg(not(target_os = "macos"))]
+                let success = {
+                    if entering {
+                        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    } else {
+                        window.set_fullscreen(None);
+                    }
+                    true
+                };
 
                 if success {
                     self.is_fullscreen = entering;
@@ -1834,13 +1879,17 @@ impl App {
 
                     if !entering {
                         window.set_decorations(true);
-                        window.set_has_shadow(true);
-                        let window_buttons = WindowButtons::CLOSE | WindowButtons::MINIMIZE;
-                        window.set_enabled_buttons(window_buttons);
+                        #[cfg(target_os = "macos")]
+                        {
+                            window.set_has_shadow(true);
+                            let window_buttons = WindowButtons::CLOSE | WindowButtons::MINIMIZE;
+                            window.set_enabled_buttons(window_buttons);
+                        }
                     }
                 } else {
                     if entering {
                         window.set_decorations(true);
+                        #[cfg(target_os = "macos")]
                         window.set_has_shadow(true);
                     }
                     eprintln!("Failed to toggle fullscreen");
@@ -1851,6 +1900,7 @@ impl App {
         }
 
         match event.physical_key {
+            #[cfg(target_os = "macos")]
             PhysicalKey::Code(KeyCode::SuperLeft) => {
                 if self.cpu.bus.iou.debug {
                     println!(
@@ -1860,6 +1910,7 @@ impl App {
                 }
                 self.cpu.bus.iou.mouse.open_apple.set(event.state.is_pressed());
             }
+            #[cfg(target_os = "macos")]
             PhysicalKey::Code(KeyCode::SuperRight) => {
                 if self.cpu.bus.iou.debug {
                     println!(
@@ -1867,6 +1918,14 @@ impl App {
                         if event.state.is_pressed() { "PRESS" } else { "RELEASE" }
                     );
                 }
+                self.cpu.bus.iou.mouse.solid_apple.set(event.state.is_pressed());
+            }
+            #[cfg(not(target_os = "macos"))]
+            PhysicalKey::Code(KeyCode::AltLeft) => {
+                self.cpu.bus.iou.mouse.open_apple.set(event.state.is_pressed());
+            }
+            #[cfg(not(target_os = "macos"))]
+            PhysicalKey::Code(KeyCode::AltRight) => {
                 self.cpu.bus.iou.mouse.solid_apple.set(event.state.is_pressed());
             }
             _ => {}
@@ -1955,8 +2014,12 @@ impl App {
         if event.state.is_pressed() {
             if event.logical_key == Key::Named(NamedKey::Backspace) && self.modifiers.control_key()
             {
-                if self.modifiers.super_key() {
-                    println!("Hard Reset Triggered (Control + Command + Backspace)");
+                #[cfg(target_os = "macos")]
+                let hard_reset = self.modifiers.super_key();
+                #[cfg(not(target_os = "macos"))]
+                let hard_reset = self.modifiers.alt_key();
+                if hard_reset {
+                    println!("Hard Reset Triggered");
                     self.cpu.bus.write_byte(0x03F4, 0x00);
                 } else {
                     println!("Reset Triggered (Control + Backspace)");
