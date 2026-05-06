@@ -650,8 +650,25 @@ impl winit::application::ApplicationHandler for App {
 
         let phys_w = (win_w * scale_factor) as u32;
         let phys_h = (win_h * scale_factor) as u32;
-        let surface_w = window_size.width.max(phys_w);
-        let surface_h = window_size.height.max(phys_h);
+        #[cfg_attr(target_os = "macos", allow(unused_mut))]
+        let mut surface_w = window_size.width.max(phys_w);
+        #[cfg_attr(target_os = "macos", allow(unused_mut))]
+        let mut surface_h = window_size.height.max(phys_h);
+
+        #[cfg(not(target_os = "macos"))]
+        if self.start_fullscreen {
+            if let Some(monitor) = window
+                .current_monitor()
+                .or_else(|| event_loop.primary_monitor())
+                .or_else(|| event_loop.available_monitors().next())
+            {
+                let ms = monitor.size();
+                if ms.width > 0 && ms.height > 0 {
+                    surface_w = ms.width;
+                    surface_h = ms.height;
+                }
+            }
+        }
 
         self.surface_width = surface_w;
         self.surface_height = surface_h;
