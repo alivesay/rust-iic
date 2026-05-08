@@ -121,11 +121,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     // Apply chromatic aberration if enabled and not mono
     if chroma_amt > 0.0 && is_mono < 0.5 {
-        let tex_size = vec2<f32>(textureDimensions(r_texture));
-        let pixel_size = 1.0 / tex_size;
-        
-        // Slider 0-1 maps to 0-3 screen pixels of displacement
-        let displacement = chroma_amt * 3.0 * pixel_size.x;
+
+        let source_px = (cr_right - cr_left) / 560.0;
+        // Slider 0..1 maps to 0..2 source pixels of displacement.
+        let displacement = chroma_amt * 2.0 * source_px;
         
         // R shifts right, B shifts left, G stays centered
         let r_uv = uv + vec2<f32>(displacement, 0.0);
