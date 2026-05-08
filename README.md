@@ -15,6 +15,8 @@ A cycle-accurate Apple //c emulator.
 
 <img src="docs/screenshots/karateka.png" alt="Karateka" />
 
+<img src="docs/screenshots/mousedesk.png" alt="Mouse Desk" />
+
 ## Specs
 
 | | |
@@ -135,7 +137,7 @@ Note: Non-WOZ 5.25" images are converted to WOZ and saved to working sidecar `<f
 | F2 | Load disk into drive 2 (5.25") |
 | F3 | Load disk into drive 3 (3.5") |
 | F4 | Load disk into drive 4 (3.5") |
-| F5 | Mono / color |
+| F5 | Mono / color (or *invert* LCD) |
 | F6 | Toolbar |
 | F7 | Settings |
 | F8 | Shader settings |

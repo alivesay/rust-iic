@@ -2016,7 +2016,9 @@ impl App {
         let fullscreen_modifier = self.modifiers.super_key();
         #[cfg(not(target_os = "macos"))]
         let fullscreen_modifier = self.modifiers.alt_key();
-        let fullscreen_combo = (is_enter && fullscreen_modifier) || is_f11;
+
+        let fullscreen_combo = (is_enter && fullscreen_modifier)
+            || (is_f11 && !self.modifiers.control_key());
         if fullscreen_combo && event.state.is_pressed() {
             if let Some(window) = &self.window {
                 #[cfg(target_os = "macos")]
