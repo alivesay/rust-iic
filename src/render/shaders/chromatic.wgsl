@@ -15,6 +15,8 @@ struct ChromaUniforms {
     content_rect: vec4<f32>,
     // x = d (distance), y = R (radius), z = overscan_x/100, w = overscan_y/100
     curvature: vec4<f32>,
+    // x = window DPI scale factor (1.0 = non-HiDPI, 2.0 = Retina, etc.)
+    display: vec4<f32>,
 };
 
 @group(0) @binding(0) var r_texture: texture_2d<f32>;  // CRT output (no glow)
@@ -121,10 +123,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     // Apply chromatic aberration if enabled and not mono
     if chroma_amt > 0.0 && is_mono < 0.5 {
-
+        // Displacement is anchored to source pixels (one cell of the
+        // //c hires grid). On low-DPI panels each surface pixel is
+        // physically larger so the same source-pixel shift looks
+        // proportionally stronger; multiplying by the OS scale factor
+        // keeps the perceived strength close on HiDPI/Retina vs.
+        // standard-DPI desktop monitors.
         let source_px = (cr_right - cr_left) / 560.0;
-        // Slider 0..1 maps to 0..2 source pixels of displacement.
-        let displacement = chroma_amt * 2.0 * source_px;
+        let dpi = clamp(uniforms.display.x, 0.5, 4.0);
+        // Slider 0..1 → up to ~1 source pixel on a 1x panel,
+        //              up to ~2 source pixels on a 2x (Retina) panel.
+        let displacement = chroma_amt * source_px * dpi;
         
         // R shifts right, B shifts left, G stays centered
         let r_uv = uv + vec2<f32>(displacement, 0.0);

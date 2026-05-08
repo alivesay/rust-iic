@@ -82,6 +82,8 @@ pub struct CrtRenderer {
     glow_amt_cache: std::cell::Cell<f32>,
     curvature_on_cache: std::cell::Cell<f32>,
     power_on_time_cache: std::cell::Cell<f32>,  // For suppressing glow during channel change
+    // Window DPI scale factor (1.0 = non-HiDPI, 2.0 = Retina, etc.).
+    scale_factor_cache: std::cell::Cell<f32>,
     source_width_cache: std::cell::Cell<f32>,
     source_height_cache: std::cell::Cell<f32>,
     // NTSC notch filter pass
@@ -140,6 +142,8 @@ struct ChromaUniforms {
     content_rect: [f32; 4],
     // x = d (distance), y = R (radius), z = overscan_x/100, w = overscan_y/100
     curvature: [f32; 4],
+    // x = window DPI scale factor, y/z/w = unused
+    display: [f32; 4],
 }
 
 impl CrtRenderer {
@@ -764,6 +768,7 @@ impl CrtRenderer {
             params: [0.0, 0.0, 0.0, 1.0],  // chroma_amt=0, is_mono=0, glow=0, curv_on=1
             content_rect: [0.0, 0.0, 1.0, 1.0],
             curvature: [3.0, 1.3, 1.0, 1.0],  // default d, R, overscan
+            display: [1.0, 0.0, 0.0, 0.0],
         };
         let chroma_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("chroma_uniform_buffer"),
@@ -1087,6 +1092,7 @@ impl CrtRenderer {
             glow_amt_cache: std::cell::Cell::new(0.0),
             curvature_on_cache: std::cell::Cell::new(1.0),
             power_on_time_cache: std::cell::Cell::new(5.0),
+            scale_factor_cache: std::cell::Cell::new(1.0),
             source_width_cache: std::cell::Cell::new(560.0),
             source_height_cache: std::cell::Cell::new(384.0),
             ntsc_pipeline,
@@ -1554,6 +1560,7 @@ impl CrtRenderer {
             params: [params.chromatic_aberration, self.is_mono.get(), effective_glow, params.curvature],
             content_rect: self.content_rect_cache.get(),
             curvature: self.curvature_cache.get(),
+            display: [self.scale_factor_cache.get(), 0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.chroma_uniform_buffer, 0, bytemuck::bytes_of(&chroma_uniforms));
 
@@ -1635,6 +1642,9 @@ impl CrtRenderer {
         queue.write_buffer(&self.uniform_buffer, 36, bytemuck::bytes_of(&val));
     }
 
+    pub fn set_scale_factor(&self, factor: f32) {
+        self.scale_factor_cache.set(factor.max(0.1));
+    }
     // Update power-on elapsed time for CRT startup sync effect.
     pub fn update_power_on_time(&self, queue: &wgpu::Queue, elapsed_secs: f32) {
         // Write to extra.z (offset 32 + 8 = 40)
@@ -2166,6 +2176,10 @@ impl PostProcessor for CrtRenderer {
 
     fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams) {
         CrtRenderer::update_shader_params(self, queue, params)
+    }
+
+    fn set_scale_factor(&self, factor: f32) {
+        CrtRenderer::set_scale_factor(self, factor)
     }
 
     fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder) {

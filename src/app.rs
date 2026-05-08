@@ -1583,6 +1583,9 @@ impl App {
 
             let render_result = {
                 if let Some(crt) = self.post_processor.as_ref() {
+                    if let Some(window) = self.window.as_ref() {
+                        crt.set_scale_factor(window.scale_factor() as f32);
+                    }
                     crt.update_shader_params(pixels.queue(), &self.shader_params);
                 }
  
