@@ -1388,7 +1388,9 @@ impl App {
                     let scale_x = surf_w as f64 / buf_w as f64;
                     let scale_y = surf_h as f64 / buf_h as f64;
                     
-                    let scale = if self.is_fullscreen {
+                    let scale = if self.is_fullscreen
+                        && self.config.display.fullscreen_integer_scale
+                    {
                         scale_x.min(scale_y).floor().max(1.0)
                     } else {
                         scale_x.min(scale_y)
