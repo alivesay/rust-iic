@@ -13,7 +13,7 @@
 ; ============================================================================
 
 ; ----- HGR_ROW_TABLES: emit the 192-entry lookup tables --------------------
-;
+; 
 ;   .align	256
 ;   HGR_ROW_TABLES        ; emits labels `hgr_lo:` and `hgr_hi:`
 ;
