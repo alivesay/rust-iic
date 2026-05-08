@@ -59,6 +59,8 @@ pub trait PostProcessor {
     // Toggle LCD invert.
     fn set_invert(&self, _queue: &wgpu::Queue, _invert: bool) {}
 
+    fn set_scale_factor(&self, _factor: f32) {}
+
     // Clear the intermediate texture to black before rendering.
     fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder);
 
