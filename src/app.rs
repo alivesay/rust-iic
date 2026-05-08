@@ -683,11 +683,7 @@ impl winit::application::ApplicationHandler for App {
         let window_buttons = WindowButtons::CLOSE | WindowButtons::MINIMIZE;
 
         #[cfg(not(target_os = "macos"))]
-        let initial_fullscreen = if self.start_fullscreen {
-            Some(Fullscreen::Borderless(None))
-        } else {
-            None
-        };
+        let initial_fullscreen: Option<Fullscreen> = None;
 
         #[cfg(target_os = "macos")]
         let attrs = Window::default_attributes()
@@ -728,6 +724,8 @@ impl winit::application::ApplicationHandler for App {
 
         #[cfg(not(target_os = "macos"))]
         if self.start_fullscreen {
+            window.set_decorations(false);
+            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
             self.is_fullscreen = true;
         }
 
@@ -1876,7 +1874,11 @@ impl App {
         }
         let pressed = state == ElementState::Pressed;
         if !self.mouse_grabbed {
-            if pressed && button == MouseButton::Left {
+            let ui_open = self.show_shader_ui
+                || self.show_drive_audio_ui
+                || self.show_settings_window
+                || self.show_toolbar;
+            if pressed && button == MouseButton::Left && !ui_open {
                 self.grab_mouse();
             }
             return;
