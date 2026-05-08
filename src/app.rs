@@ -386,7 +386,9 @@ impl App {
             }
         };
 
-        let mode = if self.shader_type == ShaderType::Crt {
+        let mode = if self.shader_type == ShaderType::Crt
+            && (!self.is_fullscreen || self.config.display.fullscreen_integer_scale)
+        {
             ScalingMode::PixelPerfect
         } else {
             ScalingMode::Fill
@@ -776,7 +778,9 @@ impl winit::application::ApplicationHandler for App {
             .present_mode(wgpu::PresentMode::Mailbox)
             .build() {
             Ok(mut pixels) => {
-                let mode = if self.shader_type == ShaderType::Crt {
+                let mode = if self.shader_type == ShaderType::Crt
+                    && (!self.is_fullscreen || self.config.display.fullscreen_integer_scale)
+                {
                     ScalingMode::PixelPerfect
                 } else {
                     ScalingMode::Fill
@@ -1459,20 +1463,37 @@ impl App {
                     let avail_w = buf_w.saturating_sub(bezel * 2);
                     let avail_h = display_region_h.saturating_sub(bezel * 2);
 
-                    let mut s = 1u32;
-                    for cand in 1..=64u32 {
-                        let w_need = (lcd_w + LCD_OVERSCAN_PX * 2) * cand;
-                        let h_need = (lcd_h + LCD_OVERSCAN_PX * 2) * cand;
-                        if w_need <= avail_w && h_need <= avail_h {
-                            s = cand;
-                        } else {
-                            break;
+                    let allow_fractional = self.is_fullscreen
+                        && !self.config.display.fullscreen_integer_scale;
+                    if allow_fractional {
+                        // Largest float scale that fits avail in both
+                        // axes (preserves picture aspect, fills the
+                        // long axis).
+                        let pw = (lcd_w + LCD_OVERSCAN_PX * 2) as f64;
+                        let ph = (lcd_h + LCD_OVERSCAN_PX * 2) as f64;
+                        let s_f = (avail_w as f64 / pw)
+                            .min(avail_h as f64 / ph)
+                            .max(1.0);
+                        blit_dst_w = (lcd_w as f64 * s_f).round() as u32;
+                        blit_dst_h = (lcd_h as f64 * s_f).round() as u32;
+                        ovx = (LCD_OVERSCAN_PX as f64 * s_f).round() as u32;
+                        ovy = (LCD_OVERSCAN_PX as f64 * s_f).round() as u32;
+                    } else {
+                        let mut s = 1u32;
+                        for cand in 1..=64u32 {
+                            let w_need = (lcd_w + LCD_OVERSCAN_PX * 2) * cand;
+                            let h_need = (lcd_h + LCD_OVERSCAN_PX * 2) * cand;
+                            if w_need <= avail_w && h_need <= avail_h {
+                                s = cand;
+                            } else {
+                                break;
+                            }
                         }
+                        blit_dst_w = lcd_w * s;
+                        blit_dst_h = lcd_h * s;
+                        ovx = LCD_OVERSCAN_PX * s;
+                        ovy = LCD_OVERSCAN_PX * s;
                     }
-                    blit_dst_w = lcd_w * s;
-                    blit_dst_h = lcd_h * s;
-                    ovx = LCD_OVERSCAN_PX * s;
-                    ovy = LCD_OVERSCAN_PX * s;
 
                     // Center the panel in the buffer so any residual
                     // slack is split equally on both sides.
@@ -2050,7 +2071,9 @@ impl App {
 
                 if success {
                     if let Some(pixels) = &mut self.pixels {
-                        let mode = if self.shader_type == ShaderType::Crt {
+                        let mode = if self.shader_type == ShaderType::Crt
+                            && (!self.is_fullscreen || self.config.display.fullscreen_integer_scale)
+                        {
                             ScalingMode::PixelPerfect
                         } else {
                             ScalingMode::Fill

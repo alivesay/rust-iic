@@ -149,6 +149,15 @@ fn render_video_tab(ui: &mut egui::Ui, cfg: &mut Config, result: &mut SettingsRe
     let d = &mut cfg.display;
     ui.heading("Display");
     result.changed |= ui.checkbox(&mut d.fullscreen, "Start fullscreen").changed();
+    let resp = ui.checkbox(
+        &mut d.fullscreen_integer_scale,
+        "Fullscreen integer scaling",
+    );
+    result.changed |= resp.changed();
+    resp.on_hover_text(
+        "On: snap fullscreen to the largest integer scale (may leave black bars).\n\
+         Off: stretch to fill the screen at a fractional scale.",
+    );
     result.changed |= ui.checkbox(&mut d.monochrome, "Monochrome").changed();
     let resp = ui.checkbox(&mut d.stable_page, "Stable page (prevents mid-frame page flips)");
     result.changed |= resp.changed();

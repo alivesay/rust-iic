@@ -73,6 +73,8 @@ pub struct DisplayConfig {
     pub mono_bg: [u8; 3],
 
     pub stable_page: bool,
+
+    pub fullscreen_integer_scale: bool,
 }
 
 impl Default for DisplayConfig {
@@ -85,6 +87,7 @@ impl Default for DisplayConfig {
             mono_fg: [118, 255, 211],
             mono_bg: [15, 23, 23],
             stable_page: false,
+            fullscreen_integer_scale: true,
         }
     }
 }
