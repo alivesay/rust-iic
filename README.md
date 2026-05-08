@@ -2,6 +2,8 @@
 
 A cycle-accurate Apple //c emulator.
 
+<img src="docs/screenshots/mousedesk.png" alt="Mouse Desk" />
+
 <table>
 <tr>
 <td width="50%"><img src="docs/screenshots/pop.png" alt="Prince of Persia" /></td>
@@ -14,8 +16,6 @@ A cycle-accurate Apple //c emulator.
 </table>
 
 <img src="docs/screenshots/karateka.png" alt="Karateka" />
-
-<img src="docs/screenshots/mousedesk.png" alt="Mouse Desk" />
 
 ## Specs
 
