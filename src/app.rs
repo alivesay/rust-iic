@@ -26,11 +26,17 @@ use crate::cpu_monitor_window::CpuMonitorWindow;
 use crate::device::drive_audio::DriveAudioParams;
 use crate::monitor::Monitor;
 use crate::render::{
-    blit_direct, blit_nearest, BlitRect, ContentRect, CrtRenderer,
+    blit_direct, blit_nearest_collapse_rows, BlitSrcRect, ContentRect, CrtRenderer,
     DriveIcons, DriveStatusInfo, LcdRenderer, PostProcessor, RendererInit,
     ToolbarAction, ToolbarLabels, render_toolbar_ui,
 };
 use crate::settings_window::{render_settings_window, SettingsState};
+
+pub const LCD_OVERSCAN_PX: u32 = 7;
+pub const LCD_BEZEL_PX: u32 = 14;
+
+pub const LCD_PICTURE_BORDER_X_PX: u32 = 7;
+pub const LCD_PICTURE_BORDER_Y_PX: u32 = 14;
 
 pub struct App {
     pub pixels: Option<Pixels<'static>>,
@@ -80,6 +86,8 @@ pub struct App {
     pub bbs_handle: Option<crate::bbs::BbsHandle>,
 
     pub gpu_perf: GpuPerf,
+
+    pub lcd_invert: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -178,6 +186,7 @@ impl App {
             last_memexp_flush: Instant::now(),
             bbs_handle: None,
             gpu_perf: GpuPerf::default(),
+            lcd_invert: true,
         }
     }
 
@@ -309,16 +318,33 @@ impl App {
         self.cpu.bus.video.shader_enabled = self.shader_type != ShaderType::None;
         self.cpu.bus.video.force_neutral_mono = self.shader_type == ShaderType::Lcd;
 
+        if self.shader_type == ShaderType::Lcd {
+            self.cpu.bus.video.set_monochrome(true);
+            self.cpu.bus.video.set_mono_colors([255, 255, 255], [0, 0, 0]);
+        } else {
+            self.cpu.bus.video.set_monochrome(self.config.display.monochrome);
+            self.cpu.bus.video.set_mono_colors(
+                self.config.display.mono_fg,
+                self.config.display.mono_bg,
+            );
+        }
+
         // recompute window aspect ratio
         let (src_w_native, _) = self.cpu.bus.video.get_dimensions();
         let native_h = self.cpu.bus.video.get_dimensions().1 / 2;
         let aspect_correction = match self.shader_type {
-            ShaderType::Lcd => LcdRenderer::LCD_ASPECT_CORRECTION as f64,
+            ShaderType::Lcd => LcdRenderer::LCD_WINDOW_ASPECT as f64,
             _ => CrtRenderer::CRT_ASPECT_CORRECTION as f64,
         };
-        let base_w = src_w_native as f64;
-        let base_h = native_h as f64 * 2.0 * aspect_correction;
-        let new_aspect = base_w / base_h;
+        let new_aspect = if self.shader_type == ShaderType::Lcd {
+            let _ = src_w_native;
+            let _ = native_h;
+            aspect_correction
+        } else {
+            let bw = src_w_native as f64;
+            let bh = native_h as f64 * 2.0 * aspect_correction;
+            bw / bh
+        };
         if (new_aspect - self.window_aspect_ratio).abs() > 0.001 && !self.is_fullscreen {
             self.window_aspect_ratio = new_aspect;
 
@@ -396,6 +422,7 @@ impl App {
         };
         if let Some(pp) = &mut self.post_processor {
             pp.resize(pixels.device(), pixels.queue(), surface_w, surface_h);
+            pp.set_invert(pixels.queue(), self.lcd_invert);
         }
 
 
@@ -566,33 +593,92 @@ impl winit::application::ApplicationHandler for App {
         let native_h = buf_h / 2;
 
         let aspect = if self.shader_type == ShaderType::Lcd {
-            LcdRenderer::LCD_ASPECT_CORRECTION as f64
+            LcdRenderer::LCD_WINDOW_ASPECT as f64
         } else {
             CrtRenderer::CRT_ASPECT_CORRECTION as f64
         };
-        
-        let base_w = buf_w as f64;
-        let base_h = native_h as f64 * 2.0 * aspect;
 
-        // Pick the largest integer scale that fits within 80% of the monitor (logical points)
-        let scale = if let Some(monitor) = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next()) {
-            let monitor_size = monitor.size();
-            let dpi_scale = monitor.scale_factor();
-            let logical_w = monitor_size.width as f64 / dpi_scale;
-            let logical_h = monitor_size.height as f64 / dpi_scale;
-            let max_w = logical_w * 0.80;
-            let max_h = logical_h * 0.80;
-            let max_scale_w = (max_w / base_w).floor() as u32;
-            let max_scale_h = (max_h / base_h).floor() as u32;
-            max_scale_w.min(max_scale_h).max(1)
+        let lcd_pad: u32 = if self.shader_type == ShaderType::Lcd { 56 } else { 0 }; // total per axis (14+14)*2
+
+        let (active_w_u, active_h_u) = self.cpu.bus.video.get_active_dimensions();
+        let border_u = self.cpu.bus.video.get_border_size();
+        let pic_border_x_u = LCD_PICTURE_BORDER_X_PX.min(border_u);
+        let pic_border_y_u = LCD_PICTURE_BORDER_Y_PX.min(border_u);
+        let lcd_active_w = active_w_u + pic_border_x_u * 2;
+        let lcd_active_h = active_h_u + pic_border_y_u * 2;
+        let lcd_pixel_w = if self.shader_type == ShaderType::Lcd {
+            lcd_active_w as f64
         } else {
-            2
+            buf_w as f64
         };
+        let _lcd_pixel_h = (lcd_active_h / 2) as f64;
 
-        let win_w = base_w * scale as f64;
-        let win_h = base_h * scale as f64;
+        let (win_w, win_h, base_w, base_h);
+        if self.shader_type == ShaderType::Lcd {
+            let lcd_pixel_h = (lcd_active_h / 2) as f64;
+            let _ = aspect;
+            let _ = lcd_pad;
+            let _ = native_h;
 
-        self.window_aspect_ratio = base_w / base_h;
+            let (mw, mh) = if let Some(monitor) = event_loop.primary_monitor()
+                .or_else(|| event_loop.available_monitors().next())
+            {
+                let s = monitor.scale_factor();
+                (monitor.size().width as f64 / s, monitor.size().height as f64 / s)
+            } else {
+                (1280.0, 800.0)
+            };
+            let max_w = mw * 0.80;
+            let max_h = mh * 0.80;
+
+            let pack = |s: u32| -> (f64, f64) {
+                let panel_w = (lcd_pixel_w + (LCD_OVERSCAN_PX as f64) * 2.0) * s as f64;
+                let panel_h = (lcd_pixel_h + (LCD_OVERSCAN_PX as f64) * 2.0) * s as f64;
+                let w = panel_w + (LCD_BEZEL_PX as f64) * 2.0;
+                let h = panel_h + (LCD_BEZEL_PX as f64) * 2.0;
+                (w, h)
+            };
+
+            let mut best_s: u32 = 1;
+            for s in 1..=64u32 {
+                let (w, h) = pack(s);
+                if w <= max_w && h <= max_h {
+                    best_s = s;
+                } else {
+                    break;
+                }
+            }
+            let (w, h) = pack(best_s);
+            win_w = w;
+            win_h = h;
+            let (bw, bh) = pack(1);
+            base_w = bw;
+            base_h = bh;
+        } else {
+            let bw = buf_w as f64;
+            let bh = native_h as f64 * 2.0 * aspect;
+            let scale = if let Some(monitor) = event_loop.primary_monitor()
+                .or_else(|| event_loop.available_monitors().next())
+            {
+                let monitor_size = monitor.size();
+                let dpi_scale = monitor.scale_factor();
+                let logical_w = monitor_size.width as f64 / dpi_scale;
+                let logical_h = monitor_size.height as f64 / dpi_scale;
+                let max_w = logical_w * 0.80;
+                let max_h = logical_h * 0.80;
+                let max_scale_w = (max_w / bw).floor() as u32;
+                let max_scale_h = (max_h / bh).floor() as u32;
+                max_scale_w.min(max_scale_h).max(1)
+            } else {
+                2
+            };
+            win_w = bw * scale as f64;
+            win_h = bh * scale as f64;
+            base_w = bw;
+            base_h = bh;
+        }
+
+        self.window_aspect_ratio = win_w / win_h;
 
         let window_buttons = WindowButtons::CLOSE | WindowButtons::MINIMIZE;
 
@@ -1257,6 +1343,11 @@ impl App {
                     self.surface_width = size.width;
                     self.surface_height = size.height;
                     let _ = pixels.resize_surface(size.width, size.height);
+                    if self.shader_type == ShaderType::Lcd {
+                        self.buffer_width = size.width;
+                        self.buffer_height = size.height;
+                        let _ = pixels.resize_buffer(size.width, size.height);
+                    }
                     if let Some(pp) = self.post_processor.as_mut() {
                         pp.resize(pixels.device(), pixels.queue(), size.width, size.height);
                     }
@@ -1323,6 +1414,8 @@ impl App {
                             bar_h: 0,
                             source_width: active_w as f32,
                             source_height: (active_h / 2) as f32,
+                            overscan_x_px: 0,
+                            overscan_y_px: 0,
                         },
                     );
 
@@ -1347,29 +1440,89 @@ impl App {
                 }
 
                 let display_region_h = buf_h.saturating_sub(bar_h);
+
                 let mut blit_offset_x = 0u32;
                 let mut blit_offset_y = 0u32;
                 let mut blit_dst_w = 0u32;
                 let mut blit_dst_h = 0u32;
+                let mut ovx: u32 = LCD_OVERSCAN_PX;
+                let mut ovy: u32 = LCD_OVERSCAN_PX;
 
-                if display_region_h > 0 && buf_w > 0 {
-                    let scale_x = buf_w as f64 / src_w as f64;
-                    let scale_y = display_region_h as f64 / src_h as f64;
-                    let int_scale = scale_x.min(scale_y).floor().max(1.0) as u32;
+                if buf_w > 0 && display_region_h > 0 && src_w > 0 && src_h > 0 {
+                    let (active_w_dim, active_h_dim) = self.cpu.bus.video.get_active_dimensions();
 
-                    blit_dst_w = src_w * int_scale;
-                    blit_dst_h = src_h * int_scale;
+                    let border_dim = self.cpu.bus.video.get_border_size();
+                    let pic_border_x = LCD_PICTURE_BORDER_X_PX.min(border_dim);
+                    let pic_border_y = LCD_PICTURE_BORDER_Y_PX.min(border_dim);
+                    let lcd_w = active_w_dim + pic_border_x * 2;
+                    let lcd_h = (active_h_dim + pic_border_y * 2) / 2;
 
-                    blit_offset_x = (buf_w - blit_dst_w) / 2;
-                    blit_offset_y = (display_region_h - blit_dst_h) / 2;
+                    let bezel = if self.is_fullscreen { 0 } else { LCD_BEZEL_PX };
+                    let avail_w = buf_w.saturating_sub(bezel * 2);
+                    let avail_h = display_region_h.saturating_sub(bezel * 2);
 
-                    blit_nearest(
+                    let mut s = 1u32;
+                    for cand in 1..=64u32 {
+                        let w_need = (lcd_w + LCD_OVERSCAN_PX * 2) * cand;
+                        let h_need = (lcd_h + LCD_OVERSCAN_PX * 2) * cand;
+                        if w_need <= avail_w && h_need <= avail_h {
+                            s = cand;
+                        } else {
+                            break;
+                        }
+                    }
+                    blit_dst_w = lcd_w * s;
+                    blit_dst_h = lcd_h * s;
+                    ovx = LCD_OVERSCAN_PX * s;
+                    ovy = LCD_OVERSCAN_PX * s;
+
+                    // Center the panel in the buffer so any residual
+                    // slack is split equally on both sides.
+                    let panel_w_c = blit_dst_w + ovx * 2;
+                    let panel_h_c = blit_dst_h + ovy * 2;
+                    blit_offset_x = (buf_w.saturating_sub(panel_w_c)) / 2 + ovx;
+                    blit_offset_y = (display_region_h.saturating_sub(panel_h_c)) / 2 + ovy;
+
+                    // LCD panel rect = blit + (per-axis) overscan ring.
+                    let panel_x = blit_offset_x.saturating_sub(ovx);
+                    let panel_y = blit_offset_y.saturating_sub(ovy);
+                    let panel_w = (blit_dst_w + ovx * 2).min(buf_w - panel_x);
+                    let panel_h = (blit_dst_h + ovy * 2).min(display_region_h - panel_y);
+
+                    let to_u8 = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                    let src = self.shader_params.lcd_fg_color;
+                    let (ring_r, ring_g, ring_b) = (to_u8(src[0]), to_u8(src[1]), to_u8(src[2]));
+                    let frame_stride = buf_w as usize * 4;
+                    for y in panel_y..panel_y + panel_h {
+                        let row_start = (y as usize) * frame_stride + (panel_x as usize) * 4;
+                        let row_end = row_start + (panel_w as usize) * 4;
+                        for px in frame[row_start..row_end].chunks_exact_mut(4) {
+                            px[0] = ring_r;
+                            px[1] = ring_g;
+                            px[2] = ring_b;
+                            px[3] = 255;
+                        }
+                    }
+
+                    // Blit picture region = active area + per-axis
+                    let (active_w, active_h) = self.cpu.bus.video.get_active_dimensions();
+                    let border = self.cpu.bus.video.get_border_size();
+                    let pic_border_x = LCD_PICTURE_BORDER_X_PX.min(border);
+                    let pic_border_y = LCD_PICTURE_BORDER_Y_PX.min(border);
+                    let crop_off_x = border.saturating_sub(pic_border_x);
+                    let crop_off_y = border.saturating_sub(pic_border_y);
+                    let crop_w = active_w + pic_border_x * 2;
+                    let crop_h = active_h + pic_border_y * 2;
+                    blit_nearest_collapse_rows(
                         frame,
                         video_pixels,
-                        BlitRect {
+                        BlitSrcRect {
                             frame_w: buf_w,
-                            src_w,
-                            src_h,
+                            src_full_w: src_w,
+                            src_x: crop_off_x,
+                            src_y: crop_off_y,
+                            src_w: crop_w,
+                            src_h: crop_h,
                             dst_x: blit_offset_x,
                             dst_y: blit_offset_y,
                             dst_w: blit_dst_w,
@@ -1379,29 +1532,29 @@ impl App {
                 }
 
                 if let Some(lcd) = &self.post_processor {
-                    let border = self.cpu.bus.video.border_size as u32;
-                    let scale_x = if src_w > 0 { blit_dst_w as f64 / src_w as f64 } else { 1.0 };
-                    let scale_y = if src_h > 0 { blit_dst_h as f64 / src_h as f64 } else { 1.0 };
-
-                    let active_offset_x = blit_offset_x + (border as f64 * scale_x) as u32;
-                    let active_offset_y = blit_offset_y + (border as f64 * scale_y) as u32;
-                    let active_w = src_w - border * 2;
-                    let active_h = src_h - border * 2;
-                    let active_dst_w = (active_w as f64 * scale_x) as u32;
-                    let active_dst_h = (active_h as f64 * scale_y) as u32;
-
+                    // content_rect matches the source blit rect exactly.
+                    // Outside it (overscan ring + black bezel) renders via
+                    // shader passthrough of the pre-filled colors.
+                    let (active_w, active_h) = self.cpu.bus.video.get_active_dimensions();
+                    let border = self.cpu.bus.video.get_border_size();
+                    let pic_border_x = LCD_PICTURE_BORDER_X_PX.min(border);
+                    let pic_border_y = LCD_PICTURE_BORDER_Y_PX.min(border);
+                    let crop_w = active_w + pic_border_x * 2;
+                    let crop_h = active_h + pic_border_y * 2;
                     lcd.update_content_rect(
                         pixels.queue(),
                         &ContentRect {
                             surface_w: buf_w,
                             surface_h: buf_h,
-                            offset_x: active_offset_x,
-                            offset_y: active_offset_y,
-                            dst_w: active_dst_w,
-                            dst_h: active_dst_h,
+                            offset_x: blit_offset_x,
+                            offset_y: blit_offset_y,
+                            dst_w: blit_dst_w,
+                            dst_h: blit_dst_h,
                             bar_h,
-                            source_width: active_w as f32,
-                            source_height: (active_h / 2) as f32,
+                            source_width: crop_w as f32,
+                            source_height: (crop_h / 2) as f32,
+                            overscan_x_px: ovx,
+                            overscan_y_px: ovy,
                         },
                     );
                 }
@@ -1410,6 +1563,12 @@ impl App {
             let render_result = {
                 if let Some(crt) = self.post_processor.as_ref() {
                     crt.update_shader_params(pixels.queue(), &self.shader_params);
+                }
+ 
+                if self.shader_type == ShaderType::Lcd
+                    && self.lcd_invert != self.shader_params.lcd_invert
+                {
+                    self.lcd_invert = self.shader_params.lcd_invert;
                 }
 
                 let egui_output = if self.show_shader_ui || self.show_drive_audio_ui || self.show_toolbar || self.show_settings_window {
@@ -2090,10 +2249,25 @@ impl App {
         if event.state.is_pressed() {
             match event.logical_key {
                 Key::Named(NamedKey::F5) => {
-                    let current = self.cpu.bus.video.monochrome;
-                    self.cpu.bus.video.set_monochrome(!current);
-                    self.power_on_time = Instant::now();
-                    self.cpu.bus.iou.iwm.drive_audio.trigger_channel_static();
+                    if self.shader_type == ShaderType::Lcd {
+                        self.lcd_invert = !self.lcd_invert;
+                        self.shader_params.lcd_invert = self.lcd_invert;
+
+                        if let (Some(pixels), Some(pp)) =
+                            (self.pixels.as_ref(), self.post_processor.as_ref())
+                        {
+                            pp.set_invert(pixels.queue(), self.lcd_invert);
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        self.cpu.bus.iou.iwm.drive_audio.trigger_channel_static();
+                    } else {
+                        let current = self.cpu.bus.video.monochrome;
+                        self.cpu.bus.video.set_monochrome(!current);
+                        self.power_on_time = Instant::now();
+                        self.cpu.bus.iou.iwm.drive_audio.trigger_channel_static();
+                    }
                 }
                 Key::Named(NamedKey::F6) => {
                     self.show_toolbar = !self.show_toolbar;

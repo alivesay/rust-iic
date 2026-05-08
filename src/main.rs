@@ -113,8 +113,12 @@ fn main() -> Result<(), Error> {
     cpu.bus.iou.debug = args.debug;
     cpu.bus.iou.iwm.debug = args.debug;
     cpu.bus.iou.iwm.fast_disk = args.fast_disk;
-    cpu.bus.video.set_monochrome(args.monochrome || config.display.monochrome);
-    cpu.bus.video.set_mono_colors(config.display.mono_fg, config.display.mono_bg);
+    cpu.bus.video.set_monochrome(args.monochrome || config.display.monochrome || args.shader == ShaderType::Lcd);
+    if args.shader == ShaderType::Lcd {
+        cpu.bus.video.set_mono_colors([255, 255, 255], [0, 0, 0]);
+    } else {
+        cpu.bus.video.set_mono_colors(config.display.mono_fg, config.display.mono_bg);
+    }
     cpu.bus.video.stable_page = config.display.stable_page;
     cpu.bus.video.shader_enabled = args.shader != ShaderType::None;
     cpu.bus.video.scanline_intensity = args.scanline_intensity;

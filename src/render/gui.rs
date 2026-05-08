@@ -1,4 +1,3 @@
-// Drive status info passed from the IWM to the GUI renderer.
 pub struct DriveStatusInfo {
     pub has_disk: bool,
     pub is_active: bool,
@@ -6,10 +5,8 @@ pub struct DriveStatusInfo {
     pub filename: Option<String>,
 }
 
-// Apple IIc font ROM for rendering toolbar labels
 const CHAR_ROM: &[u8; 1024] = include_bytes!("../../assets/font.bin");
 
-// Rasterize a string using the Apple IIc character ROM into an RGBA image.
 fn rasterize_apple_label(text: &str) -> (usize, usize, Vec<u8>) {
     let scale = 2;
     let char_w = 7 * scale;
@@ -52,7 +49,6 @@ fn rasterize_apple_label(text: &str) -> (usize, usize, Vec<u8>) {
     (img_w, img_h, pixels)
 }
 
-// Pre-rendered Apple IIc font labels for toolbar buttons.
 pub struct ToolbarLabels {
     pub run: egui::TextureHandle,
     pub stp: egui::TextureHandle,
@@ -80,7 +76,6 @@ impl ToolbarLabels {
     }
 }
 
-// Toolbar drive icon textures
 pub struct DriveIcons {
     pub disk1: egui::TextureHandle,
     pub disk2: egui::TextureHandle,
@@ -132,30 +127,62 @@ pub struct BlitRect {
     pub dst_h: u32,
 }
 
-// Nearest-neighbor blit from src into frame at (dst_x, dst_y) scaled to (dst_w × dst_h).
-pub fn blit_nearest(frame: &mut [u8], src: &[u8], rect: BlitRect) {
-    let BlitRect { frame_w, src_w, src_h, dst_x, dst_y, dst_w, dst_h } = rect;
+pub struct BlitSrcRect {
+    pub frame_w: u32,
+    pub src_full_w: u32,
+    pub src_x: u32,
+    pub src_y: u32,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub dst_x: u32,
+    pub dst_y: u32,
+    pub dst_w: u32,
+    pub dst_h: u32,
+}
+
+pub fn blit_nearest_collapse_rows(frame: &mut [u8], src: &[u8], rect: BlitSrcRect) {
+    let BlitSrcRect {
+        frame_w,
+        src_full_w,
+        src_x,
+        src_y,
+        src_w,
+        src_h,
+        dst_x,
+        dst_y,
+        dst_w,
+        dst_h,
+    } = rect;
+    let logical_h = src_h / 2;
+    if logical_h == 0 || dst_w == 0 || dst_h == 0 {
+        return;
+    }
     for y in 0..dst_h {
-        let src_y = (y as u64 * src_h as u64 / dst_h as u64) as usize;
-        let src_y = src_y.min(src_h as usize - 1);
-        let src_row = src_y * src_w as usize * 4;
+        let s_y = (y as u64 * logical_h as u64 / dst_h as u64) as usize;
+        let s_y = s_y.min(logical_h as usize - 1);
+        let row_a = ((src_y as usize + s_y * 2) * src_full_w as usize) * 4;
+        let row_b = ((src_y as usize + s_y * 2 + 1) * src_full_w as usize) * 4;
         let dst_row = (dst_y + y) as usize * frame_w as usize * 4;
 
         for x in 0..dst_w {
-            let src_x = (x as u64 * src_w as u64 / dst_w as u64) as usize;
-            let src_x = src_x.min(src_w as usize - 1);
+            let s_x = (x as u64 * src_w as u64 / dst_w as u64) as usize;
+            let s_x = s_x.min(src_w as usize - 1);
 
-            let si = src_row + src_x * 4;
+            let sa = row_a + (src_x as usize + s_x) * 4;
+            let sb = row_b + (src_x as usize + s_x) * 4;
             let di = dst_row + (dst_x + x) as usize * 4;
 
-            if si + 4 <= src.len() && di + 4 <= frame.len() {
-                frame[di..di + 4].copy_from_slice(&src[si..si + 4]);
+            if sa + 4 <= src.len() && sb + 4 <= src.len() && di + 4 <= frame.len() {
+                let r = src[sa].max(src[sb]);
+                let g = src[sa + 1].max(src[sb + 1]);
+                let b = src[sa + 2].max(src[sb + 2]);
+                let a = src[sa + 3].max(src[sb + 3]);
+                frame[di..di + 4].copy_from_slice(&[r, g, b, a]);
             }
         }
     }
 }
 
-// Toolbar action returned from the egui toolbar.
 #[derive(Default)]
 pub struct ToolbarAction {
     pub reset: bool,
@@ -167,8 +194,6 @@ pub struct ToolbarAction {
     pub toggle_pause: bool,
 }
 
-// Render the toolbar as an egui bottom panel overlay.
-// Returns actions that were triggered by user interaction.
 pub fn render_toolbar_ui(
     ctx: &egui::Context,
     drives: &[DriveStatusInfo; 4],

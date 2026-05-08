@@ -72,6 +72,19 @@ pub struct ShaderParams {
     pub crt_curve_mode: u32,
     pub crt_alpha2: f32,      // mode 1 only
     pub crt_black_lift: f32,  // mode 1 only (0..~0.05)
+
+    // ---- LCD shader parameters ----
+    pub lcd_invert: bool,
+    pub lcd_ghost_decay: f32,        // 0..1, frame-to-frame persistence
+    pub lcd_corner_radius_px: f32,   // outer panel corner radius (output px)
+    pub lcd_vignette_strength: f32,  // 0..1 mix toward edge tint
+    pub lcd_vignette_inner: f32,     // normalised radius where vignette starts
+    pub lcd_vignette_outer: f32,     // normalised radius where vignette saturates
+    pub lcd_vignette_tint: [f32; 3], // sRGB 0..1 edge tint colour
+    pub lcd_threshold: f32,          // 1-bit cutoff luma (0..1); below = off, above = on
+    pub lcd_contrast: f32,           // pre-threshold contrast scale around 0.5 (0..3)
+    pub lcd_bg_color: [f32; 3],      // sRGB 0..1 panel background (off pixels)
+    pub lcd_fg_color: [f32; 3],      // sRGB 0..1 panel foreground (lit pixels)
 }
 
 impl Default for ShaderParams {
@@ -126,7 +139,18 @@ impl Default for ShaderParams {
             crt_curve_mode: 1,
             crt_alpha2: 3.0,
             crt_black_lift: 0.0181,
-        }
+
+            lcd_invert: true,
+            lcd_ghost_decay: 0.85,
+            lcd_corner_radius_px: 15.0,
+            lcd_vignette_strength: 0.5,
+            lcd_vignette_inner: 0.0,
+            lcd_vignette_outer: 1.12,
+            lcd_vignette_tint: [28.0 / 255.0, 52.0 / 255.0, 58.0 / 255.0],
+            lcd_threshold: 0.43,
+            lcd_contrast: 1.0,
+            lcd_bg_color: [88.0 / 255.0, 105.0 / 255.0, 50.0 / 255.0],
+            lcd_fg_color: [35.0 / 255.0,  47.0 / 255.0, 47.0 / 255.0],        }
     }
 }
 
@@ -154,6 +178,12 @@ impl ShaderParams {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShaderUiTab {
+    Crt,
+    Lcd,
+}
+
 pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &mut bool) -> ShaderUiResult {
     let mut changed = false;
     let mut save_clicked = false;
@@ -161,83 +191,28 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
     egui::Window::new("Shader Settings")
         .open(open)
         .resizable(true)
-        .default_width(320.0)
+        .default_width(340.0)
         .show(ctx, |ui| {
+            let tab_id = ui.id().with("shader_ui_tab");
+            let mut tab = ui.data_mut(|d| *d.get_temp_mut_or(tab_id, ShaderUiTab::Crt));
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if ui.selectable_label(tab == ShaderUiTab::Crt, "CRT").clicked() {
+                    tab = ShaderUiTab::Crt;
+                }
+                if ui.selectable_label(tab == ShaderUiTab::Lcd, "LCD").clicked() {
+                    tab = ShaderUiTab::Lcd;
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(tab_id, tab));
+            ui.separator();
+
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Geometry");
-                changed |= ui.add(egui::Slider::new(&mut params.curvature, 0.0..=1.0).text("Curvature On/Off")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.distance, 0.1..=3.0).text("Distance")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.radius, 0.5..=10.0).text("Radius")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.corner_size, 0.001..=0.1).text("Corner Size")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.corner_smooth, 100.0..=2000.0).text("Corner Smooth")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.overscan_x, 80.0..=120.0).text("Overscan X %")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.overscan_y, 80.0..=120.0).text("Overscan Y %")).changed();
-
-                ui.separator();
-                ui.heading("Scanlines");
-                changed |= ui.add(egui::Slider::new(&mut params.scanline_weight, 0.1..=0.5).text("Scanline Weight")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.luminance, 0.0..=1.0).text("Luminance")).changed();
-
-                ui.separator();
-                ui.heading("Shadow Mask");
-                changed |= ui.add(egui::Slider::new(&mut params.mask_type, 1.0..=3.0).step_by(1.0).text("Mask Type (1=grille 2=slot 3=delta)")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.aperture_strength, 0.0..=1.0).text("Mask Strength")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.aperture_brightboost, 0.0..=1.0).text("Mask Bright Boost")).changed();
-
-                ui.separator();
-                ui.heading("Halation & Bloom");
-                changed |= ui.add(egui::Slider::new(&mut params.halation, 0.0..=2.0).text("Halation")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.blur_width, 0.2..=3.0).text("Halation Width")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.glow, 0.0..=0.05).text("Glow")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.glow_width, 0.5..=30.0).text("Glow Width")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.rasterbloom, 0.0..=1.0).text("Raster Bloom")).changed();
-
-                ui.separator();
-                ui.heading("Color");
-                ui.label("CRT response curve (voltage -> luminance)");
-                ui.horizontal(|ui| {
-                    changed |= ui.radio_value(&mut params.crt_curve_mode, 0u32, "Pure power").changed();
-                    changed |= ui.radio_value(&mut params.crt_curve_mode, 1u32, "Measured (custom)").changed();
-                    changed |= ui.radio_value(&mut params.crt_curve_mode, 2u32, "Measured (locked)").changed();
-                });
-                let alpha1_label = if params.crt_curve_mode == 1 {
-                    "alpha1 (CRT Gamma, high-side power)"
-                } else {
-                    "CRT Gamma (input response)"
-                };
-                ui.add_enabled_ui(params.crt_curve_mode != 2, |ui| {
-                    changed |= ui.add(egui::Slider::new(&mut params.crt_gamma, 1.8..=3.2).text(alpha1_label)).changed();
-                });
-                ui.add_enabled_ui(params.crt_curve_mode == 1, |ui| {
-                    changed |= ui.add(egui::Slider::new(&mut params.crt_alpha2, 2.0..=4.0).text("alpha2 (low-side power)")).changed();
-                    changed |= ui.add(egui::Slider::new(&mut params.crt_black_lift, 0.0..=0.05).text("Black lift b (brightness)")).changed();
-                });
-                changed |= ui.add(egui::Slider::new(&mut params.saturation, 0.0..=2.0).text("Saturation")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.tone_knee, 0.5..=1.0).text("Tone Knee (highlight rolloff)")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.scanline_floor, 0.0..=0.3).text("Scanline Floor (gap fill)")).changed();
-
-                ui.separator();
-                ui.heading("Effects");
-                changed |= ui.add(egui::Slider::new(&mut params.vignette, 0.0..=3.0).text("Vignette Size")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.vignette_opacity, 0.0..=1.0).text("Vignette Opacity")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.phosphor, 0.0..=0.95).text("Phosphor Persistence")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.flicker, 0.0..=1.0).text("CRT Flicker")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.chromatic_aberration, 0.0..=1.0).text("Chromatic Aberration")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.v_roll, 0.0..=1.0).text("V-Roll Bar")).changed();
-
-                ui.separator();
-                ui.heading("NTSC Signal Chain");
-                changed |= ui.add(egui::Slider::new(&mut params.white_preservation, 0.0..=1.0).text("White Preservation (1=clean, 0=NTSC)")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.chroma_saturation, 0.0..=6.0).text("Chroma Saturation")).changed();
-                changed |= ui.add(egui::Slider::new(&mut params.chroma_luma_scale, 0.0..=1.5).text("Chroma Luma Scale")).changed();
-                changed |= ui.checkbox(&mut params.chroma_blur, "Chroma Blur").changed();
-                changed |= ui.checkbox(&mut params.comb_filter, "Comb Filter").changed();
-                changed |= ui.checkbox(&mut params.phosphor_spread, "Phosphor Spread").changed();
-                ui.indent("phosphor_spread_params", |ui| {
-                    changed |= ui.add(egui::Slider::new(&mut params.phosphor_spread_sigma_x, 0.0..=4.0).text("Spread σ X (src px)")).changed();
-                    changed |= ui.add(egui::Slider::new(&mut params.phosphor_spread_sigma_y, 0.0..=2.0).text("Spread σ Y (src px)")).changed();
-                    changed |= ui.add(egui::Slider::new(&mut params.phosphor_spread_intensity, 0.0..=1.0).text("Spread Intensity")).changed();
-                });
+                match tab {
+                    ShaderUiTab::Crt => render_crt_tab(ui, params, &mut changed),
+                    ShaderUiTab::Lcd => render_lcd_tab(ui, params, &mut changed),
+                }
 
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -245,43 +220,179 @@ pub fn render_shader_ui(ctx: &egui::Context, params: &mut ShaderParams, open: &m
                         *params = ShaderParams::default();
                         changed = true;
                     }
-                    if ui.button("Print Values").clicked() {
-                        println!("--- CRT-Geom-Deluxe Values ---");
-                        println!("CRTgamma           = {:.2}", params.crt_gamma);
-                        println!("monitorgamma       = {:.2}", params.monitor_gamma);
-                        println!("d                  = {:.2}", params.distance);
-                        println!("R                  = {:.2}", params.radius);
-                        println!("cornersize         = {:.3}", params.corner_size);
-                        println!("cornersmooth       = {:.0}", params.corner_smooth);
-                        println!("overscan_x         = {:.0}", params.overscan_x);
-                        println!("overscan_y         = {:.0}", params.overscan_y);
-                        println!("aperture_strength  = {:.2}", params.aperture_strength);
-                        println!("aperture_brightbst = {:.2}", params.aperture_brightboost);
-                        println!("scanline_weight    = {:.2}", params.scanline_weight);
-                        println!("lum                = {:.2}", params.luminance);
-                        println!("CURVATURE          = {:.0}", params.curvature);
-                        println!("SATURATION         = {:.2}", params.saturation);
-                        println!("halation           = {:.2}", params.halation);
-                        println!("rasterbloom        = {:.2}", params.rasterbloom);
-                        println!("blur_width         = {:.1}", params.blur_width);
-                        println!("mask_type          = {:.0}", params.mask_type);
-                        println!("vignette           = {:.2}", params.vignette);
-                        println!("vignette_opacity   = {:.2}", params.vignette_opacity);
-                        println!("phosphor           = {:.2}", params.phosphor);
-                        println!("glow               = {:.2} (effective {:.3})", params.glow, params.glow * 0.1);
-                        println!("glow_width         = {:.2}", params.glow_width);
-                        println!("flicker            = {:.2}", params.flicker);
-                        println!("chrom_aberration   = {:.2}", params.chromatic_aberration);
-                        println!("------------------------------");
-                    }
                     if ui.button("Save to config").clicked() {
                         save_clicked = true;
                     }
                 });
             });
         });
+        ShaderUiResult { changed, save_clicked }
+}
 
-    ShaderUiResult { changed, save_clicked }
+fn render_crt_tab(ui: &mut egui::Ui, params: &mut ShaderParams, changed: &mut bool) {
+                ui.heading("Geometry");
+                *changed |= ui.add(egui::Slider::new(&mut params.curvature, 0.0..=1.0).text("Curvature On/Off")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.distance, 0.1..=3.0).text("Distance")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.radius, 0.5..=10.0).text("Radius")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.corner_size, 0.001..=0.1).text("Corner Size")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.corner_smooth, 100.0..=2000.0).text("Corner Smooth")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.overscan_x, 80.0..=120.0).text("Overscan X %")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.overscan_y, 80.0..=120.0).text("Overscan Y %")).changed();
+
+                ui.separator();
+                ui.heading("Scanlines");
+                *changed |= ui.add(egui::Slider::new(&mut params.scanline_weight, 0.1..=0.5).text("Scanline Weight")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.luminance, 0.0..=1.0).text("Luminance")).changed();
+
+                ui.separator();
+                ui.heading("Shadow Mask");
+                *changed |= ui.add(egui::Slider::new(&mut params.mask_type, 1.0..=3.0).step_by(1.0).text("Mask Type (1=grille 2=slot 3=delta)")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.aperture_strength, 0.0..=1.0).text("Mask Strength")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.aperture_brightboost, 0.0..=1.0).text("Mask Bright Boost")).changed();
+
+                ui.separator();
+                ui.heading("Halation & Bloom");
+                *changed |= ui.add(egui::Slider::new(&mut params.halation, 0.0..=2.0).text("Halation")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.blur_width, 0.2..=3.0).text("Halation Width")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.glow, 0.0..=0.05).text("Glow")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.glow_width, 0.5..=30.0).text("Glow Width")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.rasterbloom, 0.0..=1.0).text("Raster Bloom")).changed();
+
+                ui.separator();
+                ui.heading("Color");
+                ui.label("CRT response curve (voltage -> luminance)");
+                ui.horizontal(|ui| {
+                    *changed |= ui.radio_value(&mut params.crt_curve_mode, 0u32, "Pure power").changed();
+                    *changed |= ui.radio_value(&mut params.crt_curve_mode, 1u32, "Measured (custom)").changed();
+                    *changed |= ui.radio_value(&mut params.crt_curve_mode, 2u32, "Measured (locked)").changed();
+                });
+                let alpha1_label = if params.crt_curve_mode == 1 {
+                    "alpha1 (CRT Gamma, high-side power)"
+                } else {
+                    "CRT Gamma (input response)"
+                };
+                ui.add_enabled_ui(params.crt_curve_mode != 2, |ui| {
+                    *changed |= ui.add(egui::Slider::new(&mut params.crt_gamma, 1.8..=3.2).text(alpha1_label)).changed();
+                });
+                ui.add_enabled_ui(params.crt_curve_mode == 1, |ui| {
+                    *changed |= ui.add(egui::Slider::new(&mut params.crt_alpha2, 2.0..=4.0).text("alpha2 (low-side power)")).changed();
+                    *changed |= ui.add(egui::Slider::new(&mut params.crt_black_lift, 0.0..=0.05).text("Black lift b (brightness)")).changed();
+                });
+                *changed |= ui.add(egui::Slider::new(&mut params.saturation, 0.0..=2.0).text("Saturation")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.tone_knee, 0.5..=1.0).text("Tone Knee (highlight rolloff)")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.scanline_floor, 0.0..=0.3).text("Scanline Floor (gap fill)")).changed();
+
+                ui.separator();
+                ui.heading("Effects");
+                *changed |= ui.add(egui::Slider::new(&mut params.vignette, 0.0..=3.0).text("Vignette Size")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.vignette_opacity, 0.0..=1.0).text("Vignette Opacity")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.phosphor, 0.0..=0.95).text("Phosphor Persistence")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.flicker, 0.0..=1.0).text("CRT Flicker")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.chromatic_aberration, 0.0..=1.0).text("Chromatic Aberration")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.v_roll, 0.0..=1.0).text("V-Roll Bar")).changed();
+
+                ui.separator();
+                ui.heading("NTSC Signal Chain");
+                *changed |= ui.add(egui::Slider::new(&mut params.white_preservation, 0.0..=1.0).text("White Preservation (1=clean, 0=NTSC)")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.chroma_saturation, 0.0..=6.0).text("Chroma Saturation")).changed();
+                *changed |= ui.add(egui::Slider::new(&mut params.chroma_luma_scale, 0.0..=1.5).text("Chroma Luma Scale")).changed();
+                *changed |= ui.checkbox(&mut params.chroma_blur, "Chroma Blur").changed();
+                *changed |= ui.checkbox(&mut params.comb_filter, "Comb Filter").changed();
+                *changed |= ui.checkbox(&mut params.phosphor_spread, "Phosphor Spread").changed();
+                ui.indent("phosphor_spread_params", |ui| {
+                    *changed |= ui.add(egui::Slider::new(&mut params.phosphor_spread_sigma_x, 0.0..=4.0).text("Spread σ X (src px)")).changed();
+                    *changed |= ui.add(egui::Slider::new(&mut params.phosphor_spread_sigma_y, 0.0..=2.0).text("Spread σ Y (src px)")).changed();
+                    *changed |= ui.add(egui::Slider::new(&mut params.phosphor_spread_intensity, 0.0..=1.0).text("Spread Intensity")).changed();
+                });
+}
+
+fn render_lcd_tab(ui: &mut egui::Ui, params: &mut ShaderParams, changed: &mut bool) {
+    ui.heading("Panel");
+    *changed |= ui.checkbox(&mut params.lcd_invert, "Invert (F5)").changed();
+    *changed |= ui
+        .add(egui::Slider::new(&mut params.lcd_corner_radius_px, 0.0..=40.0).text("Corner radius (px)"))
+        .changed();
+
+    ui.horizontal(|ui| {
+        ui.label("Background:");
+        if color_edit_srgb_f32(ui, &mut params.lcd_bg_color) {
+            *changed = true;
+        }
+        ui.label("Foreground:");
+        if color_edit_srgb_f32(ui, &mut params.lcd_fg_color) {
+            *changed = true;
+        }
+        if ui.button("Reset").clicked() {
+            params.lcd_bg_color = [88.0 / 255.0, 105.0 / 255.0, 50.0 / 255.0];
+            params.lcd_fg_color = [35.0 / 255.0,  47.0 / 255.0, 47.0 / 255.0];
+            *changed = true;
+        }
+    });
+
+    ui.separator();
+    ui.heading("Pixel shape");
+    let resp = ui.add(
+        egui::Slider::new(&mut params.lcd_contrast, 0.0..=4.0)
+            .fixed_decimals(2)
+            .text("Contrast"),
+    );
+    *changed |= resp.changed();
+    resp.on_hover_text("Steepens the dot-coverage curve. 1.0 = default; >1 = harder edges.");
+
+    let resp = ui.add(
+        egui::Slider::new(&mut params.lcd_threshold, 0.0..=1.0)
+            .fixed_decimals(3)
+            .text("Threshold"),
+    );
+    *changed |= resp.changed();
+    resp.on_hover_text("Coverage cutoff. Lower = thicker dots; higher = thinner.");
+
+    ui.separator();
+    ui.heading("Persistence");
+    *changed |= ui
+        .add(egui::Slider::new(&mut params.lcd_ghost_decay, 0.0..=0.99).text("Ghost trail"))
+        .changed();
+
+    ui.separator();
+    ui.heading("Vignette");
+    *changed |= ui.add(egui::Slider::new(&mut params.lcd_vignette_strength, 0.0..=1.0).text("Strength")).changed();
+    *changed |= ui.add(egui::Slider::new(&mut params.lcd_vignette_inner, 0.0..=1.5).text("Inner radius")).changed();
+    *changed |= ui.add(egui::Slider::new(&mut params.lcd_vignette_outer, 0.1..=2.0).text("Outer radius")).changed();
+    ui.horizontal(|ui| {
+        ui.label("Edge tint:");
+        let mut tint8 = [
+            (params.lcd_vignette_tint[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (params.lcd_vignette_tint[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (params.lcd_vignette_tint[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+        ];
+        if ui.color_edit_button_srgb(&mut tint8).changed() {
+            params.lcd_vignette_tint = [
+                tint8[0] as f32 / 255.0,
+                tint8[1] as f32 / 255.0,
+                tint8[2] as f32 / 255.0,
+            ];
+            *changed = true;
+        }
+    });
+}
+
+// Helper: egui colour picker that operates on `[f32; 3]` sRGB triples.
+fn color_edit_srgb_f32(ui: &mut egui::Ui, c: &mut [f32; 3]) -> bool {
+    let mut tint8 = [
+        (c[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (c[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (c[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+    ];
+    if ui.color_edit_button_srgb(&mut tint8).changed() {
+        *c = [
+            tint8[0] as f32 / 255.0,
+            tint8[1] as f32 / 255.0,
+            tint8[2] as f32 / 255.0,
+        ];
+        true
+    } else {
+        false
+    }
 }
 
 #[derive(Default, Clone, Copy)]

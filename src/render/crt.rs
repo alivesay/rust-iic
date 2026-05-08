@@ -1556,16 +1556,10 @@ impl CrtRenderer {
             curvature: self.curvature_cache.get(),
         };
         queue.write_buffer(&self.chroma_uniform_buffer, 0, bytemuck::bytes_of(&chroma_uniforms));
-        // The chroma+comb pass runs whenever either sub-effect is enabled.
-        // Composite NTSC decoding now happens on the CPU, so there is no
-        // separate strength mix.  Mono mode skips this pass entirely (its
-        // gaussian fallback is gated separately by `run_ntsc` below).
+
         let chroma_pass = params.chroma_blur || params.comb_filter;
         self.chroma_pass_active.set(chroma_pass);
-        // Phosphor spread is only meaningful in mono mode (it widens the
-        // beam spot to simulate phosphor bleed on text/hires).  In color
-        // mode the same horizontal blur smears NTSC chroma artifacts and
-        // produces wrong colors, so force it off.
+
         let mono = self.is_mono.get() > 0.5;
         let phosphor_spread_active = params.phosphor_spread && mono;
         self.phosphor_spread_on.set(phosphor_spread_active);
@@ -1590,6 +1584,8 @@ impl CrtRenderer {
             dst_w, dst_h,
             bar_h,
             source_width, source_height,
+            overscan_x_px: _,
+            overscan_y_px: _,
         } = rect;
         let sw = surface_w as f64;
         let sh = surface_h as f64;
@@ -1640,7 +1636,6 @@ impl CrtRenderer {
     }
 
     // Update power-on elapsed time for CRT startup sync effect.
-    // The effect runs for ~0.8 seconds then fades out.
     pub fn update_power_on_time(&self, queue: &wgpu::Queue, elapsed_secs: f32) {
         // Write to extra.z (offset 32 + 8 = 40)
         queue.write_buffer(&self.uniform_buffer, 40, bytemuck::bytes_of(&elapsed_secs));
@@ -1648,9 +1643,6 @@ impl CrtRenderer {
         self.power_on_time_cache.set(elapsed_secs);
     }
 
-    // Compute the content rect and bar boundary in intermediate texture UV space.
-    // The scaling renderer maps the pixel buffer to the surface with aspect-ratio
-    // preservation, creating pillarbox/letterbox bars.
     fn compute_uniforms(
         surface_w: u32, surface_h: u32,
         buffer_w: u32, buffer_h: u32,

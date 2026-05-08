@@ -20,6 +20,9 @@ pub struct ContentRect {
     pub bar_h: u32,
     pub source_width: f32,
     pub source_height: f32,
+
+    pub overscan_x_px: u32,
+    pub overscan_y_px: u32,
 }
 
 pub trait PostProcessor {
@@ -52,6 +55,9 @@ pub trait PostProcessor {
 
     // Update shader-specific parameters.
     fn update_shader_params(&self, queue: &wgpu::Queue, params: &shader_ui::ShaderParams);
+
+    // Toggle LCD invert.
+    fn set_invert(&self, _queue: &wgpu::Queue, _invert: bool) {}
 
     // Clear the intermediate texture to black before rendering.
     fn clear_intermediate(&self, encoder: &mut wgpu::CommandEncoder);

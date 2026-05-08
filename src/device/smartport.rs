@@ -32,8 +32,7 @@ use super::unidisk::UniDisk35;
 // Block size for ProDOS/SmartPort devices
 pub const BLOCK_SIZE: usize = 512;
 
-// Maximum supported blocks (32MB limit for ProDOS)
-pub const MAX_BLOCKS: u32 = 65535;
+pub const MAX_BLOCKS: u32 = 65536;
 
 // SmartPort block device (hard drive image)
 #[derive(Default)]
