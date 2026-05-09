@@ -180,7 +180,37 @@ impl SmartPortDevice {
         Ok(())
     }
 
-    // Convenience alias: true when a disk/image is loaded with blocks available
+    pub fn prodos_volume_name(&mut self) -> Option<String> {
+        if !self.enabled || self.block_count <= 2 {
+            return None;
+        }
+
+        // ProDOS volume directory header lives in block 2.
+        let mut block = [0u8; BLOCK_SIZE];
+        self.read_block(2, &mut block).ok()?;
+
+        let name_meta = block[4];
+        let storage_type = name_meta >> 4;
+        let name_len = (name_meta & 0x0F) as usize;
+
+        // Volume directory header should have storage type 0xF and name 1..15 chars.
+        if storage_type != 0x0F || name_len == 0 || name_len > 15 {
+            return None;
+        }
+
+        let mut name = String::with_capacity(name_len);
+        for &b in &block[5..5 + name_len] {
+            let c = b & 0x7F;
+            if (0x20..=0x7E).contains(&c) {
+                name.push(c as char);
+            } else {
+                name.push('?');
+            }
+        }
+
+        Some(name)
+    }
+
     pub fn has_disk(&self) -> bool {
         self.enabled && self.block_count > 0
     }
@@ -292,8 +322,6 @@ pub struct SmartPort {
     // non-SmartPort device (e.g. 2 for two internal 5.25" drives).
     // Our local unit 1 (floppy) = ROM unit (unit_offset + 1).
     unit_offset: u8,
-    // How many devices have been initialized via INIT commands
-    devices_initialized: u8,
     // DEST from the current command (used as SRC in responses)
     current_dest: u8,
     cmd_count: u32,
@@ -347,7 +375,6 @@ impl SmartPort {
             response_waiting_for_req_low: false,
             req_high: true,
             unit_offset: 0,
-            devices_initialized: 0,
             current_dest: 0,
             cmd_count: 0,
             debug: false,
@@ -363,13 +390,13 @@ impl SmartPort {
         self.floppies[slot].load_disk(path)
     }
 
-    // Load an HDV hard-drive image into the next free slot (units 2+)
-    pub fn load_hdv(&mut self, path: &str) -> Result<(), String> {
+    // Load an HDV hard-drive image into the next free slot.
+    pub fn load_hdv(&mut self, path: &str) -> Result<usize, String> {
         for (i, dev) in self.hdv_devices.iter_mut().enumerate() {
             if !dev.has_disk() {
                 dev.load(path)?;
-                log::info!("HDV loaded as SmartPort unit {} (hdv_devices[{}])", i + 2, i);
-                return Ok(());
+                log::info!("HDV loaded as SmartPort hdv_devices[{}]", i);
+                return Ok(i);
             }
         }
         Err("No free HDV device slots".to_string())
@@ -441,7 +468,6 @@ impl SmartPort {
         self.header_count = 0;
         self.bsy = true;
         self.unit_offset = 0;
-        self.devices_initialized = 0;
         self.current_dest = 0;
         self.response_delay_cycles = 0;
         self.response_waiting_for_req_low = false;
@@ -715,12 +741,14 @@ impl SmartPort {
     fn handle_status(&mut self, decoded: &[u8]) {
         let unit = if decoded.len() > 1 { decoded[1] } else { 0 };
         let code = if decoded.len() > 4 { decoded[4] } else { 0 };
-        log::debug!("SmartPort: STATUS unit={} code={:02X}", unit, code);
+        // Route by chain-position dest when host sets it (A2Desktop), so each
+        // physical device on the chain gets its own DIB / status response.
+        let route_unit = if self.current_dest > 0 { self.current_dest } else { unit };
 
         if unit == 0 && code == 0 {
             self.generate_device_count_response();
         } else {
-            self.generate_status_response_for_unit(unit);
+            self.generate_status_response_for_unit(route_unit, code);
         }
     }
 
@@ -730,21 +758,20 @@ impl SmartPort {
             (decoded[4] as u32) | ((decoded[5] as u32) << 8) | ((decoded[6] as u32) << 16)
         } else { 0 };
 
-        // Units 2+ are HDV (get_device handles mapping)
-        if let Some(dev) = self.get_device(unit) {
+        // Route by chain-position dest when set
+        let route_unit = if self.current_dest > 0 { self.current_dest } else { unit };
+
+        if let Some(dev) = self.get_device(route_unit) {
             let mut payload = [0u8; 512];
             match dev.read_block(block, &mut payload) {
                 Ok(()) => {
                     self.build_response(0x00, 0x01, 0x02, 0x00, &payload);
-                    // log::debug!("SmartPort: READ_BLOCK #{} unit={} OK", block, unit);
                 }
                 Err(_e) => {
-                    // log::warn!("SmartPort: READ_BLOCK #{} unit={} error: {}", block, unit, e);
                     self.generate_error_response(0x27);
                 }
             }
         } else {
-            // log::warn!("SmartPort: READ_BLOCK to invalid unit {}", unit);
             self.generate_error_response(0x28);
         }
     }
@@ -755,10 +782,11 @@ impl SmartPort {
             (decoded[4] as u32) | ((decoded[5] as u32) << 8) | ((decoded[6] as u32) << 16)
         } else { 0 };
 
+        let route_unit = if self.current_dest > 0 { self.current_dest } else { unit };
         if decoded.len() >= 7 + 512 {
             let mut buf = [0u8; 512];
             buf.copy_from_slice(&decoded[7..7 + 512]);
-            if let Some(dev) = self.get_device(unit) {
+            if let Some(dev) = self.get_device(route_unit) {
                 match dev.write_block(block, &buf) {
                     Ok(()) => {
                         log::debug!("SmartPort: WRITE_BLOCK #{} unit={} OK", block, unit);
@@ -781,13 +809,17 @@ impl SmartPort {
 
     fn handle_init(&mut self, decoded: &[u8]) {
         let raw_unit = if decoded.len() > 1 { decoded[1] } else { 0 };
-        log::debug!("SmartPort: INIT raw_unit={} (current offset={}, initialized={})",
-            raw_unit, self.unit_offset, self.devices_initialized);
+
         if self.unit_offset == 0 && raw_unit > 0 {
-            self.unit_offset = raw_unit;
+            self.unit_offset = raw_unit - 1;
         }
-        self.devices_initialized += 1;
-        let is_last = self.devices_initialized >= self.device_count();
+
+        let next_raw_unit = raw_unit.saturating_add(1);
+        let next_local_unit = next_raw_unit.saturating_sub(self.unit_offset as u8);
+        let is_last = self.get_device(next_local_unit).is_none();
+        
+        log::debug!("SmartPort: INIT raw_unit={} (offset={}, next_local={}), is_last={}",
+            raw_unit, self.unit_offset, next_local_unit, is_last);
         self.generate_init_response(raw_unit, is_last);
     }
 
@@ -975,25 +1007,63 @@ impl SmartPort {
 
     fn generate_device_count_response(&mut self) {
         let count = self.device_count();
-        let payload = [count, 0x00, 0x00, 0x00];
+        // mii_emu / A2Desktop convention: STATUS unit=0 statcode=0
+        // returns drive count (NOT a status byte) followed by
+        // {0x00, 0x01, 0x13}. The Apple IIc reference says this should
+        // be a status byte, but A2Desktop expects a drive count.
+        let payload = [count, 0x00, 0x01, 0x13];
         self.build_response(0x00, self.current_dest, 0x01, 0x00, &payload);
         log::debug!("SmartPort: device count = {}", count);
     }
 
-    fn generate_status_response_for_unit(&mut self, unit: u8) {
+    fn generate_status_response_for_unit(&mut self, unit: u8, code: u8) {
         if let Some(dev) = self.get_device(unit) {
             let blocks = if dev.has_disk() { dev.block_count } else { 0 };
             // General status byte: bit7=block, bit6=write, bit5=read,
             // bit4=online, bit3=format (same as SmartportSD 0xF8)
             let info: u8 = 0xF8;
-            let payload = [
-                info,
-                (blocks & 0xFF) as u8,
-                ((blocks >> 8) & 0xFF) as u8,
-                ((blocks >> 16) & 0xFF) as u8,
-            ];
-            self.build_response(0x00, self.current_dest, 0x01, 0x00, &payload);
-            log::debug!("SmartPort: STATUS unit={} blocks={} info=${:02X}", unit, blocks, info);
+            match code {
+                0x03 => {
+                    // Device Info Block
+                    let mut payload = [0u8; 25];
+                    payload[0] = info;
+                    payload[1] = (blocks & 0xFF) as u8;
+                    payload[2] = ((blocks >> 8) & 0xFF) as u8;
+                    payload[3] = ((blocks >> 16) & 0xFF) as u8;
+                    // Keep per-unit names unique so desktop shells don't
+                    // report duplicate volume names for multi-HDV setups.
+                    let name: &[u8] = match unit {
+                        1 => b"RUSTIIC HDV1",
+                        2 => b"RUSTIIC HDV2",
+                        _ => b"RUSTIIC HDV",
+                    };
+
+                    payload[4] = name.len() as u8;
+                    payload[5..5 + name.len()].copy_from_slice(name);
+                    // Pad remaining name bytes with spaces (offsets 5+len .. 21).
+                    for slot in &mut payload[5 + name.len()..21] {
+                        *slot = b' ';
+                    }
+                    payload[21] = 0x02; // device type: ProFile-style hard disk
+                    payload[22] = 0x00; // device subtype
+                    payload[23] = 0x01; // version low
+                    payload[24] = 0x00; // version high
+                    self.build_response(0x00, self.current_dest, 0x01, 0x00, &payload);
+                }
+                _ => {
+                    let payload = [
+                        info,
+                        (blocks & 0xFF) as u8,
+                        ((blocks >> 8) & 0xFF) as u8,
+                        ((blocks >> 16) & 0xFF) as u8,
+                    ];
+                    self.build_response(0x00, self.current_dest, 0x01, 0x00, &payload);
+                    log::debug!(
+                        "SmartPort: STATUS unit={} code={:02X} blocks={} info=${:02X}",
+                        unit, code, blocks, info
+                    );
+                }
+            }
         } else {
             log::warn!("SmartPort: STATUS for invalid unit {}", unit);
             self.generate_error_response(0x28);
@@ -1001,11 +1071,19 @@ impl SmartPort {
     }
 
     fn generate_init_response(&mut self, unit: u8, is_last: bool) {
-        let payload = [0x00];
+        let response_unit = if is_last { unit } else { unit.saturating_add(1) };
+        let payload = [if is_last { 0x00 } else { response_unit }];
         // SmartportSD: status=0x00 for "more devices", 0x7F for "last device"
         let status = if is_last { 0x7F } else { 0x00 };
-        self.build_response(0x00, unit, 0x01, status, &payload);
-        log::debug!("SmartPort: INIT response unit={} is_last={} ({} bytes)", unit, is_last, self.resp_buffer.len());
+        self.build_response(0x00, response_unit, 0x01, status, &payload);
+        log::debug!(
+            "SmartPort: INIT response unit={} next={} payload={} is_last={} ({} bytes)",
+            unit,
+            response_unit,
+            payload[0],
+            is_last,
+            self.resp_buffer.len()
+        );
     }
 
     fn generate_success_response(&mut self) {

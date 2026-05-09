@@ -240,12 +240,20 @@ fn main() -> Result<(), Error> {
             }
         }
 
-        // Load hard drive images (HDV) into SmartPort device chain
+        // Load hard drive images (HDV) into SmartPort device chain.
         if let Some(path) = &args.hdv {
             match cpu.bus.iou.iwm.smartport.load_hdv(path) {
-                Ok(()) => {
-                    let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[0];
-                    println!("disk  {:>12} {:>8}    {} ({} blocks)", "HDV_1", "LOADED", path, dev.block_count);
+                Ok(slot) => {
+                    let dev = &mut cpu.bus.iou.iwm.smartport.hdv_devices[slot];
+                    let vol = dev.prodos_volume_name().unwrap_or_else(|| "<unknown>".to_string());
+                    println!(
+                        "disk  {:>12} {:>8}    {} ({} blocks, vol='{}')",
+                        "HDV_1",
+                        "LOADED",
+                        path,
+                        dev.block_count,
+                        vol
+                    );
                 }
                 Err(e) => {
                     eprintln!("disk  {:>12} {:>8}    {}: {}", "HDV_1", "ERROR", path, e);
@@ -255,9 +263,17 @@ fn main() -> Result<(), Error> {
 
         if let Some(path) = &args.hdv2 {
             match cpu.bus.iou.iwm.smartport.load_hdv(path) {
-                Ok(()) => {
-                    let dev = &cpu.bus.iou.iwm.smartport.hdv_devices[1];
-                    println!("disk  {:>12} {:>8}    {} ({} blocks)", "HDV_2", "LOADED", path, dev.block_count);
+                Ok(slot) => {
+                    let dev = &mut cpu.bus.iou.iwm.smartport.hdv_devices[slot];
+                    let vol = dev.prodos_volume_name().unwrap_or_else(|| "<unknown>".to_string());
+                    println!(
+                        "disk  {:>12} {:>8}    {} ({} blocks, vol='{}')",
+                        "HDV_2",
+                        "LOADED",
+                        path,
+                        dev.block_count,
+                        vol
+                    );
                 }
                 Err(e) => {
                     eprintln!("disk  {:>12} {:>8}    {}: {}", "HDV_2", "ERROR", path, e);
