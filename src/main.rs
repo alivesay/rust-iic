@@ -295,8 +295,6 @@ fn main() -> Result<(), Error> {
                 let port = handle.addr.port();
                 println!("bbs   {:>12} {:>8}    {}", "BBS", "ONLINE", handle.addr);
 
-                // Boot the terminal app straight from RAM so the floppy
-                // drives stay free for whatever else the user mounted.
                 bbs::jumpstart_term(&mut cpu);
                 println!("bbs   {:>12} {:>8}    rustiic_term @ $0801", "TERM", "RAMBOOT");
 
@@ -334,7 +332,7 @@ fn main() -> Result<(), Error> {
     run_gui(cpu, &args, config, audio_controls, bbs_handle)
 }
 
-/// Run emulator in headless (no video) mode.
+// Run emulator in headless (no video) mode.
 fn run_headless(mut cpu: Cpu) {
     loop {
         cpu.tick();
