@@ -40,6 +40,19 @@ struct Cli {
     // Volume number (1..254)
     #[arg(long, default_value = "254")]
     volume: u8,
+
+    // Optional Applesoft source (.bas) to ship as HELLO instead of the
+    // default `PRINT CHR$(4)"BRUN <name>"` one-liner. When set, the engine
+    // binary is saved as a BLOAD'able file (not auto-BRUN'd); the BASIC
+    // program owns boot.
+    #[arg(long)]
+    basic: Option<PathBuf>,
+
+    // Optional cart blob (16 KB; produced by `mkcart`). When set, also
+    // bsaved on disk as CART at $8000 so the BASIC HELLO can do
+    // BLOAD CART,A$8000 before calling cart_load.
+    #[arg(long)]
+    cart: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -75,8 +88,24 @@ fn main() -> anyhow::Result<()> {
     fs.bsave(&cli.name, &bin, Some(load_addr as usize), None)
         .map_err(|e| anyhow::anyhow!("bsave {}: {}", cli.name, e))?;
 
-    // Save Applesoft HELLO that BRUNs the binary on boot.
-    let hello = build_hello_brun(&cli.name);
+    // Optional cart blob.
+    if let Some(cart_path) = &cli.cart {
+        let cart = std::fs::read(cart_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {}", cart_path.display(), e))?;
+        // Cart base $4000 keeps the full 16 KB below DOS 3.3 ($9600+).
+        fs.bsave("CART", &cart, Some(0x4000), None)
+            .map_err(|e| anyhow::anyhow!("bsave CART: {}", e))?;
+    }
+
+    // HELLO source: either the user's BAS or our default BRUN one-liner.
+    let hello = match &cli.basic {
+        Some(path) => {
+            let src = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("read {}: {}", path.display(), e))?;
+            tokenize_applesoft(&src)?
+        }
+        None => build_hello_brun(&cli.name),
+    };
     fs.save("HELLO", &hello, ItemType::ApplesoftTokens, None)
         .map_err(|e| anyhow::anyhow!("save HELLO: {}", e))?;
 
@@ -84,13 +113,22 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("save {}: {}", cli.output.display(), e))?;
 
     println!(
-        "mkdisk: wrote {} ({} byte binary @ ${:04X}, BRUN {})",
+        "mkdisk: wrote {} ({} byte binary @ ${:04X}, {})",
         cli.output.display(),
         bin.len(),
         load_addr,
-        cli.name
+        match &cli.basic {
+            Some(p) => format!("BASIC HELLO from {}", p.display()),
+            None => format!("BRUN {}", cli.name),
+        }
     );
     Ok(())
+}
+
+fn tokenize_applesoft(src: &str) -> anyhow::Result<Vec<u8>> {
+    let mut tok = a2kit::lang::applesoft::tokenizer::Tokenizer::new();
+    tok.tokenize(src, 0x0801)
+        .map_err(|e| anyhow::anyhow!("applesoft tokenize: {}", e))
 }
 
 fn parse_u16(s: &str) -> Option<u16> {

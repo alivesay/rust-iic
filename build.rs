@@ -12,7 +12,7 @@ fn main() {
     fs::create_dir_all(build_dir).expect("Failed to create build/asm directory");
 
     // Top-level modules: asm/<name>.s + asm/<name>.cfg -> build/asm/<name>.bin
-    let mut asm_sources: Vec<(PathBuf, PathBuf)> = fs::read_dir(asm_dir)
+    let asm_sources: Vec<(PathBuf, PathBuf)> = fs::read_dir(asm_dir)
         .expect("Failed to read asm directory")
         .filter_map(|entry| {
             let path = entry.ok()?.path();
@@ -26,27 +26,11 @@ fn main() {
         .collect();
 
     // Program projects: asm/programs/<name>/<name>.s + asm/programs/<name>/<name>.cfg
-    // -> build/asm/<name>.bin (same flat output dir as top-level modules).
-    let programs_dir = asm_dir.join("programs");
-    if programs_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&programs_dir) {
-            for entry in entries.flatten() {
-                let dir = entry.path();
-                if !dir.is_dir() {
-                    continue;
-                }
-                let name = match dir.file_name().and_then(|s| s.to_str()) {
-                    Some(n) => n.to_string(),
-                    None => continue,
-                };
-                let src = dir.join(format!("{name}.s"));
-                let cfg = dir.join(format!("{name}.cfg"));
-                if src.is_file() && cfg.is_file() {
-                    asm_sources.push((src, cfg));
-                }
-            }
-        }
-    }
+    // -> build/asm/<name>.bin. These need to be linked alongside lib/*.o, which
+    // build.rs doesn't model (only top-level .s files are single-object). The
+    // asm/Makefile already builds them correctly, so leave them to `make`
+    // (build.rs will warn if a referenced .bin is missing at compile time).
+    let _ = asm_dir.join("programs"); // intentionally not scanned
 
     if asm_sources.is_empty() {
         println!("cargo:warning=No assembly source files found in asm/");
@@ -61,6 +45,10 @@ fn main() {
 
         println!("cargo:rerun-if-changed={}", source.display());
         println!("cargo:rerun-if-changed={}", cfg_file.display());
+        // Track the output binary too: if `make clean` wipes build/asm/, this
+        // forces build.rs to re-run and rebuild rather than letting a stale
+        // include_bytes!() fail with "no such file".
+        println!("cargo:rerun-if-changed={}", bin_file.display());
 
         let needs_rebuild = match (mtime(&bin_file), mtime(source), mtime(cfg_file)) {
             (Some(b), Some(s), c_opt) => {

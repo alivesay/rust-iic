@@ -22,12 +22,21 @@
 		.include	"macros.inc"
 		.include	"hgr.inc"
 
+		.import	hgr_lo
+		.import	hgr_hi
+		.include	"zp.inc"
+		.include	"input.inc"
+		.include	"jumptable.inc"
+
 		.segment "GAME"
 
 ; ----- zero page -------------------------------------------------------------
-ZP_PTR		=	$06
-ZP_PTR_HI	=	$07
-ZP_TMP		=	$08
+; Use the engine's reserved scratch slots from lib/zp.inc rather than
+; hand-rolled equates. ENG_PTR / ENG_PTR_HI / ENG_TMP all live in the
+; $06-$0F engine scratch window.
+ZP_PTR		=	ENG_PTR		; $06
+ZP_PTR_HI	=	ENG_PTR_HI	; $07
+ZP_TMP		=	ENG_TMP		; $0A
 
 ; ----- constants -------------------------------------------------------------
 HGR_BASE	=	$2000
@@ -52,6 +61,7 @@ INIT_Y		=	96
 		LDX	#$FF
 		TXS
 
+		JSR	jumptable_install	; install $0300 ABI stubs
 		JSR	hgr_init
 		JSR	map_fill
 
@@ -68,7 +78,7 @@ INIT_Y		=	96
 		JSR	draw_sprite
 
 main_loop:
-		KBD_READ
+		JSR	input_poll
 		BEQ	main_loop
 
 		CMP	#KEY_ESC
@@ -413,7 +423,5 @@ old_x:		.byte	INIT_X
 old_y:		.byte	INIT_Y
 
 ; ============================================================================
-; HGR row -> address tables (see lib/hgr.inc for the math).
+; HGR row tables now live in lib/hgr.s (exported as hgr_lo / hgr_hi).
 ; ============================================================================
-		.align	256
-		HGR_ROW_TABLES
